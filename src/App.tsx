@@ -1,6 +1,20 @@
 import React, { useState, useEffect } from 'react';
+import {
+  notificaDataService,
+  loadNotificaDatabase,
+  saveNotificaDatabase,
+  NotificaDatabase,
+  emptyDatabase
+} from './services/notificaDataService';
 
-const DB_KEY = 'administra_csb_local_v1';
+// ============================================================================
+// NOTIFICA CSB — AVISO DE TRANSIÇÃO E ARQUITETURA DE DADOS
+// 1. Projeto totalmente desvinculado do Supabase anterior; nenhum banco remoto ativo.
+// 2. Login e autenticação desativados: o sistema abre diretamente.
+// 3. Camada de dados local temporária separada das telas (notificaDataService).
+// 4. Cadastros iniciam vazios (sem dados fictícios).
+// 5. O sistema não deve ser declarado pronto para produção nesta etapa.
+// ============================================================================
 
 export const SURH_PRODUCTS = [
   { code: '1.3', title: 'Cadastro de informações de recursos hídricos em sistemas oficiais (ex.: CNARH e SNISB)', points: 3, level: 1 },
@@ -174,26 +188,9 @@ const modules: Record<string, ModuleConfig> = {
   }
 };
 
-interface DatabaseState {
-  empreendedores: any[];
-  barragens: any[];
-  rts: any[];
-  revisoes: any[];
-  usuarios: any[];
-  portarias: any[];
-  produtividades: any[];
-  municipios: any[];
-}
-
 export default function App() {
-  const [db, setDb] = useState<DatabaseState>(() => {
-    try {
-      const saved = JSON.parse(localStorage.getItem(DB_KEY) || '{}');
-      return { ...emptyData, ...saved };
-    } catch {
-      return { ...emptyData };
-    }
-  });
+  // Acesso direto sem login: o estado inicial carrega diretamente da camada de serviço local
+  const [db, setDb] = useState<NotificaDatabase>(() => loadNotificaDatabase());
 
   const [activeView, setActiveView] = useState('home');
   const [menuOpen, setMenuOpen] = useState(false);
@@ -212,8 +209,9 @@ export default function App() {
   const [portariaModalIndex, setPortariaModalIndex] = useState<number | null | 'new'>(null);
   const [portariaModalRecord, setPortariaModalRecord] = useState<any>({});
 
+  // Persistência local desacoplada das telas (preparada para futura substituição por Supabase)
   useEffect(() => {
-    localStorage.setItem(DB_KEY, JSON.stringify(db));
+    saveNotificaDatabase(db);
   }, [db]);
 
   const showToast = (message: string) => {
@@ -235,7 +233,7 @@ export default function App() {
   // General Collection Modal
   const handleOpenRecordModal = (key: string, index: number | null = null) => {
     const list = db[key as keyof typeof db] || [];
-    const record = index === null ? {} : { ...list[index] };
+    const record = index === null ? {} : { ...(list[index] as any) };
     setModalConfig({ key, record, index });
   };
 
@@ -281,7 +279,7 @@ export default function App() {
 
   const handleArchiveRecord = (key: string, index: number) => {
     const list = [...(db[key as keyof typeof db] || [])];
-    const record = list[index];
+    const record: any = list[index];
     const label = record.nome || record.login || record.nomeFantasia || 'este registro';
     if (!confirm(`Inativar “${label}”? O registro será mantido na base.`)) return;
 
@@ -306,7 +304,7 @@ export default function App() {
     const kind = String(formData.get('kind') || 'scored');
     const serverName = String(formData.get('serverName') || '').trim();
     const date = String(formData.get('date') || '');
-    const prior = prodModalIndex === 'new' ? {} : db.produtividades[prodModalIndex as number];
+    const prior: any = prodModalIndex === 'new' ? {} : db.produtividades[prodModalIndex as number] || {};
 
     if (kind === 'extra') {
       const requestedPoints = Number(formData.get('requestedPoints') || 0);
@@ -402,8 +400,8 @@ export default function App() {
 
   const handleReviewExtra = (index: number, approve: boolean) => {
     const list = [...db.produtividades];
-    const record = list[index];
-    if (!record || record.kind !== 'extra' || record.extraStatus !== 'Pendente') return;
+    const record: any = list[index];
+    if (!record || record.kind !== 'extra' || (record.extraStatus !== 'Pendente' && record.extraStatus !== 'Aguardando validação')) return;
 
     const coordinator = prompt('Nome do coordenador responsável pela decisão:');
     if (!coordinator || !coordinator.trim()) {
@@ -489,7 +487,7 @@ export default function App() {
   const handleSavePortaria = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
-    const prior = portariaModalIndex === 'new' ? {} : db.portarias[portariaModalIndex as number];
+    const prior: any = portariaModalIndex === 'new' ? {} : db.portarias[portariaModalIndex as number] || {};
 
     const secretarySigned = formData.get('secretarySigned') === 'on';
     const extractPublished = formData.get('extractPublished') === 'on';
@@ -570,8 +568,8 @@ export default function App() {
             <div className="logo">CSB</div>
             <div>
               <h1>
-                ADMINISTRA<br />
-                <span>BARRAGENS</span>
+                NOTIFICA<br />
+                <span>CSB</span>
               </h1>
               <small>SEMA/MT · SURH · CSB</small>
             </div>
@@ -580,11 +578,11 @@ export default function App() {
 
         <div className="userbox">
           <div className="avatar" id="sideAvatar">
-            {db.usuarios[0]?.nome?.charAt(0) || '?'}
+            {db.usuarios[0]?.nome?.charAt(0) || 'N'}
           </div>
           <div>
-            <strong id="sideName">{db.usuarios[0]?.nome || 'Perfil local não definido'}</strong>
-            <small id="sideRole">{db.usuarios[0]?.papel || 'Protótipo local'}</small>
+            <strong id="sideName">{db.usuarios[0]?.nome || 'Acesso Direto'}</strong>
+            <small id="sideRole">{db.usuarios[0]?.papel || 'Ambiente Notifica CSB'}</small>
           </div>
         </div>
 
@@ -692,7 +690,7 @@ export default function App() {
         </nav>
 
         <div className="sidefoot">
-          Administra como <b>cadastro central</b>
+          Notifica CSB · <b>SEMA/MT</b>
           <br />
           Versão local · dados neste navegador
         </div>
@@ -719,7 +717,7 @@ export default function App() {
               <i /> DADOS LOCAIS · SEM SINCRONIZAÇÃO
             </span>
             <span className="topname" id="topName">
-              {db.usuarios[0]?.nome || 'Perfil não configurado'}
+              {db.usuarios[0]?.nome || 'Acesso liberado (sem login)'}
             </span>
           </div>
         </header>
@@ -730,10 +728,10 @@ export default function App() {
             <div>
               <div className="pagehead">
                 <div>
-                  <div className="eyebrow">Gestão central · SURH · CSB</div>
-                  <h2>Administra Barragens</h2>
+                  <div className="eyebrow">Gestão e Notificações · SURH · CSB</div>
+                  <h2>Notifica CSB</h2>
                   <p>
-                    Base central de cadastros, tramitações e produtividade da Coordenadoria de
+                    Base de cadastros, notificações, tramitações e produtividade da Coordenadoria de
                     Segurança de Barragens.
                   </p>
                 </div>
@@ -745,8 +743,8 @@ export default function App() {
               </div>
 
               <div className="notice amber" style={{ marginBottom: '16px' }}>
-                <b>Protótipo local:</b> os registros são mantidos somente neste navegador. Não há
-                conexão entre sistemas nem autenticação institucional ativa.
+                <b>Camada local temporária:</b> os registros são mantidos somente neste navegador. O sistema
+                abre diretamente sem exigir login e está desvinculado de banco remoto nesta etapa.
               </div>
 
               <div className="stats">
@@ -1447,12 +1445,12 @@ export default function App() {
                 <div>
                   <div className="eyebrow">Arquitetura prevista</div>
                   <h2>Estrutura de integração</h2>
-                  <p>Preparação do Administra como cadastro central, sem ativar conexões nesta etapa.</p>
+                  <p>Preparação do Notifica CSB como base de dados integrada, sem ativar conexões remotas nesta etapa.</p>
                 </div>
               </div>
 
               <div className="notice green" style={{ marginBottom: '16px' }}>
-                O Administra será a referência central para empreendedores, barragens, responsáveis técnicos, municípios e perfis de usuários. Os sistemas consumidores continuarão responsáveis por seus próprios documentos e fluxos.
+                O Notifica CSB gerencia empreendedores, barragens, responsáveis técnicos, municípios e perfis de usuários. A camada de dados foi isolada das telas para viabilizar conexão futura com Supabase sem impacto nos fluxos da interface.
               </div>
 
               <div className="grid2">
@@ -1466,7 +1464,7 @@ export default function App() {
                         <b>Empreendedores</b>
                         <span className="td-sub">Cadastro central com identificadores e dados de contato.</span>
                       </span>
-                      <span className="badge gray">Administra</span>
+                      <span className="badge gray">Notifica CSB</span>
                     </div>
 
                     <div className="rowcard">
@@ -1474,7 +1472,7 @@ export default function App() {
                         <b>Barragens</b>
                         <span className="td-sub">Registro individual de estruturas, vínculos e identificadores.</span>
                       </span>
-                      <span className="badge gray">Administra</span>
+                      <span className="badge gray">Notifica CSB</span>
                     </div>
 
                     <div className="rowcard">
@@ -1482,13 +1480,13 @@ export default function App() {
                         <b>Responsáveis técnicos</b>
                         <span className="td-sub">Profissionais, conselhos, registros e vínculos técnicos.</span>
                       </span>
-                      <span className="badge gray">Administra</span>
+                      <span className="badge gray">Notifica CSB</span>
                     </div>
 
                     <div className="rowcard">
                       <span>
                         <b>Municípios</b>
-                        <span className="td-sub">Referência mantida no Administra; sem módulo independente.</span>
+                        <span className="td-sub">Referência mantida no Notifica CSB; sem módulo independente.</span>
                       </span>
                       <span className="badge gray">Referência</span>
                     </div>
@@ -1521,7 +1519,7 @@ export default function App() {
                 <div>
                   <div className="eyebrow">Dados de referência</div>
                   <h2>Referências centrais</h2>
-                  <p>Informações de domínio comum mantidas no Administra para uso futuro pelos sistemas integrados.</p>
+                  <p>Informações de domínio comum mantidas no Notifica CSB para uso futuro pelos sistemas integrados.</p>
                 </div>
               </div>
 
@@ -1532,7 +1530,7 @@ export default function App() {
                 </div>
                 <div className="panel-body">
                   <div className="notice slate">
-                    O catálogo municipal deve ser mantido nesta referência central e utilizado pelos formulários do Administra. Na integração, Classifica 2.0, Notifica e Fiscaliza Campo consultarão a mesma fonte, evitando manutenção duplicada.
+                    O catálogo municipal deve ser mantido nesta referência central e utilizado pelos formulários do Notifica CSB. Na integração futura, os módulos integrados consultarão a mesma fonte, evitando manutenção duplicada.
                   </div>
                   <div style={{ marginTop: '14px' }} className="splitline">
                     <span className="muted" style={{ fontSize: '11px' }}>
@@ -1550,8 +1548,8 @@ export default function App() {
         </section>
 
         <footer className="footnote">
-          Administra · Coordenadoria de Segurança de Barragens · SURH / SEMA-MT · Protótipo funcional
-          local; integração e acesso institucional ainda não habilitados.
+          Notifica CSB · Coordenadoria de Segurança de Barragens · SURH / SEMA-MT · Protótipo funcional
+          local; camada temporária desacoplada e acesso direto sem login.
         </footer>
       </main>
 
