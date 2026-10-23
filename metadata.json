@@ -1,6 +1,6 @@
 {
-  "name": "Notifica CSB — SEMA/MT",
-  "description": "Sistema Notifica CSB — Gestão, tramitações e produtividade da Coordenadoria de Segurança de Barragens (CSB / SURH / SEMA-MT).",
+  "name": "Administra Barragens — CSB / SEMA-MT",
+  "description": "Sistema Administra Barragens — Gestão central de cadastros, tramitações e segurança de barragens (CSB / SURH / SEMA-MT).",
   "requestFramePermissions": [],
   "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
 }

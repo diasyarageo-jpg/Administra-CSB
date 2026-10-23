@@ -568,8 +568,8 @@ export default function App() {
             <div className="logo">CSB</div>
             <div>
               <h1>
-                NOTIFICA<br />
-                <span>CSB</span>
+                ADMINISTRA<br />
+                <span>BARRAGENS</span>
               </h1>
               <small>SEMA/MT · SURH · CSB</small>
             </div>
@@ -578,11 +578,11 @@ export default function App() {
 
         <div className="userbox">
           <div className="avatar" id="sideAvatar">
-            {db.usuarios[0]?.nome?.charAt(0) || 'N'}
+            {db.usuarios[0]?.nome?.charAt(0) || 'A'}
           </div>
           <div>
             <strong id="sideName">{db.usuarios[0]?.nome || 'Acesso Direto'}</strong>
-            <small id="sideRole">{db.usuarios[0]?.papel || 'Ambiente Notifica CSB'}</small>
+            <small id="sideRole">{db.usuarios[0]?.papel || 'Ambiente Administra Barragens'}</small>
           </div>
         </div>
 
@@ -690,7 +690,7 @@ export default function App() {
         </nav>
 
         <div className="sidefoot">
-          Notifica CSB · <b>SEMA/MT</b>
+          Administra como <b>cadastro central</b>
           <br />
           Versão local · dados neste navegador
         </div>
@@ -728,10 +728,10 @@ export default function App() {
             <div>
               <div className="pagehead">
                 <div>
-                  <div className="eyebrow">Gestão e Notificações · SURH · CSB</div>
-                  <h2>Notifica CSB</h2>
+                  <div className="eyebrow">Gestão central · SURH · CSB</div>
+                  <h2>Administra Barragens</h2>
                   <p>
-                    Base de cadastros, notificações, tramitações e produtividade da Coordenadoria de
+                    Base central de cadastros, tramitações e produtividade da Coordenadoria de
                     Segurança de Barragens.
                   </p>
                 </div>
@@ -1445,12 +1445,12 @@ export default function App() {
                 <div>
                   <div className="eyebrow">Arquitetura prevista</div>
                   <h2>Estrutura de integração</h2>
-                  <p>Preparação do Notifica CSB como base de dados integrada, sem ativar conexões remotas nesta etapa.</p>
+                  <p>Preparação do Administra como cadastro central, sem ativar conexões nesta etapa.</p>
                 </div>
               </div>
 
               <div className="notice green" style={{ marginBottom: '16px' }}>
-                O Notifica CSB gerencia empreendedores, barragens, responsáveis técnicos, municípios e perfis de usuários. A camada de dados foi isolada das telas para viabilizar conexão futura com Supabase sem impacto nos fluxos da interface.
+                O Administra será a referência central para empreendedores, barragens, responsáveis técnicos, municípios e perfis de usuários. Os sistemas consumidores continuarão responsáveis por seus próprios documentos e fluxos.
               </div>
 
               <div className="grid2">
@@ -1464,7 +1464,7 @@ export default function App() {
                         <b>Empreendedores</b>
                         <span className="td-sub">Cadastro central com identificadores e dados de contato.</span>
                       </span>
-                      <span className="badge gray">Notifica CSB</span>
+                      <span className="badge gray">Administra</span>
                     </div>
 
                     <div className="rowcard">
@@ -1472,7 +1472,7 @@ export default function App() {
                         <b>Barragens</b>
                         <span className="td-sub">Registro individual de estruturas, vínculos e identificadores.</span>
                       </span>
-                      <span className="badge gray">Notifica CSB</span>
+                      <span className="badge gray">Administra</span>
                     </div>
 
                     <div className="rowcard">
@@ -1480,13 +1480,13 @@ export default function App() {
                         <b>Responsáveis técnicos</b>
                         <span className="td-sub">Profissionais, conselhos, registros e vínculos técnicos.</span>
                       </span>
-                      <span className="badge gray">Notifica CSB</span>
+                      <span className="badge gray">Administra</span>
                     </div>
 
                     <div className="rowcard">
                       <span>
                         <b>Municípios</b>
-                        <span className="td-sub">Referência mantida no Notifica CSB; sem módulo independente.</span>
+                        <span className="td-sub">Referência mantida no Administra; sem módulo independente.</span>
                       </span>
                       <span className="badge gray">Referência</span>
                     </div>
@@ -1519,7 +1519,7 @@ export default function App() {
                 <div>
                   <div className="eyebrow">Dados de referência</div>
                   <h2>Referências centrais</h2>
-                  <p>Informações de domínio comum mantidas no Notifica CSB para uso futuro pelos sistemas integrados.</p>
+                  <p>Informações de domínio comum mantidas no Administra para uso futuro pelos sistemas integrados.</p>
                 </div>
               </div>
 
@@ -1530,7 +1530,7 @@ export default function App() {
                 </div>
                 <div className="panel-body">
                   <div className="notice slate">
-                    O catálogo municipal deve ser mantido nesta referência central e utilizado pelos formulários do Notifica CSB. Na integração futura, os módulos integrados consultarão a mesma fonte, evitando manutenção duplicada.
+                    O catálogo municipal deve ser mantido nesta referência central e utilizado pelos formulários do Administra. Na integração, Classifica 2.0, Notifica e Fiscaliza Campo consultarão a mesma fonte, evitando manutenção duplicada.
                   </div>
                   <div style={{ marginTop: '14px' }} className="splitline">
                     <span className="muted" style={{ fontSize: '11px' }}>
@@ -1548,8 +1548,8 @@ export default function App() {
         </section>
 
         <footer className="footnote">
-          Notifica CSB · Coordenadoria de Segurança de Barragens · SURH / SEMA-MT · Protótipo funcional
-          local; camada temporária desacoplada e acesso direto sem login.
+          Administra · Coordenadoria de Segurança de Barragens · SURH / SEMA-MT · Protótipo funcional
+          local; integração e acesso institucional ainda não habilitados.
         </footer>
       </main>
 
