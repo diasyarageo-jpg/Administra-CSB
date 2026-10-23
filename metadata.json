@@ -1,0 +1,6 @@
+{
+  "name": "Administra Barragens — CSB / SEMA-MT",
+  "description": "Sistema central de gestão, fiscalização, classificação de risco (CRI/DPA) e segurança de barragens da Coordenadoria de Segurança de Barragens (CSB / SURH / SEMA-MT).",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}

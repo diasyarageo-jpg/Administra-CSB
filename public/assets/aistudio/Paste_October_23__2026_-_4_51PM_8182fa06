@@ -1,0 +1,804 @@
+const SURH_PRODUCTS = [
+  { code: "1.3", title: "Cadastro de informações de recursos hídricos em sistemas oficiais (ex.: CNARH e SNISB)", points: 3, level: 1 },
+  { code: "1.4", title: "Parecer Técnico de Indeferimento a pedido do interessado", points: 3, level: 1 },
+  { code: "2.5", title: "Parecer Técnico de Indeferimento por inércia do interessado", points: 5, level: 2 },
+  { code: "2.6", title: "Lavratura de Autos de Infração e outros atos sancionatórios", points: 5, level: 2 },
+  { code: "2.7", title: "Relatório de Vistoria Remota por imagem", points: 5, level: 2 },
+  { code: "2.8", title: "Nota Técnica ou Parecer Técnico diverso", points: 5, level: 2 },
+  { code: "2.9", title: "Parecer de retificação/prorrogação de outorgas, cadastro ou autorização", points: 5, level: 2 },
+  { code: "3.3", title: "Relatório de Fiscalização de contrato (designado por Portaria)", points: 10, level: 3 },
+  { code: "3.4", title: "Relatório Mensal de Gestão de Recursos Hídricos (FEHIDRO)", points: 10, level: 3 },
+  { code: "3.5", title: "Parecer de classificação de barragens simples", points: 10, level: 3 },
+  { code: "3.6", title: "Parecer de Indeferimento Técnico em geral", points: 10, level: 3 },
+  { code: "4.4", title: "Vistoria in loco e emissão de relatório de classificação de barragens e de outorga", points: 15, level: 4 },
+  { code: "5.2", title: "Parecer Técnico de classificação de barragem", points: 20, level: 5 },
+  { code: "5.3", title: "Parecer de cumprimento de metas de parcerias institucionais e/ou relatórios de gestão de recursos hídricos", points: 20, level: 5 },
+  { code: "6.1", title: "Relatório e vistoria in loco de Plano de Segurança de Barragem e de Ação de Emergência", points: 30, level: 6 },
+  { code: "6.2", title: "Relatório e vistoria in loco para dirimir conflito por disponibilidade hídrica", points: 30, level: 6 },
+  { code: "6.3", title: "Parecer Técnico de análise de Plano de Segurança de Barragem e de Ação de Emergência", points: 30, level: 6 },
+  { code: "1.2", title: "Parecer técnico dos produtos do Plano de recursos hídricos (diagnóstico, prognóstico, plano de ações e enquadramento de corpos d’água)", points: 40, level: 7 },
+  { code: "8.1", title: "Relatório final dos produtos do Plano de recursos hídricos (diagnóstico, prognóstico, plano de ações e enquadramento de corpos d’água)", points: 50, level: 8 }
+];
+
+function getProductivityPoints(record) {
+  if (record.kind === "extra") {
+    return record.extraStatus === "Aprovada"
+      ? Number(record.approvedPoints || 0)
+      : 0;
+  }
+
+  if (record.kind === "unscored") return 0;
+
+  return Number(record.unitPoints || 0) * Math.max(1, Number(record.quantity || 1));
+}
+
+function productivityStatusBadge(record) {
+  if (record.kind === "extra") {
+    return record.extraStatus === "Aprovada"
+      ? '<span class="badge green">Extra aprovada</span>'
+      : record.extraStatus === "Não aprovada"
+        ? '<span class="badge red">Extra não aprovada</span>'
+        : '<span class="badge amber">Aguardando validação</span>';
+  }
+
+  if (record.kind === "unscored") {
+    return '<span class="badge gray">Sem pontuação</span>';
+  }
+
+  return '<span class="badge blue">Produto SURH</span>';
+}
+
+function renderProductivity() {
+  const records = db.produtividades || [];
+  const totalPoints = records.reduce((sum, item) => sum + getProductivityPoints(item), 0);
+  const pendingExtras = records.filter(item =>
+    item.kind === "extra" && item.extraStatus === "Pendente"
+  ).length;
+  const checkedForOfficialSheet = records.filter(item => item.inOfficialSheet).length;
+
+  return `
+    <div class="pagehead">
+      <div>
+        <div class="eyebrow">Gestão de trabalho · SURH</div>
+        <h2>Produtividade</h2>
+        <p>Registre produtos realizados, atividades sem pontuação e atividades extras de gestão.</p>
+      </div>
+      <div class="actions">
+        <button class="btn green" onclick="openProductivityModal()">＋ Novo lançamento</button>
+      </div>
+    </div>
+
+    <div class="notice amber" style="margin-bottom:14px">
+      <b>Pontuação:</b> produtos pontuáveis usam os valores do Anexo I – SURH da Portaria nº 1.480/2026.
+      Ofícios podem ser registrados como atividade sem pontuação. A atividade extra depende de validação
+      e das condições do art. 8º; não é somada enquanto estiver pendente.
+    </div>
+
+    <div class="stats">
+      <div class="stat">
+        <div><div class="label">Lançamentos</div><div class="value">${records.length}</div></div>
+        <div class="stat-ico">▥</div>
+      </div>
+      <div class="stat">
+        <div><div class="label">Pontos aprovados</div><div class="value">${totalPoints}</div></div>
+        <div class="stat-ico">✓</div>
+      </div>
+      <div class="stat">
+        <div><div class="label">Extras pendentes</div><div class="value">${pendingExtras}</div></div>
+        <div class="stat-ico">◷</div>
+      </div>
+      <div class="stat">
+        <div><div class="label">Marcados na planilha</div><div class="value">${checkedForOfficialSheet}</div></div>
+        <div class="stat-ico">▣</div>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-bottom:14px">
+      <div class="panel-head">
+        <h3>Minha produtividade</h3>
+        <span class="badge gray">Filtro pelo nome do servidor</span>
+      </div>
+      <div class="toolbar">
+        <div class="field-search">
+          <span>⌕</span>
+          <input id="productivity-search" class="input"
+            placeholder="Digite seu nome para filtrar..."
+            oninput="filterProductivityRows()" />
+        </div>
+        <span class="micro muted">Sem autenticação ativa: a identificação é informada no lançamento e no filtro.</span>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <h3>Lançamentos de produtividade</h3>
+        <span class="badge gray">${records.length} registros</span>
+      </div>
+      <div class="tablewrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Data / Servidor</th>
+              <th>Produto / atividade</th>
+              <th>Origem / referência</th>
+              <th>Pontos</th>
+              <th>Situação</th>
+              <th>Planilha oficial</th>
+              <th>Ações</th>
+            </tr>
+          </thead>
+          <tbody id="productivity-rows">
+            ${records.length ? records.map((record, index) => renderProductivityRow(record, index)).join("") : `
+              <tr><td colspan="7">
+                <div class="empty">
+                  <div class="empty-icon">▥</div>
+                  <b>Nenhum lançamento</b>
+                  <p>Os registros começam vazios e serão incluídos manualmente ou, futuramente, recebidos de sistemas integrados.</p>
+                </div>
+              </td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </div>
+
+    <div class="panel" style="margin-top:14px">
+      <div class="panel-head"><h3>Referência de pontuação</h3><span class="badge blue">Anexo I – SURH</span></div>
+      <div class="panel-body">
+        <p class="muted" style="font-size:11px;margin:0 0 10px">
+          O código e a descrição do produto ficam registrados para facilitar a futura organização conforme a planilha oficial da chefia.
+        </p>
+        <div class="tablewrap">
+          <table>
+            <thead><tr><th>Nível</th><th>Código</th><th>Produto</th><th>Pontos</th></tr></thead>
+            <tbody>
+              ${SURH_PRODUCTS.map(product => `
+                <tr>
+                  <td>${product.level}</td>
+                  <td class="td-main">${product.code}</td>
+                  <td style="white-space:normal;min-width:280px">${escapeHtml(product.title)}</td>
+                  <td class="td-main">${product.points}</td>
+                </tr>`).join("")}
+            </tbody>
+          </table>
+        </div>
+        <div class="notice slate" style="margin-top:12px">
+          <b>Atividade extra (art. 8º):</b> até 8 pontos por servidor e por dia, mediante requisição ou ordem de serviço,
+          com critério e termos previamente aprovados formalmente. O protótipo exige registrar essas referências e
+          deixa a pontuação fora do total até a validação.
+        </div>
+      </div>
+    </div>`;
+}
+
+function renderProductivityRow(record, index) {
+  const details = [
+    record.productCode ? `Código ${record.productCode}` : "",
+    record.quantity && record.kind === "scored" ? `Quantidade: ${record.quantity}` : "",
+    record.description || ""
+  ].filter(Boolean).join(" · ");
+
+  const refs = [
+    record.sourceType === "manual" ? "Manual" : "Informado como registro de sistema",
+    record.sourceName || "",
+    record.processRef ? `Processo: ${record.processRef}` : "",
+    record.documentRef ? `Documento: ${record.documentRef}` : ""
+  ].filter(Boolean).join(" · ");
+
+  const points = getProductivityPoints(record);
+  const canApprove = record.kind === "extra" && record.extraStatus === "Pendente";
+
+  return `
+    <tr data-productivity-search="${escapeHtml(
+      `${record.serverName || ""} ${record.productTitle || ""} ${record.productCode || ""} ${record.description || ""} ${record.processRef || ""} ${record.documentRef || ""}`.toLowerCase()
+    )}">
+      <td>
+        <span class="td-main">${formatDate(record.date)}</span>
+        <span class="td-sub">${valueLabel(record.serverName)}</span>
+      </td>
+      <td>
+        <span class="td-main">${valueLabel(record.productTitle)}</span>
+        <span class="td-sub">${escapeHtml(details)}</span>
+      </td>
+      <td style="white-space:normal;min-width:180px">
+        <span class="micro">${escapeHtml(refs || "—")}</span>
+        ${record.kind === "extra" ? `
+          <span class="td-sub">Ordem de serviço: ${valueLabel(record.extraOrder)}</span>
+          <span class="td-sub">Aprovação prévia: ${valueLabel(record.extraApproval)}</span>` : ""}
+      </td>
+      <td class="td-main">${points}</td>
+      <td>
+        ${productivityStatusBadge(record)}
+        ${record.extraStatus === "Aprovada" && record.coordinator ? `<span class="td-sub">Validada por ${escapeHtml(record.coordinator)}</span>` : ""}
+        ${record.extraStatus === "Não aprovada" && record.coordinator ? `<span class="td-sub">Decisão por ${escapeHtml(record.coordinator)}</span>` : ""}
+      </td>
+      <td>
+        <label style="display:flex;align-items:center;gap:6px;font-size:10px;white-space:nowrap;cursor:pointer">
+          <input type="checkbox" ${record.inOfficialSheet ? "checked" : ""}
+            onchange="toggleOfficialSheet(${index}, this.checked)" />
+          ${record.inOfficialSheet ? "Inserido" : "Pendente"}
+        </label>
+        ${record.officialSheetAt ? `<span class="td-sub">${formatDate(record.officialSheetAt.slice(0, 10))}</span>` : ""}
+      </td>
+      <td>
+        <div class="row-actions">
+          ${canApprove ? `<button class="iconbtn" onclick="reviewExtraActivity(${index}, true)">Validar</button>` : ""}
+          ${canApprove ? `<button class="iconbtn" onclick="reviewExtraActivity(${index}, false)">Recusar</button>` : ""}
+          <button class="iconbtn" onclick="openProductivityModal(${index})">Editar</button>
+          <button class="iconbtn" onclick="deleteProductivity(${index})">Excluir</button>
+        </div>
+      </td>
+    </tr>`;
+}
+
+function filterProductivityRows() {
+  const term = (document.getElementById("productivity-search")?.value || "").trim().toLowerCase();
+  document.querySelectorAll("#productivity-rows tr[data-productivity-search]").forEach(row => {
+    row.style.display = row.dataset.productivitySearch.includes(term) ? "" : "none";
+  });
+}
+
+function openProductivityModal(index = null) {
+  const record = index === null ? {} : { ...db.produtividades[index] };
+  const selectedKind = record.kind || "scored";
+
+  const productOptions = SURH_PRODUCTS.map(product => `
+    <option value="${escapeHtml(product.code)}" ${record.productCode === product.code ? "selected" : ""}>
+      ${escapeHtml(product.code)} · ${escapeHtml(product.title)} — ${product.points} pontos
+    </option>`).join("");
+
+  document.getElementById("modalRoot").innerHTML = `
+    <div class="modal-back" onclick="if(event.target===this)closeModal()">
+      <form class="modal" onsubmit="saveProductivity(event, ${index === null ? "null" : index})">
+        <div class="modal-head">
+          <h3>${index === null ? "Novo lançamento" : "Editar lançamento"} · Produtividade</h3>
+          <button type="button" class="modal-close" onclick="closeModal()">×</button>
+        </div>
+
+        <div class="modal-body">
+          <div class="notice slate" style="margin-bottom:14px">
+            Registre cada produto ou atividade separadamente. Os campos ajudam a identificar o trabalho e a organizar os dados quando a planilha oficial for disponibilizada.
+          </div>
+
+          <div class="form-grid">
+            <div class="form-field">
+              <label>Tipo de lançamento</label>
+              <select class="select" name="kind" id="productivity-kind" onchange="updateProductivityFields()">
+                <option value="scored" ${selectedKind === "scored" ? "selected" : ""}>Produto pontuável — Anexo I SURH</option>
+                <option value="unscored" ${selectedKind === "unscored" ? "selected" : ""}>Atividade realizada sem pontuação</option>
+                <option value="extra" ${selectedKind === "extra" ? "selected" : ""}>Atividade extra de gestão — art. 8º</option>
+              </select>
+            </div>
+
+            <div class="form-field">
+              <label>Data de realização</label>
+              <input class="input" name="date" type="date" required value="${escapeHtml(record.date || new Date().toISOString().slice(0, 10))}" />
+            </div>
+
+            <div class="form-field">
+              <label>Servidor responsável</label>
+              <input class="input" name="serverName" required value="${escapeHtml(record.serverName || "")}" placeholder="Nome do servidor" />
+            </div>
+
+            <div class="form-field">
+              <label>Unidade / setor</label>
+              <input class="input" name="unit" value="${escapeHtml(record.unit || "")}" placeholder="Unidade de lotação" />
+            </div>
+
+            <div class="form-field full" id="scored-product-field">
+              <label>Produto SURH — Anexo I</label>
+              <select class="select" name="productCode" id="productivity-product" onchange="updateProductivityProductInfo()">
+                <option value="">Selecione o produto...</option>
+                ${productOptions}
+              </select>
+              <small id="productivity-product-info"></small>
+            </div>
+
+            <div class="form-field full hidden" id="unscored-product-field">
+              <label>Atividade sem pontuação</label>
+              <select class="select" name="unscoredType" id="unscored-type" onchange="updateUnscoredDescription()">
+                <option value="">Selecione...</option>
+                <option value="Ofício" ${record.unscoredType === "Ofício" ? "selected" : ""}>Ofício — sem pontuação</option>
+                <option value="Outro" ${record.unscoredType === "Outro" ? "selected" : ""}>Outro produto/atividade sem pontuação</option>
+              </select>
+            </div>
+
+            <div class="form-field full hidden" id="unscored-description-field">
+              <label>Identificação da atividade sem pontuação</label>
+              <input class="input" name="unscoredDescription" id="unscored-description"
+                value="${escapeHtml(record.unscoredDescription || "")}"
+                placeholder="Descreva a atividade, por exemplo: tipo de ofício" />
+              <small>Ofício foi indicado como exemplo de atividade sem pontuação. Outros tipos devem ser identificados pelo usuário, sem atribuição automática de pontos.</small>
+            </div>
+
+            <div class="form-field hidden" id="quantity-field">
+              <label>Quantidade de execuções</label>
+              <input class="input" name="quantity" type="number" min="1" step="1" value="${escapeHtml(record.quantity || "1")}" />
+              <small>O cálculo usa a pontuação unitária indicada no Anexo I.</small>
+            </div>
+
+            <div class="form-field">
+              <label>Origem do registro</label>
+              <select class="select" name="sourceType">
+                <option value="manual" ${!record.sourceType || record.sourceType === "manual" ? "selected" : ""}>Manual — atividade fora de sistema</option>
+                <option value="system" ${record.sourceType === "system" ? "selected" : ""}>Registro realizado em sistema</option>
+              </select>
+            </div>
+
+            <div class="form-field">
+              <label>Sistema de origem, se aplicável</label>
+              <input class="input" name="sourceName" value="${escapeHtml(record.sourceName || "")}" placeholder="Nome do sistema ou ferramenta" />
+            </div>
+
+            <div class="form-field">
+              <label>Número do processo</label>
+              <input class="input" name="processRef" value="${escapeHtml(record.processRef || "")}" />
+            </div>
+
+            <div class="form-field">
+              <label>Número / identificação do documento</label>
+              <input class="input" name="documentRef" value="${escapeHtml(record.documentRef || "")}" />
+            </div>
+
+            <div class="form-field full hidden" id="extra-points-field">
+              <label>Pontos extras solicitados (máximo de 8 por servidor/dia)</label>
+              <input class="input" name="requestedPoints" type="number" min="1" max="8" step="1" value="${escapeHtml(record.requestedPoints || "1")}" />
+            </div>
+
+            <div class="form-field full hidden" id="extra-order-field">
+              <label>Identificação da requisição ou ordem de serviço</label>
+              <input class="input" name="extraOrder" value="${escapeHtml(record.extraOrder || "")}" />
+            </div>
+
+            <div class="form-field full hidden" id="extra-approval-field">
+              <label>Referência e data da aprovação prévia formal</label>
+              <input class="input" name="extraApproval" value="${escapeHtml(record.extraApproval || "")}" />
+              <small>Informação prevista no art. 8º: critério e termos previamente aprovados formalmente pelo superintendente imediato e pelo(a) secretário(a) adjunto(a).</small>
+            </div>
+
+            <div class="form-field full">
+              <label>Descrição complementar / resultado</label>
+              <textarea class="textarea" name="description" placeholder="Detalhes que ajudem a identificar o produto realizado">${escapeHtml(record.description || "")}</textarea>
+            </div>
+
+            <div class="form-field full">
+              <label>Observações</label>
+              <textarea class="textarea" name="notes">${escapeHtml(record.notes || "")}</textarea>
+            </div>
+          </div>
+        </div>
+
+        <div class="modal-foot">
+          <button type="button" class="btn light" onclick="closeModal()">Cancelar</button>
+          <button type="submit" class="btn green">Salvar lançamento</button>
+        </div>
+      </form>
+    </div>`;
+
+  updateProductivityFields();
+  updateProductivityProductInfo();
+  updateUnscoredDescription();
+}
+
+function updateProductivityFields() {
+  const kind = document.getElementById("productivity-kind")?.value;
+  const show = (id, visible) => document.getElementById(id)?.classList.toggle("hidden", !visible);
+
+  show("scored-product-field", kind === "scored");
+  show("quantity-field", kind === "scored");
+  show("unscored-product-field", kind === "unscored");
+  show("unscored-description-field", kind === "unscored");
+  show("extra-points-field", kind === "extra");
+  show("extra-order-field", kind === "extra");
+  show("extra-approval-field", kind === "extra");
+
+  const productSelect = document.getElementById("productivity-product");
+  const unscoredSelect = document.getElementById("unscored-type");
+  if (productSelect) productSelect.required = kind === "scored";
+  if (unscoredSelect) unscoredSelect.required = kind === "unscored";
+}
+
+function updateProductivityProductInfo() {
+  const code = document.getElementById("productivity-product")?.value;
+  const product = SURH_PRODUCTS.find(item => item.code === code);
+  const info = document.getElementById("productivity-product-info");
+  if (info) {
+    info.textContent = product
+      ? `Nível ${product.level} · ${product.points} ponto(s) por execução. Para Notificações, selecione 2.7 — Relatório de Vistoria Remota por imagem.`
+      : "A pontuação é definida pelo Anexo I – SURH.";
+  }
+}
+
+function updateUnscoredDescription() {
+  const type = document.getElementById("unscored-type")?.value;
+  const input = document.getElementById("unscored-description");
+  if (!input) return;
+
+  if (type === "Ofício") {
+    input.value = input.value || "Ofício";
+    input.required = false;
+  } else if (type === "Outro") {
+    input.required = true;
+  } else {
+    input.required = false;
+  }
+}
+
+function saveProductivity(event, index) {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const values = new FormData(form);
+  const kind = String(values.get("kind") || "scored");
+  const serverName = String(values.get("serverName") || "").trim();
+  const date = String(values.get("date") || "");
+  const prior = index === null ? {} : db.produtividades[index];
+
+  if (kind === "extra") {
+    const requestedPoints = Number(values.get("requestedPoints") || 0);
+    if (!values.get("extraOrder") || !values.get("extraApproval")) {
+      showToast("Para atividade extra, informe a ordem de serviço e a aprovação prévia formal.");
+      return;
+    }
+    if (!Number.isInteger(requestedPoints) || requestedPoints < 1 || requestedPoints > 8) {
+      showToast("A atividade extra deve ser informada entre 1 e 8 pontos.");
+      return;
+    }
+  }
+
+  const product = SURH_PRODUCTS.find(item => item.code === String(values.get("productCode") || ""));
+  if (kind === "scored" && !product) {
+    showToast("Selecione um produto do Anexo I – SURH.");
+    return;
+  }
+
+  const unscoredType = String(values.get("unscoredType") || "");
+  const unscoredDescription = String(values.get("unscoredDescription") || "").trim();
+  if (kind === "unscored" && unscoredType === "Outro" && !unscoredDescription) {
+    showToast("Descreva a atividade sem pontuação.");
+    return;
+  }
+
+  const record = {
+    id: prior.id || crypto.randomUUID(),
+    date,
+    serverName,
+    unit: String(values.get("unit") || "").trim(),
+    kind,
+    productCode: kind === "scored" ? product.code : kind === "extra" ? "ART. 8º" : "",
+    productTitle: kind === "scored"
+      ? product.title
+      : kind === "extra"
+        ? "Atividade extra de gestão — art. 8º"
+        : unscoredType === "Ofício"
+          ? "Ofício — atividade sem pontuação"
+          : unscoredDescription,
+    unitPoints: kind === "scored" ? product.points : 0,
+    quantity: kind === "scored" ? Math.max(1, Number(values.get("quantity") || 1)) : 1,
+    unscoredType: kind === "unscored" ? unscoredType : "",
+    unscoredDescription: kind === "unscored" ? (unscoredDescription || unscoredType) : "",
+    sourceType: String(values.get("sourceType") || "manual"),
+    sourceName: String(values.get("sourceName") || "").trim(),
+    processRef: String(values.get("processRef") || "").trim(),
+    documentRef: String(values.get("documentRef") || "").trim(),
+    description: String(values.get("description") || "").trim(),
+    notes: String(values.get("notes") || "").trim(),
+    requestedPoints: kind === "extra" ? Number(values.get("requestedPoints") || 0) : 0,
+    approvedPoints: prior.approvedPoints || 0,
+    extraOrder: kind === "extra" ? String(values.get("extraOrder") || "").trim() : "",
+    extraApproval: kind === "extra" ? String(values.get("extraApproval") || "").trim() : "",
+    extraStatus: kind === "extra" ? (prior.extraStatus || "Pendente") : "",
+    coordinator: prior.coordinator || "",
+    reviewedAt: prior.reviewedAt || "",
+    inOfficialSheet: prior.inOfficialSheet || false,
+    officialSheetAt: prior.officialSheetAt || "",
+    createdAt: prior.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  const duplicate = db.produtividades.some((item, itemIndex) =>
+    itemIndex !== index &&
+    item.serverName?.trim().toLowerCase() === serverName.toLowerCase() &&
+    item.date === date &&
+    item.productCode === record.productCode &&
+    item.processRef?.trim().toLowerCase() === record.processRef.toLowerCase() &&
+    item.documentRef?.trim().toLowerCase() === record.documentRef.toLowerCase()
+  );
+
+  if (duplicate && !confirm("Há um lançamento com o mesmo servidor, data, produto e referência. Deseja salvar mesmo assim?")) {
+    return;
+  }
+
+  if (index === null) db.produtividades.unshift(record);
+  else db.produtividades[index] = record;
+
+  persistData();
+  closeModal();
+  renderView();
+  showToast("Lançamento salvo neste navegador.");
+}
+
+function reviewExtraActivity(index, approve) {
+  const record = db.produtividades[index];
+  if (!record || record.kind !== "extra" || record.extraStatus !== "Pendente") return;
+
+  const coordinator = prompt("Nome do coordenador responsável pela decisão:");
+  if (!coordinator || !coordinator.trim()) {
+    showToast("Informe quem registrou a decisão.");
+    return;
+  }
+
+  if (approve) {
+    const pointsInput = prompt(`Pontos a aprovar para ${record.serverName}, em ${formatDate(record.date)}. Máximo de 8 pontos por dia:`, String(record.requestedPoints));
+    if (pointsInput === null) return;
+
+    const approvedPoints = Number(pointsInput);
+    if (!Number.isInteger(approvedPoints) || approvedPoints < 1 || approvedPoints > 8) {
+      showToast("Informe uma pontuação inteira entre 1 e 8.");
+      return;
+    }
+
+    const sameDayApproved = db.produtividades
+      .filter((item, itemIndex) =>
+        itemIndex !== index &&
+        item.kind === "extra" &&
+        item.extraStatus === "Aprovada" &&
+        item.date === record.date &&
+        item.serverName?.trim().toLowerCase() === record.serverName?.trim().toLowerCase()
+      )
+      .reduce((sum, item) => sum + Number(item.approvedPoints || 0), 0);
+
+    if (sameDayApproved + approvedPoints > 8) {
+      showToast(`O limite do art. 8º é 8 pontos por servidor/dia. Já há ${sameDayApproved} ponto(s) extra aprovado(s) nesta data.`);
+      return;
+    }
+
+    record.approvedPoints = approvedPoints;
+    record.extraStatus = "Aprovada";
+  } else {
+    record.approvedPoints = 0;
+    record.extraStatus = "Não aprovada";
+  }
+
+  record.coordinator = coordinator.trim();
+  record.reviewedAt = new Date().toISOString();
+  record.updatedAt = new Date().toISOString();
+
+  persistData();
+  renderView();
+  showToast(approve ? "Atividade extra validada." : "Atividade extra marcada como não aprovada.");
+}
+
+function toggleOfficialSheet(index, checked) {
+  const record = db.produtividades[index];
+  if (!record) return;
+
+  record.inOfficialSheet = checked;
+  record.officialSheetAt = checked ? new Date().toISOString() : "";
+  record.updatedAt = new Date().toISOString();
+
+  persistData();
+  renderView();
+}
+
+function deleteProductivity(index) {
+  if (!confirm("Excluir este lançamento de produtividade?")) return;
+  db.produtividades.splice(index, 1);
+  persistData();
+  renderView();
+  showToast("Lançamento excluído.");
+}
+
+function renderPortarias() {
+  const records = db.portarias || [];
+  const completed = records.filter(item =>
+    item.secretarySigned && item.extractPublished && item.orderPublished
+  ).length;
+  const pending = records.length - completed;
+
+  return `
+    <div class="pagehead">
+      <div>
+        <div class="eyebrow">Tramitação administrativa</div>
+        <h2>Portarias</h2>
+        <p>Acompanhe os processos, a assinatura e as publicações das Portarias.</p>
+      </div>
+      <div class="actions">
+        <button class="btn green" onclick="openPortariaModal()">＋ Novo trâmite</button>
+      </div>
+    </div>
+
+    <div class="stats">
+      <div class="stat">
+        <div><div class="label">Total de trâmites</div><div class="value">${records.length}</div></div>
+        <div class="stat-ico">▣</div>
+      </div>
+      <div class="stat">
+        <div><div class="label">Pendentes</div><div class="value">${pending}</div></div>
+        <div class="stat-ico">◷</div>
+      </div>
+      <div class="stat">
+        <div><div class="label">Concluídos</div><div class="value">${completed}</div></div>
+        <div class="stat-ico">✓</div>
+      </div>
+      <div class="stat">
+        <div><div class="label">Rascunhos</div><div class="value">${records.filter(item => item.draft).length}</div></div>
+        <div class="stat-ico">✎</div>
+      </div>
+    </div>
+
+    <div class="panel">
+      <div class="panel-head">
+        <h3>Trâmites de Portarias</h3>
+        <span class="badge gray">${records.length} registros</span>
+      </div>
+      <div class="toolbar">
+        <div class="field-search">
+          <span>⌕</span>
+          <input class="input" id="portaria-search" placeholder="Buscar por processo, portaria ou observação..." oninput="filterPortariaRows()" />
+        </div>
+      </div>
+      <div class="tablewrap">
+        <table>
+          <thead>
+            <tr>
+              <th>Processo</th>
+              <th>Portaria</th>
+              <th>Envio</th>
+              <th>Etapas</th>
+              <th>Situação</th>
+              <th>Ações</th>
+            </tr>
+          </thead>
+          <tbody id="portaria-rows">
+            ${records.length ? records.map((record, index) => renderPortariaRow(record, index)).join("") : `
+              <tr><td colspan="6">
+                <div class="empty">
+                  <div class="empty-icon">▣</div>
+                  <b>Nenhum trâmite de Portaria</b>
+                  <p>Os registros começam vazios. Use “Novo trâmite” para incluir um registro.</p>
+                </div>
+              </td></tr>`}
+          </tbody>
+        </table>
+      </div>
+    </div>`;
+}
+
+function renderPortariaRow(record, index) {
+  const complete = record.secretarySigned && record.extractPublished && record.orderPublished;
+  const status = record.draft ? "Rascunho" : complete ? "Concluído" : "Pendente";
+  const statusClass = record.draft ? "gray" : complete ? "green" : "amber";
+  const searchText = `${record.processNumber || ""} ${record.orderNumber || ""} ${record.notes || ""}`.toLowerCase();
+
+  return `
+    <tr data-portaria-search="${escapeHtml(searchText)}">
+      <td class="td-main">${valueLabel(record.processNumber)}</td>
+      <td class="td-main">${valueLabel(record.orderNumber)}</td>
+      <td>${formatDate(record.sentDate)}</td>
+      <td>
+        <span class="badge ${record.secretarySigned ? "green" : "gray"}">Assinatura ${record.secretarySigned ? "✓" : "—"}</span>
+        <span class="badge ${record.extractPublished ? "green" : "gray"}">Extrato ${record.extractPublished ? "✓" : "—"}</span>
+        <span class="badge ${record.orderPublished ? "green" : "gray"}">Portaria ${record.orderPublished ? "✓" : "—"}</span>
+      </td>
+      <td><span class="badge ${statusClass}">${status}</span></td>
+      <td>
+        <div class="row-actions">
+          <button class="iconbtn" onclick="openPortariaModal(${index})">Editar</button>
+          <button class="iconbtn" onclick="deletePortaria(${index})">Excluir</button>
+        </div>
+      </td>
+    </tr>`;
+}
+
+function filterPortariaRows() {
+  const term = (document.getElementById("portaria-search")?.value || "").trim().toLowerCase();
+  document.querySelectorAll("#portaria-rows tr[data-portaria-search]").forEach(row => {
+    row.style.display = row.dataset.portariaSearch.includes(term) ? "" : "none";
+  });
+}
+
+function openPortariaModal(index = null) {
+  const record = index === null ? {} : { ...db.portarias[index] };
+
+  document.getElementById("modalRoot").innerHTML = `
+    <div class="modal-back" onclick="if(event.target===this)closeModal()">
+      <form class="modal" onsubmit="savePortaria(event, ${index === null ? "null" : index})">
+        <div class="modal-head">
+          <h3>${index === null ? "Novo trâmite" : "Editar trâmite"} · Portaria</h3>
+          <button type="button" class="modal-close" onclick="closeModal()">×</button>
+        </div>
+        <div class="modal-body">
+          <div class="form-grid">
+            <div class="form-field">
+              <label>Número do processo</label>
+              <input class="input" name="processNumber" required value="${escapeHtml(record.processNumber || "")}" />
+            </div>
+            <div class="form-field">
+              <label>Número da Portaria</label>
+              <input class="input" name="orderNumber" required value="${escapeHtml(record.orderNumber || "")}" />
+            </div>
+            <div class="form-field">
+              <label>Data de envio</label>
+              <input class="input" name="sentDate" type="date" required value="${escapeHtml(record.sentDate || new Date().toISOString().slice(0, 10))}" />
+            </div>
+            <div class="form-field">
+              <label>Data de finalização</label>
+              <input class="input" name="finalDate" type="date" value="${escapeHtml(record.finalDate || "")}" />
+            </div>
+
+            <div class="form-field full">
+              <label>Etapas do trâmite</label>
+              <label class="product-option">
+                <input type="checkbox" name="secretarySigned" ${record.secretarySigned ? "checked" : ""} />
+                Assinatura da Secretaria
+              </label>
+              <label class="product-option">
+                <input type="checkbox" name="extractPublished" ${record.extractPublished ? "checked" : ""} />
+                Extrato publicado
+              </label>
+              <label class="product-option">
+                <input type="checkbox" name="orderPublished" ${record.orderPublished ? "checked" : ""} />
+                Portaria publicada
+              </label>
+              <label class="product-option">
+                <input type="checkbox" name="draft" ${record.draft ? "checked" : ""} />
+                Manter como rascunho
+              </label>
+            </div>
+
+            <div class="form-field full">
+              <label>Observações internas</label>
+              <textarea class="textarea" name="notes">${escapeHtml(record.notes || "")}</textarea>
+            </div>
+          </div>
+        </div>
+        <div class="modal-foot">
+          <button type="button" class="btn light" onclick="closeModal()">Cancelar</button>
+          <button type="submit" class="btn green">Salvar trâmite</button>
+        </div>
+      </form>
+    </div>`;
+}
+
+function savePortaria(event, index) {
+  event.preventDefault();
+  const values = new FormData(event.currentTarget);
+  const prior = index === null ? {} : db.portarias[index];
+
+  const secretarySigned = values.get("secretarySigned") === "on";
+  const extractPublished = values.get("extractPublished") === "on";
+  const orderPublished = values.get("orderPublished") === "on";
+  const complete = secretarySigned && extractPublished && orderPublished;
+
+  const record = {
+    id: prior.id || crypto.randomUUID(),
+    processNumber: String(values.get("processNumber") || "").trim(),
+    orderNumber: String(values.get("orderNumber") || "").trim(),
+    sentDate: String(values.get("sentDate") || ""),
+    finalDate: String(values.get("finalDate") || "") || (complete ? new Date().toISOString().slice(0, 10) : ""),
+    secretarySigned,
+    extractPublished,
+    orderPublished,
+    draft: values.get("draft") === "on",
+    notes: String(values.get("notes") || "").trim(),
+    createdAt: prior.createdAt || new Date().toISOString(),
+    updatedAt: new Date().toISOString()
+  };
+
+  if (index === null) db.portarias.unshift(record);
+  else db.portarias[index] = record;
+
+  persistData();
+  closeModal();
+  renderView();
+  showToast("Trâmite de Portaria salvo neste navegador.");
+}
+
+function deletePortaria(index) {
+  if (!confirm("Excluir este trâmite de Portaria?")) return;
+  db.portarias.splice(index, 1);
+  persistData();
+  renderView();
+  showToast("Trâmite removido.");
+}
+
+renderView();
