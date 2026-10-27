@@ -46,6 +46,47 @@ export function getProductivityPoints(record: any): number {
   return Number(record.unitPoints || 0) * Math.max(1, Number(record.quantity || 1));
 }
 
+// Resolução de vínculo entre Barragem e Empreendedor (por ID ou texto legado)
+export function resolveDamEntrepreneur(
+  rawEmpreendedor: string | undefined | null,
+  empreendedores: any[] = []
+): { id?: string; displayName: string; isUniqueMatch: boolean; isExactId: boolean } {
+  if (!rawEmpreendedor || !String(rawEmpreendedor).trim()) {
+    return { displayName: '—', isUniqueMatch: false, isExactId: false };
+  }
+
+  const raw = String(rawEmpreendedor).trim();
+
+  // 1. Vínculo direto por ID (preserva tanto empreendedores ativos quanto inativos)
+  const byId = empreendedores.find(e => String(e.id) === raw);
+  if (byId) {
+    const displayName = byId.nome || byId.nomeFantasia || byId.cpfCnpj || byId.id;
+    return { id: byId.id, displayName, isUniqueMatch: true, isExactId: true };
+  }
+
+  // 2. Registros antigos em texto: busca correspondência por nome, nome fantasia ou documento
+  const normalized = raw.toLowerCase();
+  const cleanRawDoc = raw.replace(/\D/g, '');
+  const matches = empreendedores.filter(e => {
+    const nome = String(e.nome || '').trim().toLowerCase();
+    const nomeFantasia = String(e.nomeFantasia || '').trim().toLowerCase();
+    const cleanEmpDoc = String(e.cpfCnpj || '').replace(/\D/g, '');
+    const docMatch = cleanRawDoc.length >= 11 && cleanEmpDoc === cleanRawDoc;
+    return (nome && nome === normalized) || (nomeFantasia && nomeFantasia === normalized) || docMatch;
+  });
+
+  // Converte para ID somente se houver uma correspondência única
+  if (matches.length === 1) {
+    const match = matches[0];
+    const displayName = match.nome || match.nomeFantasia || raw;
+    return { id: match.id, displayName, isUniqueMatch: true, isExactId: false };
+  }
+
+  // 3. Ambíguo (mais de uma correspondência) ou sem correspondência:
+  // Mantém o texto original visível, sem associar ID
+  return { displayName: raw, isUniqueMatch: false, isExactId: false };
+}
+
 interface FieldConfig {
   name: string;
   label: string;
@@ -234,6 +275,12 @@ export default function App() {
   const handleOpenRecordModal = (key: string, index: number | null = null) => {
     const list = db[key as keyof typeof db] || [];
     const record = index === null ? {} : { ...(list[index] as any) };
+    if (key === 'barragens' && record.empreendedor) {
+      const resolved = resolveDamEntrepreneur(record.empreendedor, db.empreendedores);
+      if (resolved.isUniqueMatch && resolved.id) {
+        record.empreendedor = resolved.id;
+      }
+    }
     setModalConfig({ key, record, index });
   };
 
@@ -248,6 +295,13 @@ export default function App() {
     modules[key].fields.forEach(field => {
       record[field.name] = String(formData.get(field.name) || '').trim();
     });
+
+    if (key === 'barragens' && record.empreendedor) {
+      const resolved = resolveDamEntrepreneur(record.empreendedor, db.empreendedores);
+      if (resolved.isUniqueMatch && resolved.id) {
+        record.empreendedor = resolved.id;
+      }
+    }
 
     record.id = modalConfig.record.id || (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()));
     record.createdAt = modalConfig.record.createdAt || new Date().toISOString();
@@ -923,6 +977,10 @@ export default function App() {
 
             const filteredRecords = records.filter(rec => {
               if (!term) return true;
+              if (activeView === 'barragens') {
+                const resolved = resolveDamEntrepreneur(rec.empreendedor, db.empreendedores);
+                if (resolved.displayName.toLowerCase().includes(term)) return true;
+              }
               return config.search.some(f => String(rec[f] || '').toLowerCase().includes(term));
             });
 
@@ -988,6 +1046,9 @@ export default function App() {
                                   let value = record[field];
                                   if (field === 'validade' || field === 'dataPublicacao') {
                                     value = formatDate(value);
+                                  }
+                                  if (activeView === 'barragens' && field === 'empreendedor') {
+                                    value = resolveDamEntrepreneur(record.empreendedor, db.empreendedores).displayName;
                                   }
                                   const className = fIdx === 0 ? 'td-main' : '';
                                   return (
@@ -1565,7 +1626,7 @@ export default function App() {
               if (e.target === e.currentTarget) setModalConfig(null);
             }}
           >
-            <form className="modal" onSubmit={handleSaveRecord}>
+            <form key={`${modalConfig.key}-${modalConfig.index ?? 'new'}`} className="modal" onSubmit={handleSaveRecord}>
               <div className="modal-head">
                 <h3>
                   {modalConfig.index === null ? 'Novo cadastro' : 'Editar cadastro'} ·{' '}
@@ -1584,6 +1645,57 @@ export default function App() {
                 <div className="form-grid">
                   {config.fields.map(field => {
                     const value = modalConfig.record[field.name] ?? '';
+
+                    // Especialização para o vínculo Barragens -> Empreendedores
+                    if (modalConfig.key === 'barragens' && field.name === 'empreendedor') {
+                      const resolved = resolveDamEntrepreneur(value, db.empreendedores);
+                      const activeEmps = db.empreendedores.filter((e: any) => e.situacao !== 'Inativo');
+                      const linkedEmp = resolved.id ? db.empreendedores.find((e: any) => e.id === resolved.id) : null;
+                      const isLinkedInactive = linkedEmp && linkedEmp.situacao === 'Inativo';
+                      const isUnmatchedLegacy = !resolved.id && Boolean(value && String(value).trim());
+
+                      return (
+                        <div
+                          key={field.name}
+                          className={`form-field ${field.full ? 'full' : ''}`}
+                        >
+                          <label>
+                            {field.label}
+                            {field.required ? ' · obrigatório' : ''}
+                          </label>
+                          <select
+                            className="select"
+                            name={field.name}
+                            defaultValue={resolved.id || (isUnmatchedLegacy ? value : '')}
+                            required={field.required}
+                          >
+                            <option value="">Selecione o empreendedor...</option>
+                            {activeEmps.map((emp: any) => (
+                              <option key={emp.id} value={emp.id}>
+                                {emp.nome}{emp.nomeFantasia ? ` (${emp.nomeFantasia})` : ''}
+                              </option>
+                            ))}
+                            {/* Preserva vínculo caso o empreendedor vinculado esteja inativo */}
+                            {isLinkedInactive && (
+                              <option key={linkedEmp.id} value={linkedEmp.id}>
+                                {linkedEmp.nome}{linkedEmp.nomeFantasia ? ` (${linkedEmp.nomeFantasia})` : ''} (Inativo)
+                              </option>
+                            )}
+                            {/* Preserva texto legado sem correspondência única */}
+                            {isUnmatchedLegacy && (
+                              <option key="legacy-text" value={value}>
+                                {value} (Texto original mantido)
+                              </option>
+                            )}
+                          </select>
+                          {isUnmatchedLegacy && (
+                            <small style={{ color: '#d97706' }}>
+                              Registro legado com nome em texto sem correspondência única. Selecione um empreendedor ativo para vincular por ID ou mantenha o texto original.
+                            </small>
+                          )}
+                        </div>
+                      );
+                    }
 
                     return (
                       <div
