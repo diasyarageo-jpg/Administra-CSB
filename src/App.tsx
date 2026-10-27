@@ -4,8 +4,14 @@ import {
   loadNotificaDatabase,
   saveNotificaDatabase,
   NotificaDatabase,
-  emptyDatabase
+  emptyDatabase,
+  MigrationSummary
 } from './services/notificaDataService';
+import {
+  isSupabaseConfigured,
+  checkSupabaseConnection,
+  SupabaseConnectionStatus
+} from './services/supabaseClient';
 import {
   getUfs,
   getMunicipiosByUf,
@@ -309,7 +315,49 @@ export default function App() {
   const [portariaModalIndex, setPortariaModalIndex] = useState<number | null | 'new'>(null);
   const [portariaModalRecord, setPortariaModalRecord] = useState<any>({});
 
-  // Persistência local desacoplada das telas (preparada para futura substituição por Supabase)
+  // Estado e diagnóstico de conexão com o Supabase
+  const [supabaseStatus, setSupabaseStatus] = useState<SupabaseConnectionStatus>({
+    configured: isSupabaseConfigured(),
+    connected: false,
+    message: isSupabaseConfigured()
+      ? 'Verificando conexão com o Supabase...'
+      : 'Supabase não configurado (.env). Operando exclusivamente no armazenamento local.'
+  });
+  const [isMigrating, setIsMigrating] = useState(false);
+  const [migrationSummary, setMigrationSummary] = useState<{
+    totalMigrated: number;
+    errorCount: number;
+    summaries: MigrationSummary[];
+  } | null>(null);
+  const [confirmLocalClear, setConfirmLocalClear] = useState(false);
+
+  // Verificação inicial de conectividade e sincronização com Supabase
+  useEffect(() => {
+    if (isSupabaseConfigured()) {
+      checkSupabaseConnection().then(status => {
+        setSupabaseStatus(status);
+        if (status.connected) {
+          notificaDataService.fetchRemoteDatabase().then(res => {
+            if (res.success && res.db) {
+              const remoteTotal = Object.values(res.db).reduce(
+                (acc: number, arr: any[]) => acc + (Array.isArray(arr) ? arr.length : 0),
+                0
+              );
+              if (remoteTotal > 0) {
+                setDb(res.db);
+                saveNotificaDatabase(res.db);
+                showToast(`Sincronizado com o Supabase (${remoteTotal} registros remotos).`);
+              }
+            } else if (res.error) {
+              showToast(`Aviso Supabase: ${res.error}`);
+            }
+          });
+        }
+      });
+    }
+  }, []);
+
+  // Persistência local desacoplada das telas (sempre preserva cópia local offline)
   useEffect(() => {
     saveNotificaDatabase(db);
   }, [db]);
@@ -387,7 +435,16 @@ export default function App() {
 
     setDb(prev => ({ ...prev, [key]: currentList }));
     setModalConfig(null);
-    showToast('Cadastro salvo neste navegador.');
+
+    notificaDataService.saveRecord(db, key as any, record, index).then(res => {
+      if (res.savedRemote) {
+        showToast('Cadastro salvo no Supabase e no cache local.');
+      } else if (res.error) {
+        showToast(`Salvo localmente. Alerta Supabase: ${res.error}`);
+      } else {
+        showToast('Cadastro salvo neste navegador.');
+      }
+    });
   };
 
   const handleSaveCustomRecord = (savedRecord: any) => {
@@ -408,7 +465,16 @@ export default function App() {
 
     setDb(prev => ({ ...prev, [key]: currentList }));
     setModalConfig(null);
-    showToast('Cadastro salvo neste navegador.');
+
+    notificaDataService.saveRecord(db, key as any, savedRecord, index).then(res => {
+      if (res.savedRemote) {
+        showToast('Cadastro salvo no Supabase e no cache local.');
+      } else if (res.error) {
+        showToast(`Salvo localmente. Alerta Supabase: ${res.error}`);
+      } else {
+        showToast('Cadastro salvo neste navegador.');
+      }
+    });
   };
 
   const handleArchiveRecord = (key: string, index: number) => {
@@ -422,7 +488,16 @@ export default function App() {
     list[index] = record;
 
     setDb(prev => ({ ...prev, [key]: list }));
-    showToast('Registro inativado; os dados foram preservados.');
+
+    notificaDataService.saveRecord(db, key as any, record, index).then(res => {
+      if (res.savedRemote) {
+        showToast('Registro inativado no Supabase; os dados foram preservados.');
+      } else if (res.error) {
+        showToast(`Inativado localmente. Alerta Supabase: ${res.error}`);
+      } else {
+        showToast('Registro inativado; os dados foram preservados.');
+      }
+    });
   };
 
   // Productivity
@@ -435,7 +510,7 @@ export default function App() {
   const handleSaveProductivity = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     const formData = new FormData(e.currentTarget);
-    const kind = String(formData.get('kind') || 'scored');
+    const kind = String(formData.get('kind') || 'scored') as 'scored' | 'unscored' | 'extra';
     const serverName = String(formData.get('serverName') || '').trim();
     const date = String(formData.get('date') || '');
     const prior: any = prodModalIndex === 'new' ? {} : db.produtividades[prodModalIndex as number] || {};
@@ -484,7 +559,7 @@ export default function App() {
       quantity: kind === 'scored' ? Math.max(1, Number(formData.get('quantity') || 1)) : 1,
       unscoredType: kind === 'unscored' ? unscoredType : '',
       unscoredDescription: kind === 'unscored' ? unscoredDescription || unscoredType : '',
-      sourceType: String(formData.get('sourceType') || 'manual'),
+      sourceType: (String(formData.get('sourceType') || 'manual') as 'manual' | 'system'),
       sourceName: String(formData.get('sourceName') || '').trim(),
       processRef: String(formData.get('processRef') || '').trim(),
       documentRef: String(formData.get('documentRef') || '').trim(),
@@ -529,7 +604,16 @@ export default function App() {
 
     setDb(prev => ({ ...prev, produtividades: list }));
     setProdModalIndex(null);
-    showToast('Lançamento salvo neste navegador.');
+
+    notificaDataService.saveRecord(db, 'produtividades', record, prodModalIndex).then(res => {
+      if (res.savedRemote) {
+        showToast('Lançamento salvo no Supabase e no cache local.');
+      } else if (res.error) {
+        showToast(`Salvo localmente. Alerta Supabase: ${res.error}`);
+      } else {
+        showToast('Lançamento salvo neste navegador.');
+      }
+    });
   };
 
   const handleReviewExtra = (index: number, approve: boolean) => {
@@ -587,7 +671,16 @@ export default function App() {
     list[index] = record;
 
     setDb(prev => ({ ...prev, produtividades: list }));
-    showToast(approve ? 'Atividade extra validada.' : 'Atividade extra marcada como não aprovada.');
+
+    notificaDataService.saveRecord(db, 'produtividades', record, index).then(res => {
+      if (res.savedRemote) {
+        showToast(approve ? 'Atividade extra validada e sincronizada no Supabase.' : 'Atividade não aprovada e sincronizada.');
+      } else if (res.error) {
+        showToast(`Salvo localmente. Alerta Supabase: ${res.error}`);
+      } else {
+        showToast(approve ? 'Atividade extra validada.' : 'Atividade extra marcada como não aprovada.');
+      }
+    });
   };
 
   const handleToggleOfficialSheet = (index: number, checked: boolean) => {
@@ -601,6 +694,12 @@ export default function App() {
     list[index] = record;
 
     setDb(prev => ({ ...prev, produtividades: list }));
+
+    notificaDataService.saveRecord(db, 'produtividades', record, index).then(res => {
+      if (res.error) {
+        showToast(`Alterado localmente. Alerta Supabase: ${res.error}`);
+      }
+    });
   };
 
   const handleDeleteProductivity = (index: number) => {
@@ -608,7 +707,16 @@ export default function App() {
     const list = [...db.produtividades];
     list.splice(index, 1);
     setDb(prev => ({ ...prev, produtividades: list }));
-    showToast('Lançamento excluído.');
+
+    notificaDataService.deleteRecord(db, 'produtividades', index).then(res => {
+      if (res.deletedRemote) {
+        showToast('Lançamento excluído no Supabase e localmente.');
+      } else if (res.error) {
+        showToast(`Excluído localmente. Alerta Supabase: ${res.error}`);
+      } else {
+        showToast('Lançamento excluído.');
+      }
+    });
   };
 
   // Portarias
@@ -652,7 +760,16 @@ export default function App() {
 
     setDb(prev => ({ ...prev, portarias: list }));
     setPortariaModalIndex(null);
-    showToast('Trâmite de Portaria salvo neste navegador.');
+
+    notificaDataService.saveRecord(db, 'portarias', record, portariaModalIndex).then(res => {
+      if (res.savedRemote) {
+        showToast('Trâmite de Portaria salvo no Supabase e no cache local.');
+      } else if (res.error) {
+        showToast(`Salvo localmente. Alerta Supabase: ${res.error}`);
+      } else {
+        showToast('Trâmite de Portaria salvo neste navegador.');
+      }
+    });
   };
 
   const handleDeletePortaria = (index: number) => {
@@ -660,7 +777,16 @@ export default function App() {
     const list = [...db.portarias];
     list.splice(index, 1);
     setDb(prev => ({ ...prev, portarias: list }));
-    showToast('Trâmite removido.');
+
+    notificaDataService.deleteRecord(db, 'portarias', index).then(res => {
+      if (res.deletedRemote) {
+        showToast('Trâmite removido no Supabase e localmente.');
+      } else if (res.error) {
+        showToast(`Removido localmente. Alerta Supabase: ${res.error}`);
+      } else {
+        showToast('Trâmite removido.');
+      }
+    });
   };
 
   const pendingReviewsCount = db.revisoes.filter((item: any) => item.situacao === 'Pendente').length;
@@ -847,9 +973,34 @@ export default function App() {
             </div>
           </div>
           <div className="top-right">
-            <span className="local-pill">
-              <i /> DADOS LOCAIS · SEM SINCRONIZAÇÃO
-            </span>
+            {supabaseStatus.connected ? (
+              <span
+                className="local-pill"
+                style={{ background: '#ecfdf5', color: '#047857', borderColor: '#a7f3d0', cursor: 'pointer' }}
+                onClick={() => setActiveView('integracao')}
+                title={supabaseStatus.message}
+              >
+                <i style={{ background: '#10b981' }} /> SUPABASE CONECTADO ({supabaseStatus.latencyMs}ms)
+              </span>
+            ) : supabaseStatus.configured ? (
+              <span
+                className="local-pill"
+                style={{ background: '#fffbeb', color: '#b45309', borderColor: '#fde68a', cursor: 'pointer' }}
+                onClick={() => setActiveView('integracao')}
+                title={supabaseStatus.message}
+              >
+                <i style={{ background: '#f59e0b' }} /> SUPABASE ERRO / LOCAL
+              </span>
+            ) : (
+              <span
+                className="local-pill"
+                onClick={() => setActiveView('integracao')}
+                style={{ cursor: 'pointer' }}
+                title="Armazenamento local no navegador. Clique para ver configuração do Supabase."
+              >
+                <i /> DADOS LOCAIS · SUPABASE PENDENTE
+              </span>
+            )}
             <span className="topname" id="topName">
               {db.usuarios[0]?.nome || 'Acesso liberado (sem login)'}
             </span>
@@ -1622,9 +1773,211 @@ export default function App() {
             <div>
               <div className="pagehead">
                 <div>
-                  <div className="eyebrow">Arquitetura prevista</div>
-                  <h2>Estrutura de integração</h2>
-                  <p>Preparação do Administra como cadastro central, sem ativar conexões nesta etapa.</p>
+                  <div className="eyebrow">Arquitetura e banco de dados</div>
+                  <h2>Estrutura de integração e Supabase</h2>
+                  <p>Configuração do banco de dados relacional Supabase e sincronização com o armazenamento local.</p>
+                </div>
+              </div>
+
+              {/* PAINEL SUPABASE */}
+              <div className="panel" style={{ marginBottom: '20px' }}>
+                <div className="panel-head">
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
+                    <span className="badge green">Supabase</span>
+                    <h3>Banco de Dados Central</h3>
+                  </div>
+                  <button
+                    type="button"
+                    className="btn light small"
+                    onClick={() => {
+                      showToast('Testando conexão com o Supabase...');
+                      checkSupabaseConnection().then(status => {
+                        setSupabaseStatus(status);
+                        showToast(status.message);
+                      });
+                    }}
+                  >
+                    Testar conexão agora
+                  </button>
+                </div>
+                <div className="panel-body">
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(280px, 1fr))', gap: '16px', marginBottom: '18px' }}>
+                    <div style={{ padding: '14px', borderRadius: '10px', background: '#f8fafc', border: '1px solid #e2e8f0' }}>
+                      <span className="muted" style={{ fontSize: '11px', display: 'block', marginBottom: '4px' }}>Status da Conexão</span>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
+                        <span className={`badge ${supabaseStatus.connected ? 'green' : supabaseStatus.configured ? 'amber' : 'gray'}`}>
+                          {supabaseStatus.connected ? 'Conectado' : supabaseStatus.configured ? 'Erro / Não conectado' : 'Não configurado'}
+                        </span>
+                        {supabaseStatus.latencyMs !== undefined && (
+                          <span style={{ fontSize: '11px', color: '#64748b' }}>{supabaseStatus.latencyMs}ms de latência</span>
+                        )}
+                      </div>
+                      <p style={{ margin: 0, fontSize: '11px', color: '#475569' }}>
+                        {supabaseStatus.message}
+                      </p>
+                    </div>
+
+                    <div style={{ padding: '14px', borderRadius: '10px', background: '#f8fafc', border: '1px solid #e2e8f0' }}>
+                      <span className="muted" style={{ fontSize: '11px', display: 'block', marginBottom: '4px' }}>Variáveis de Ambiente</span>
+                      <div style={{ fontSize: '11px', lineHeight: 1.8 }}>
+                        <div>
+                          <b>VITE_SUPABASE_URL:</b>{' '}
+                          {import.meta.env.VITE_SUPABASE_URL ? (
+                            <span style={{ color: '#059669' }}>Configurada</span>
+                          ) : (
+                            <span style={{ color: '#d97706' }}>Ausente no .env</span>
+                          )}
+                        </div>
+                        <div>
+                          <b>VITE_SUPABASE_ANON_KEY:</b>{' '}
+                          {import.meta.env.VITE_SUPABASE_ANON_KEY ? (
+                            <span style={{ color: '#059669' }}>Configurada (Chave pública anônima)</span>
+                          ) : (
+                            <span style={{ color: '#d97706' }}>Ausente no .env</span>
+                          )}
+                        </div>
+                      </div>
+                    </div>
+                  </div>
+
+                  {/* AVISO CRÍTICO DE SEGURANÇA SOBRE RLS E LOGIN */}
+                  <div className="notice amber" style={{ marginBottom: '18px' }}>
+                    <strong style={{ display: 'block', marginBottom: '4px' }}>
+                      Aviso de Segurança · RLS e Operação sem Login:
+                    </strong>
+                    O sistema está atualmente operando com acesso direto (sem tela de login). Ao conectar o cliente frontend diretamente ao Supabase com a chave pública anônima, todas as requisições utilizam a role PostgreSQL <code>anon</code>.
+                    <br />
+                    <strong>Atenção:</strong> Criar políticas de acesso irrestrito para <code>anon</code> deixaria os dados legíveis e modificáveis por qualquer pessoa com acesso à URL do sistema. A alternativa mais segura é manter as permissões restritas e implementar a autenticação de usuários (Supabase Auth) na próxima etapa.
+                  </div>
+
+                  {/* PAINEL DE MIGRAÇÃO E CONTROLE LOCAL */}
+                  <div style={{ borderTop: '1px solid #e2e8f0', paddingTop: '16px' }}>
+                    <h4 style={{ fontSize: '13px', fontWeight: 700, margin: '0 0 10px', color: '#0f172a' }}>
+                      Migração Segura de Registros Locais para o Supabase
+                    </h4>
+                    <p style={{ fontSize: '11px', color: '#64748b', margin: '0 0 14px' }}>
+                      Os dados salvos no navegador são preservados na chave <code>notifica_csb_local_v1</code>. A migração envia os registros existentes sem criar duplicidades (atualizando registros com o mesmo ID).
+                    </p>
+
+                    <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '16px' }}>
+                      {Object.keys(db).map(k => {
+                        const count = Array.isArray(db[k]) ? db[k].length : 0;
+                        return (
+                          <div
+                            key={k}
+                            style={{
+                              padding: '6px 12px',
+                              borderRadius: '8px',
+                              background: '#f1f5f9',
+                              fontSize: '11px',
+                              color: '#334155'
+                            }}
+                          >
+                            <span style={{ textTransform: 'capitalize' }}>{k}:</span> <b>{count}</b> local(is)
+                          </div>
+                        );
+                      })}
+                    </div>
+
+                    <div style={{ display: 'flex', gap: '12px', alignItems: 'center', flexWrap: 'wrap' }}>
+                      <button
+                        type="button"
+                        className="btn green"
+                        disabled={isMigrating || !isSupabaseConfigured()}
+                        onClick={async () => {
+                          if (!isSupabaseConfigured()) {
+                            showToast('Configure as variáveis VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY primeiro.');
+                            return;
+                          }
+                          setIsMigrating(true);
+                          showToast('Iniciando migração dos dados locais para o Supabase...');
+                          try {
+                            const res = await notificaDataService.migrateLocalToSupabase();
+                            setMigrationSummary({
+                              totalMigrated: res.totalMigrated,
+                              errorCount: res.errorCount,
+                              summaries: res.summaries
+                            });
+                            if (res.success) {
+                              showToast(`Migração concluída com sucesso! ${res.totalMigrated} registros enviados.`);
+                            } else {
+                              showToast(`Migração finalizada com ${res.errorCount} erro(s). Confira os detalhes abaixo.`);
+                            }
+                          } catch (err: any) {
+                            showToast(`Falha na migração: ${err?.message || 'Erro desconhecido'}`);
+                          } finally {
+                            setIsMigrating(false);
+                          }
+                        }}
+                      >
+                        {isMigrating ? 'Migrando registros...' : 'Migrar registros locais para o Supabase'}
+                      </button>
+
+                      {migrationSummary && (
+                        <span style={{ fontSize: '11px', color: migrationSummary.errorCount > 0 ? '#b45309' : '#059669' }}>
+                          Resultado: <b>{migrationSummary.totalMigrated}</b> enviados ·{' '}
+                          <b>{migrationSummary.errorCount}</b> erro(s).
+                        </span>
+                      )}
+                    </div>
+
+                    {/* RELATÓRIO DETALHADO DE MIGRAÇÃO */}
+                    {migrationSummary && migrationSummary.summaries.length > 0 && (
+                      <div style={{ marginTop: '14px', padding: '12px', background: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0', fontSize: '11px' }}>
+                        <strong style={{ display: 'block', marginBottom: '8px' }}>Resumo por coleção:</strong>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '8px' }}>
+                          {migrationSummary.summaries.map(s => (
+                            <div key={s.collection} style={{ padding: '6px 10px', background: '#ffffff', borderRadius: '6px', border: '1px solid #cbd5e1' }}>
+                              <b style={{ textTransform: 'capitalize' }}>{s.collection}</b>: {s.migrated}/{s.totalLocal} migrados
+                              {s.errors.length > 0 && (
+                                <div style={{ color: '#dc2626', fontSize: '10px', marginTop: '4px' }}>
+                                  {s.errors.length} erro(s): {s.errors.slice(0, 2).join('; ')}
+                                </div>
+                              )}
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    )}
+
+                    {/* SALVAGUARDA DE LIMPEZA LOCAL APENAS APÓS CONFERÊNCIA */}
+                    <div style={{ marginTop: '20px', padding: '14px', background: '#fffbeb', borderRadius: '10px', border: '1px solid #fef3c7' }}>
+                      <strong style={{ fontSize: '12px', color: '#92400e', display: 'block', marginBottom: '6px' }}>
+                        Salvaguarda do Armazenamento Local
+                      </strong>
+                      <p style={{ fontSize: '11px', color: '#78350f', margin: '0 0 10px' }}>
+                        Por segurança, o Administra Barragens nunca apaga o armazenamento local automaticamente. A remoção da cópia local só deve ser realizada após você conferir que todos os registros estão presentes e íntegros no painel do Supabase.
+                      </p>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px', color: '#78350f', cursor: 'pointer', marginBottom: '10px' }}>
+                        <input
+                          type="checkbox"
+                          checked={confirmLocalClear}
+                          onChange={e => setConfirmLocalClear(e.target.checked)}
+                        />
+                        <span>Confirmo que conferi os registros no Supabase e desejo remover a cópia local deste navegador.</span>
+                      </label>
+                      <button
+                        type="button"
+                        className="btn light small"
+                        disabled={!confirmLocalClear}
+                        style={{ color: confirmLocalClear ? '#dc2626' : '#94a3b8', borderColor: confirmLocalClear ? '#fca5a5' : '#e2e8f0' }}
+                        onClick={() => {
+                          if (!confirmLocalClear) return;
+                          if (window.confirm('Tem certeza absoluta de que deseja limpar os dados locais deste navegador? Os dados já migrados para o Supabase NÃO serão afetados.')) {
+                            const ok = notificaDataService.clearLocalDataAfterConfirmation();
+                            if (ok) {
+                              setConfirmLocalClear(false);
+                              showToast('Armazenamento local deste navegador foi limpo com segurança.');
+                            } else {
+                              showToast('Falha ao limpar armazenamento local.');
+                            }
+                          }
+                        }}
+                      >
+                        Limpar dados locais do navegador
+                      </button>
+                    </div>
+                  </div>
                 </div>
               </div>
 
