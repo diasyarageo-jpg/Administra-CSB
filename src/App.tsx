@@ -290,7 +290,7 @@ export default function App() {
 
     const { key, index } = modalConfig;
     const formData = new FormData(e.currentTarget);
-    const record: any = {};
+    const record: any = { ...(modalConfig.record || {}) };
 
     modules[key].fields.forEach(field => {
       record[field.name] = String(formData.get(field.name) || '').trim();
@@ -1649,9 +1649,9 @@ export default function App() {
                     // Especialização para o vínculo Barragens -> Empreendedores
                     if (modalConfig.key === 'barragens' && field.name === 'empreendedor') {
                       const resolved = resolveDamEntrepreneur(value, db.empreendedores);
-                      const activeEmps = db.empreendedores.filter((e: any) => e.situacao !== 'Inativo');
+                      const activeEmps = db.empreendedores.filter((e: any) => e.situacao === 'Ativo');
                       const linkedEmp = resolved.id ? db.empreendedores.find((e: any) => e.id === resolved.id) : null;
-                      const isLinkedInactive = linkedEmp && linkedEmp.situacao === 'Inativo';
+                      const isLinkedInactive = linkedEmp && linkedEmp.situacao !== 'Ativo';
                       const isUnmatchedLegacy = !resolved.id && Boolean(value && String(value).trim());
 
                       return (
@@ -1670,17 +1670,28 @@ export default function App() {
                             required={field.required}
                           >
                             <option value="">Selecione o empreendedor...</option>
-                            {activeEmps.map((emp: any) => (
-                              <option key={emp.id} value={emp.id}>
-                                {emp.nome}{emp.nomeFantasia ? ` (${emp.nomeFantasia})` : ''}
-                              </option>
-                            ))}
-                            {/* Preserva vínculo caso o empreendedor vinculado esteja inativo */}
-                            {isLinkedInactive && (
-                              <option key={linkedEmp.id} value={linkedEmp.id}>
-                                {linkedEmp.nome}{linkedEmp.nomeFantasia ? ` (${linkedEmp.nomeFantasia})` : ''} (Inativo)
-                              </option>
-                            )}
+                            {activeEmps.map((emp: any) => {
+                              const label = emp.nome
+                                ? `${emp.nome}${emp.nomeFantasia ? ` (${emp.nomeFantasia})` : ''}`
+                                : (emp.nomeFantasia || emp.cpfCnpj || emp.id);
+                              return (
+                                <option key={emp.id} value={emp.id}>
+                                  {label}
+                                </option>
+                              );
+                            })}
+                            {/* Preserva opção de vínculo já existente com empreendedor inativo */}
+                            {isLinkedInactive && (() => {
+                              const label = linkedEmp.nome
+                                ? `${linkedEmp.nome}${linkedEmp.nomeFantasia ? ` (${linkedEmp.nomeFantasia})` : ''}`
+                                : (linkedEmp.nomeFantasia || linkedEmp.cpfCnpj || linkedEmp.id);
+                              const statusLabel = linkedEmp.situacao === 'Inativo' ? ' (Inativo)' : ` (${linkedEmp.situacao || 'Inativo'})`;
+                              return (
+                                <option key={linkedEmp.id} value={linkedEmp.id}>
+                                  {label}{statusLabel}
+                                </option>
+                              );
+                            })()}
                             {/* Preserva texto legado sem correspondência única */}
                             {isUnmatchedLegacy && (
                               <option key="legacy-text" value={value}>
