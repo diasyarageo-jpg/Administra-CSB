@@ -6,6 +6,19 @@ import {
   NotificaDatabase,
   emptyDatabase
 } from './services/notificaDataService';
+import {
+  getUfs,
+  getMunicipiosByUf,
+  getMatoGrossoMunicipios,
+  IbgeUf,
+  IbgeMunicipio
+} from './services/ibgeService';
+import {
+  EmpreendedorModal,
+  BarragemModal,
+  RtModal,
+  GenericRecordModal
+} from './components/CadastrosModals';
 
 // ============================================================================
 // NOTIFICA CSB — AVISO DE TRANSIÇÃO E ARQUITETURA DE DADOS
@@ -87,6 +100,46 @@ export function resolveDamEntrepreneur(
   return { displayName: raw, isUniqueMatch: false, isExactId: false };
 }
 
+// Resolução de vínculo entre Barragem e Empreendimento (por ID ou texto legado)
+export function resolveDamEmpreendimento(
+  rawEmpreendimento: string | undefined | null,
+  empreendimentos: any[] = []
+): { id?: string; displayName: string; isUniqueMatch: boolean } {
+  if (!rawEmpreendimento || !String(rawEmpreendimento).trim()) {
+    return { displayName: '—', isUniqueMatch: false };
+  }
+  const raw = String(rawEmpreendimento).trim();
+  // 1. Busca por ID direto
+  const byId = empreendimentos.find(e => String(e.id) === raw);
+  if (byId) {
+    const doc = byId.tipo === 'Rural'
+      ? (byId.car ? ` · CAR: ${byId.car}` : '')
+      : (byId.escritura ? ` · Escritura: ${byId.escritura}` : '');
+    const displayName = `${byId.nome || byId.id}${byId.tipo ? ` (${byId.tipo}${doc})` : ''}`;
+    return { id: byId.id, displayName, isUniqueMatch: true };
+  }
+  // 2. Registros legados por nome exato
+  const normalized = raw.toLowerCase();
+  const matches = empreendimentos.filter(e => String(e.nome || '').trim().toLowerCase() === normalized);
+  if (matches.length === 1) {
+    const match = matches[0];
+    const doc = match.tipo === 'Rural'
+      ? (match.car ? ` · CAR: ${match.car}` : '')
+      : (match.escritura ? ` · Escritura: ${match.escritura}` : '');
+    const displayName = `${match.nome || match.id}${match.tipo ? ` (${match.tipo}${doc})` : ''}`;
+    return { id: match.id, displayName, isUniqueMatch: true };
+  }
+  return { displayName: raw, isUniqueMatch: false };
+}
+
+// Resolução do nome da Barragem para exibição no cadastro de Responsáveis Técnicos
+export function resolveDamName(damIdOrName: string | undefined | null, barragens: any[] = []): string {
+  if (!damIdOrName || !String(damIdOrName).trim()) return '—';
+  const raw = String(damIdOrName).trim();
+  const dam = barragens.find(b => String(b.id) === raw || String(b.nome || '').trim().toLowerCase() === raw.toLowerCase());
+  return dam ? (dam.nome || dam.id) : raw;
+}
+
 interface FieldConfig {
   name: string;
   label: string;
@@ -134,7 +187,7 @@ const modules: Record<string, ModuleConfig> = {
     title: 'Empreendedores',
     singular: 'empreendedor',
     icon: '◉',
-    search: ['nome', 'cpfCnpj', 'tipoPessoa', 'municipio'],
+    search: ['nome', 'cpfCnpj', 'tipoPessoa', 'municipio', 'uf'],
     fields: [
       { name: 'tipoPessoa', label: 'Tipo de pessoa', type: 'select', options: ['Pessoa física', 'Pessoa jurídica'] },
       { name: 'nome', label: 'Nome / Razão social', required: true },
@@ -142,6 +195,7 @@ const modules: Record<string, ModuleConfig> = {
       { name: 'nomeFantasia', label: 'Nome fantasia' },
       { name: 'email', label: 'E-mail', type: 'email' },
       { name: 'telefone', label: 'Telefone' },
+      { name: 'uf', label: 'UF' },
       { name: 'municipio', label: 'Município de referência' },
       { name: 'observacoes', label: 'Observações', type: 'textarea', full: true }
     ],
@@ -149,19 +203,21 @@ const modules: Record<string, ModuleConfig> = {
       ['nome', 'Nome / Razão social'],
       ['cpfCnpj', 'CPF/CNPJ'],
       ['tipoPessoa', 'Tipo'],
-      ['municipio', 'Município']
+      ['municipio', 'Município / UF'],
+      ['empreendimentos', 'Empreendimentos']
     ]
   },
   barragens: {
     title: 'Barragens cadastradas',
     singular: 'barragem',
     icon: '▤',
-    search: ['nome', 'car', 'municipio', 'empreendedor', 'processo'],
+    search: ['nome', 'car', 'municipio', 'empreendedor', 'empreendimento', 'processo'],
     fields: [
       { name: 'nome', label: 'Identificação / nome da barragem', required: true },
       { name: 'car', label: 'CAR/MT' },
-      { name: 'municipio', label: 'Município' },
+      { name: 'municipio', label: 'Município (Mato Grosso)' },
       { name: 'empreendedor', label: 'Empreendedor vinculado' },
+      { name: 'empreendimento', label: 'Empreendimento vinculado' },
       { name: 'processo', label: 'Número do processo' },
       { name: 'snisb', label: 'Identificador SNISB' },
       { name: 'cursoAgua', label: 'Curso d’água' },
@@ -173,8 +229,9 @@ const modules: Record<string, ModuleConfig> = {
     columns: [
       ['nome', 'Barragem'],
       ['car', 'CAR/MT'],
-      ['municipio', 'Município'],
+      ['municipio', 'Município (MT)'],
       ['empreendedor', 'Empreendedor'],
+      ['empreendimento', 'Empreendimento'],
       ['situacao', 'Situação']
     ]
   },
@@ -182,7 +239,7 @@ const modules: Record<string, ModuleConfig> = {
     title: 'Responsáveis Técnicos',
     singular: 'responsável técnico',
     icon: '⌘',
-    search: ['nome', 'cpf', 'conselho', 'registro', 'especialidades'],
+    search: ['nome', 'cpf', 'conselho', 'registro', 'especialidades', 'artRrt', 'barragemVinculada'],
     fields: [
       { name: 'nome', label: 'Nome completo', required: true },
       { name: 'cpf', label: 'CPF' },
@@ -192,7 +249,8 @@ const modules: Record<string, ModuleConfig> = {
       { name: 'especialidades', label: 'Especialidades' },
       { name: 'email', label: 'E-mail', type: 'email' },
       { name: 'telefone', label: 'Telefone' },
-      { name: 'artRrt', label: 'ART/RRT vinculada' },
+      { name: 'artRrt', label: 'Número da ART/RRT', required: true },
+      { name: 'barragemVinculada', label: 'Barragem vinculada (obrigatório)', required: true },
       { name: 'validade', label: 'Validade da ART/RRT', type: 'date' },
       { name: 'situacao', label: 'Situação', type: 'select', options: ['Ativo', 'Inativo', 'Aguardando confirmação'] },
       { name: 'observacoes', label: 'Observações', type: 'textarea', full: true }
@@ -201,7 +259,8 @@ const modules: Record<string, ModuleConfig> = {
       ['nome', 'Responsável técnico'],
       ['conselho', 'Conselho'],
       ['registro', 'Registro'],
-      ['especialidades', 'Especialidades'],
+      ['artRrt', 'ART/RRT'],
+      ['barragemVinculada', 'Barragem vinculada'],
       ['situacao', 'Situação']
     ]
   },
@@ -324,6 +383,27 @@ export default function App() {
       currentList.unshift(record);
     } else {
       currentList[index] = record;
+    }
+
+    setDb(prev => ({ ...prev, [key]: currentList }));
+    setModalConfig(null);
+    showToast('Cadastro salvo neste navegador.');
+  };
+
+  const handleSaveCustomRecord = (savedRecord: any) => {
+    if (!modalConfig) return;
+    const { key, index } = modalConfig;
+
+    savedRecord.id = savedRecord.id || modalConfig.record.id || (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()));
+    savedRecord.createdAt = modalConfig.record.createdAt || new Date().toISOString();
+    savedRecord.updatedAt = new Date().toISOString();
+    savedRecord.situacao = savedRecord.situacao || 'Ativo';
+
+    const currentList = [...(db[key as keyof typeof db] || [])];
+    if (index === null) {
+      currentList.unshift(savedRecord);
+    } else {
+      currentList[index] = savedRecord;
     }
 
     setDb(prev => ({ ...prev, [key]: currentList }));
@@ -978,8 +1058,29 @@ export default function App() {
             const filteredRecords = records.filter(rec => {
               if (!term) return true;
               if (activeView === 'barragens') {
-                const resolved = resolveDamEntrepreneur(rec.empreendedor, db.empreendedores);
-                if (resolved.displayName.toLowerCase().includes(term)) return true;
+                const resolvedEmp = resolveDamEntrepreneur(rec.empreendedor, db.empreendedores);
+                if (resolvedEmp.displayName.toLowerCase().includes(term)) return true;
+                const linkedEmp = db.empreendedores.find(e => String(e.id) === String(rec.empreendedor));
+                const resolvedEmpr = resolveDamEmpreendimento(rec.empreendimento, linkedEmp?.empreendimentos || []);
+                if (resolvedEmpr.displayName.toLowerCase().includes(term)) return true;
+                if (String(rec.municipio || '').toLowerCase().includes(term)) return true;
+                if (String(rec.municipioIbge || '').includes(term)) return true;
+              }
+              if (activeView === 'empreendedores') {
+                if (rec.uf && String(rec.uf).toLowerCase().includes(term)) return true;
+                if (rec.municipioIbge && String(rec.municipioIbge).includes(term)) return true;
+                if (rec.empreendimentos?.some((em: any) =>
+                  String(em.nome || '').toLowerCase().includes(term) ||
+                  String(em.car || '').toLowerCase().includes(term) ||
+                  String(em.escritura || '').toLowerCase().includes(term) ||
+                  String(em.tipo || '').toLowerCase().includes(term)
+                )) {
+                  return true;
+                }
+              }
+              if (activeView === 'rts') {
+                const damName = resolveDamName(rec.barragemVinculada, db.barragens);
+                if (damName.toLowerCase().includes(term)) return true;
               }
               return config.search.some(f => String(rec[f] || '').toLowerCase().includes(term));
             });
@@ -1049,6 +1150,23 @@ export default function App() {
                                   }
                                   if (activeView === 'barragens' && field === 'empreendedor') {
                                     value = resolveDamEntrepreneur(record.empreendedor, db.empreendedores).displayName;
+                                  }
+                                  if (activeView === 'barragens' && field === 'empreendimento') {
+                                    const linkedEmp = db.empreendedores.find(e => String(e.id) === String(record.empreendedor));
+                                    value = resolveDamEmpreendimento(record.empreendimento, linkedEmp?.empreendimentos || []).displayName;
+                                  }
+                                  if (activeView === 'barragens' && field === 'municipio') {
+                                    value = record.municipio ? `${record.municipio}${record.municipioIbge ? ` (${record.municipioIbge})` : ''}` : '—';
+                                  }
+                                  if (activeView === 'empreendedores' && field === 'municipio') {
+                                    value = record.municipio ? `${record.municipio}${record.uf ? `/${record.uf}` : ''}` : '—';
+                                  }
+                                  if (activeView === 'empreendedores' && field === 'empreendimentos') {
+                                    const count = record.empreendimentos?.length || 0;
+                                    value = count > 0 ? `${count} empreendimento(s)` : 'Nenhum';
+                                  }
+                                  if (activeView === 'rts' && field === 'barragemVinculada') {
+                                    value = resolveDamName(record.barragemVinculada, db.barragens);
                                   }
                                   const className = fIdx === 0 ? 'td-main' : '';
                                   return (
@@ -1616,157 +1734,50 @@ export default function App() {
 
       {/* DYNAMIC RECORD MODAL (for empreendedores, barragens, rts, usuarios) */}
       {modalConfig && (() => {
-        const config = modules[modalConfig.key];
-        if (!config) return null;
-
+        if (modalConfig.key === 'empreendedores') {
+          return (
+            <EmpreendedorModal
+              key={`emp-${modalConfig.index ?? 'new'}`}
+              record={modalConfig.record}
+              isNew={modalConfig.index === null}
+              onClose={() => setModalConfig(null)}
+              onSave={handleSaveCustomRecord}
+            />
+          );
+        }
+        if (modalConfig.key === 'barragens') {
+          return (
+            <BarragemModal
+              key={`barragem-${modalConfig.index ?? 'new'}`}
+              record={modalConfig.record}
+              isNew={modalConfig.index === null}
+              empreendedores={db.empreendedores}
+              onClose={() => setModalConfig(null)}
+              onSave={handleSaveCustomRecord}
+            />
+          );
+        }
+        if (modalConfig.key === 'rts') {
+          return (
+            <RtModal
+              key={`rt-${modalConfig.index ?? 'new'}`}
+              record={modalConfig.record}
+              isNew={modalConfig.index === null}
+              barragens={db.barragens}
+              onClose={() => setModalConfig(null)}
+              onSave={handleSaveCustomRecord}
+            />
+          );
+        }
         return (
-          <div
-            className="modal-back"
-            onClick={e => {
-              if (e.target === e.currentTarget) setModalConfig(null);
-            }}
-          >
-            <form key={`${modalConfig.key}-${modalConfig.index ?? 'new'}`} className="modal" onSubmit={handleSaveRecord}>
-              <div className="modal-head">
-                <h3>
-                  {modalConfig.index === null ? 'Novo cadastro' : 'Editar cadastro'} ·{' '}
-                  {config.singular}
-                </h3>
-                <button
-                  type="button"
-                  className="modal-close"
-                  onClick={() => setModalConfig(null)}
-                >
-                  ×
-                </button>
-              </div>
-
-              <div className="modal-body">
-                <div className="form-grid">
-                  {config.fields.map(field => {
-                    const value = modalConfig.record[field.name] ?? '';
-
-                    // Especialização para o vínculo Barragens -> Empreendedores
-                    if (modalConfig.key === 'barragens' && field.name === 'empreendedor') {
-                      const resolved = resolveDamEntrepreneur(value, db.empreendedores);
-                      const activeEmps = db.empreendedores.filter((e: any) => e.situacao === 'Ativo');
-                      const linkedEmp = resolved.id ? db.empreendedores.find((e: any) => e.id === resolved.id) : null;
-                      const isLinkedInactive = linkedEmp && linkedEmp.situacao !== 'Ativo';
-                      const isUnmatchedLegacy = !resolved.id && Boolean(value && String(value).trim());
-
-                      return (
-                        <div
-                          key={field.name}
-                          className={`form-field ${field.full ? 'full' : ''}`}
-                        >
-                          <label>
-                            {field.label}
-                            {field.required ? ' · obrigatório' : ''}
-                          </label>
-                          <select
-                            className="select"
-                            name={field.name}
-                            defaultValue={resolved.id || (isUnmatchedLegacy ? value : '')}
-                            required={field.required}
-                          >
-                            <option value="">Selecione o empreendedor...</option>
-                            {activeEmps.map((emp: any) => {
-                              const label = emp.nome
-                                ? `${emp.nome}${emp.nomeFantasia ? ` (${emp.nomeFantasia})` : ''}`
-                                : (emp.nomeFantasia || emp.cpfCnpj || emp.id);
-                              return (
-                                <option key={emp.id} value={emp.id}>
-                                  {label}
-                                </option>
-                              );
-                            })}
-                            {/* Preserva opção de vínculo já existente com empreendedor inativo */}
-                            {isLinkedInactive && (() => {
-                              const label = linkedEmp.nome
-                                ? `${linkedEmp.nome}${linkedEmp.nomeFantasia ? ` (${linkedEmp.nomeFantasia})` : ''}`
-                                : (linkedEmp.nomeFantasia || linkedEmp.cpfCnpj || linkedEmp.id);
-                              const statusLabel = linkedEmp.situacao === 'Inativo' ? ' (Inativo)' : ` (${linkedEmp.situacao || 'Inativo'})`;
-                              return (
-                                <option key={linkedEmp.id} value={linkedEmp.id}>
-                                  {label}{statusLabel}
-                                </option>
-                              );
-                            })()}
-                            {/* Preserva texto legado sem correspondência única */}
-                            {isUnmatchedLegacy && (
-                              <option key="legacy-text" value={value}>
-                                {value} (Texto original mantido)
-                              </option>
-                            )}
-                          </select>
-                          {isUnmatchedLegacy && (
-                            <small style={{ color: '#d97706' }}>
-                              Registro legado com nome em texto sem correspondência única. Selecione um empreendedor ativo para vincular por ID ou mantenha o texto original.
-                            </small>
-                          )}
-                        </div>
-                      );
-                    }
-
-                    return (
-                      <div
-                        key={field.name}
-                        className={`form-field ${field.full ? 'full' : ''}`}
-                      >
-                        <label>
-                          {field.label}
-                          {field.required ? ' · obrigatório' : ''}
-                        </label>
-                        {field.type === 'select' ? (
-                          <select
-                            className="select"
-                            name={field.name}
-                            defaultValue={value}
-                            required={field.required}
-                          >
-                            <option value="">Selecione...</option>
-                            {field.options?.map(opt => (
-                              <option key={opt} value={opt}>
-                                {opt}
-                              </option>
-                            ))}
-                          </select>
-                        ) : field.type === 'textarea' ? (
-                          <textarea
-                            className="textarea"
-                            name={field.name}
-                            defaultValue={value}
-                            required={field.required}
-                          />
-                        ) : (
-                          <input
-                            className="input"
-                            name={field.name}
-                            type={field.type || 'text'}
-                            defaultValue={value}
-                            required={field.required}
-                          />
-                        )}
-                      </div>
-                    );
-                  })}
-                </div>
-              </div>
-
-              <div className="modal-foot">
-                <button
-                  type="button"
-                  className="btn light"
-                  onClick={() => setModalConfig(null)}
-                >
-                  Cancelar
-                </button>
-                <button className="btn green" type="submit">
-                  Salvar cadastro
-                </button>
-              </div>
-            </form>
-          </div>
+          <GenericRecordModal
+            key={`${modalConfig.key}-${modalConfig.index ?? 'new'}`}
+            config={modules[modalConfig.key]}
+            record={modalConfig.record}
+            isNew={modalConfig.index === null}
+            onClose={() => setModalConfig(null)}
+            onSubmit={handleSaveRecord}
+          />
         );
       })()}
 

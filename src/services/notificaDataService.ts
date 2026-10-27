@@ -19,6 +19,20 @@
 export const NOTIFICA_STORAGE_KEY = 'notifica_csb_local_v1';
 const LEGACY_STORAGE_KEY = 'administra_csb_local_v1';
 
+export interface EmpreendimentoRecord {
+  id: string;
+  nome: string;
+  tipo: 'Rural' | 'Urbano';
+  car?: string;
+  escritura?: string;
+  uf?: string;
+  municipio?: string;
+  municipioIbge?: string;
+  observacoes?: string;
+  createdAt?: string;
+  updatedAt?: string;
+}
+
 export interface EmpreendedorRecord {
   id: string;
   tipoPessoa?: string;
@@ -27,8 +41,12 @@ export interface EmpreendedorRecord {
   nomeFantasia?: string;
   email?: string;
   telefone?: string;
+  uf?: string;
   municipio?: string;
+  municipioIbge?: string;
   observacoes?: string;
+  empreendimentos?: EmpreendimentoRecord[];
+  situacao?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -37,8 +55,11 @@ export interface BarragemRecord {
   id: string;
   nome: string;
   car?: string;
+  uf?: string;
   municipio?: string;
+  municipioIbge?: string;
   empreendedor?: string;
+  empreendimento?: string;
   processo?: string;
   snisb?: string;
   cursoAgua?: string;
@@ -54,10 +75,18 @@ export interface ResponsavelTecnicoRecord {
   id: string;
   nome: string;
   cpf?: string;
-  crea?: string;
+  conselho?: string;
+  ufConselho?: string;
+  registro?: string;
+  especialidades?: string;
   art?: string;
+  artRrt?: string;
+  barragemVinculada?: string;
+  barragensVinculadas?: string[];
+  validade?: string;
   telefone?: string;
   email?: string;
+  situacao?: string;
   observacoes?: string;
   createdAt: string;
   updatedAt: string;
