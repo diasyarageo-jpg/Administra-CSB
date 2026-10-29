@@ -34,12 +34,22 @@ export interface AuthUserProfile {
   perfilProfissional?: PerfilProfissional | string;
   setor?: SetorLotacao | string;
   papel: UserRole;
-  situacao: 'Ativo' | 'Inativo' | 'Pendente';
+  situacao: 'Ativo' | 'Inativo' | 'Pendente' | 'Recusado';
   observacoes?: string;
   createdBy?: string;
   updatedBy?: string;
   createdAt: string;
   updatedAt?: string;
+}
+
+export interface AccessRequestPayload {
+  nome: string;
+  matricula: string;
+  email: string;
+  login?: string;
+  perfilProfissional: string;
+  setor: string;
+  senha?: string;
 }
 
 export interface CurrentAuthSession {

@@ -124,7 +124,7 @@ export interface UsuarioRecord {
   perfilProfissional?: string;
   setor?: string;
   papel: string;
-  situacao?: 'Ativo' | 'Inativo' | 'Pendente';
+  situacao?: 'Ativo' | 'Inativo' | 'Pendente' | 'Recusado';
   status?: 'Ativo' | 'Inativo';
   authUserId?: string;
   observacoes?: string;
@@ -407,8 +407,8 @@ export function toDbUsuario(r: any) {
     perfil_profissional: r.perfilProfissional ?? r.perfil_profissional ?? null,
     setor: r.setor ?? null,
     papel: r.papel ?? 'Usuário',
-    situacao: r.situacao ?? r.status ?? 'Ativo',
-    status: r.status ?? r.situacao ?? 'Ativo',
+    situacao: r.situacao ?? 'Ativo',
+    status: (r.situacao === 'Inativo' || r.situacao === 'Recusado') ? 'Inativo' : 'Ativo',
     auth_user_id: r.authUserId ?? r.auth_user_id ?? null,
     observacoes: r.observacoes ?? null,
     created_by: r.createdBy ?? r.created_by ?? null,

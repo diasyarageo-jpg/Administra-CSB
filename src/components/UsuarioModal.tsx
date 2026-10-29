@@ -246,6 +246,7 @@ export function UsuarioModal({ record, isNew, onClose, onSave }: UsuarioModalPro
                 <option value="Ativo">Ativo</option>
                 <option value="Inativo">Inativo</option>
                 <option value="Pendente">Pendente</option>
+                <option value="Recusado">Recusado</option>
               </select>
             </div>
 

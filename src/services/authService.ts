@@ -4,7 +4,7 @@
  */
 
 import { supabase, isSupabaseConfigured } from './supabaseClient';
-import { UserRole, AuthUserProfile, CurrentAuthSession } from '../types/auth';
+import { UserRole, AuthUserProfile, CurrentAuthSession, AccessRequestPayload } from '../types/auth';
 
 export interface LoginResult {
   success: boolean;
@@ -128,7 +128,11 @@ export const authService = {
       perfilProfissional: row.perfil_profissional || row.perfilProfissional || '',
       setor: row.setor || '',
       papel,
-      situacao: (row.situacao === 'Inativo' ? 'Inativo' : row.situacao === 'Pendente' ? 'Pendente' : 'Ativo'),
+      situacao: (
+        row.situacao === 'Inativo' ? 'Inativo' :
+        row.situacao === 'Pendente' ? 'Pendente' :
+        row.situacao === 'Recusado' ? 'Recusado' : 'Ativo'
+      ),
       observacoes: row.observacoes || '',
       createdBy: row.created_by || undefined,
       updatedBy: row.updated_by || undefined,
@@ -170,12 +174,17 @@ export const authService = {
 
       const profile = await this.getUserProfile(data.user.id, data.user.email);
 
-      // Se o usuário estiver inativo na tabela de usuários, não autoriza acesso
-      if (profile && profile.situacao === 'Inativo') {
+      // Se o usuário não estiver ativo na tabela de usuários, não autoriza acesso
+      if (profile && profile.situacao !== 'Ativo') {
         await supabase.auth.signOut();
+        const msg = profile.situacao === 'Pendente'
+          ? 'Sua solicitação de acesso está aguardando aprovação da Administração da CSB.'
+          : profile.situacao === 'Recusado'
+          ? 'Sua solicitação de acesso foi recusada pela administração da CSB.'
+          : 'Esta conta de usuário está desativada na CSB. Entre em contato com a administração.';
         return {
           success: false,
-          error: 'Esta conta de usuário está desativada na CSB. Entre em contato com a administração.'
+          error: msg
         };
       }
 
@@ -253,6 +262,142 @@ export const authService = {
   },
 
   /**
+   * Solicita novo acesso na página de login (pública).
+   * Registra a solicitação como 'Pendente' com senha cifrada (nunca em texto puro).
+   * Sem expor service_role no frontend e sem conceder acesso imediato.
+   */
+  async requestAccess(payload: AccessRequestPayload): Promise<{ success: boolean; message?: string; error?: string }> {
+    if (!isSupabaseConfigured() || !supabase) {
+      return {
+        success: false,
+        error: 'Supabase não está configurado. Não é possível enviar solicitações no momento.'
+      };
+    }
+
+    try {
+      const { data, error } = await supabase.functions.invoke('admin-manage-user', {
+        body: {
+          action: 'request-access',
+          ...payload
+        }
+      });
+
+      if (error) {
+        return {
+          success: false,
+          error: `Erro ao enviar solicitação: ${error.message}`
+        };
+      }
+
+      if (data && !data.success) {
+        return {
+          success: false,
+          error: data.error || 'Não foi possível registrar a solicitação de acesso.'
+        };
+      }
+
+      return {
+        success: true,
+        message: data?.message || 'Solicitação registrada com sucesso. Aguarde a avaliação da administração.'
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: err?.message || 'Falha de comunicação ao registrar solicitação de acesso.'
+      };
+    }
+  },
+
+  /**
+   * Administrador aprova uma solicitação de acesso:
+   * Define o papel selecionado, provisiona a conta no Supabase Auth e ativa o cadastro.
+   */
+  async approveUser(usuarioId: string, papel: UserRole): Promise<{ success: boolean; authUserId?: string; error?: string; message?: string }> {
+    if (!isSupabaseConfigured() || !supabase) {
+      return { success: false, error: 'Supabase não está configurado.' };
+    }
+
+    try {
+      const { data, error } = await supabase.functions.invoke('admin-manage-user', {
+        body: {
+          action: 'approve-user',
+          usuarioId,
+          papel
+        }
+      });
+
+      if (error) {
+        return {
+          success: false,
+          error: `Erro na aprovação: ${error.message}`
+        };
+      }
+
+      if (data && !data.success) {
+        return {
+          success: false,
+          error: data.error || 'Falha ao aprovar usuário.'
+        };
+      }
+
+      return {
+        success: true,
+        authUserId: data?.authUserId,
+        message: data?.message || 'Usuário aprovado com sucesso.'
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: err?.message || 'Erro ao comunicar com a Edge Function de aprovação.'
+      };
+    }
+  },
+
+  /**
+   * Administrador recusa uma solicitação de acesso.
+   * Marca como 'Recusado' sem conceder acesso ao sistema.
+   */
+  async rejectUser(usuarioId: string, motivo?: string): Promise<{ success: boolean; error?: string; message?: string }> {
+    if (!isSupabaseConfigured() || !supabase) {
+      return { success: false, error: 'Supabase não está configurado.' };
+    }
+
+    try {
+      const { data, error } = await supabase.functions.invoke('admin-manage-user', {
+        body: {
+          action: 'reject-user',
+          usuarioId,
+          motivo
+        }
+      });
+
+      if (error) {
+        return {
+          success: false,
+          error: `Erro na recusa: ${error.message}`
+        };
+      }
+
+      if (data && !data.success) {
+        return {
+          success: false,
+          error: data.error || 'Falha ao recusar solicitação.'
+        };
+      }
+
+      return {
+        success: true,
+        message: data?.message || 'Solicitação recusada com sucesso.'
+      };
+    } catch (err: any) {
+      return {
+        success: false,
+        error: err?.message || 'Erro ao comunicar com a Edge Function de recusa.'
+      };
+    }
+  },
+
+  /**
    * Cria ou convida um novo usuário no Supabase Auth via Edge Function protegida
    * (Sem expor a service_role key no frontend).
    */
@@ -262,14 +407,17 @@ export const authService = {
     }
 
     try {
-      const { data, error } = await supabase.functions.invoke('admin-create-user', {
-        body: payload
+      const { data, error } = await supabase.functions.invoke('admin-manage-user', {
+        body: {
+          action: 'create-user',
+          ...payload
+        }
       });
 
       if (error) {
         return {
           success: false,
-          error: `Edge Function erro: ${error.message}. Verifique se a função 'admin-create-user' foi implantada no projeto Supabase.`
+          error: `Edge Function erro: ${error.message}. Verifique se a função 'admin-manage-user' foi implantada no projeto Supabase.`
         };
       }
 
@@ -288,7 +436,7 @@ export const authService = {
     } catch (err: any) {
       return {
         success: false,
-        error: err?.message || 'Falha ao acionar a Edge Function admin-create-user.'
+        error: err?.message || 'Falha ao acionar a Edge Function admin-manage-user.'
       };
     }
   }

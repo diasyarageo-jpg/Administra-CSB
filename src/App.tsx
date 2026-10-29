@@ -29,6 +29,7 @@ import {
 import { authService } from './services/authService';
 import { UserRole, AuthUserProfile, PERFIS_PROFISSIONAIS, SETORES } from './types/auth';
 import { LoginModal } from './components/LoginModal';
+import { LoginPage } from './components/LoginPage';
 import { UsuarioModal } from './components/UsuarioModal';
 
 // ============================================================================
@@ -279,7 +280,7 @@ const modules: Record<string, ModuleConfig> = {
     title: 'Gerenciamento de usuários',
     singular: 'usuário',
     icon: '♙',
-    search: ['nome', 'matricula', 'login', 'email', 'papel', 'perfilProfissional', 'setor'],
+    search: ['nome', 'matricula', 'login', 'email', 'papel', 'perfilProfissional', 'setor', 'situacao'],
     fields: [
       { name: 'nome', label: 'Nome completo', required: true },
       { name: 'matricula', label: 'Matrícula funcional', required: true },
@@ -288,7 +289,7 @@ const modules: Record<string, ModuleConfig> = {
       { name: 'perfilProfissional', label: 'Perfil profissional', type: 'select', options: [...PERFIS_PROFISSIONAIS] },
       { name: 'setor', label: 'Setor de lotação', type: 'select', options: [...SETORES] },
       { name: 'papel', label: 'Papel de acesso (RBAC)', type: 'select', options: ['Administrador', 'Usuário', 'Visualizador'] },
-      { name: 'situacao', label: 'Situação funcional', type: 'select', options: ['Ativo', 'Inativo', 'Pendente'] },
+      { name: 'situacao', label: 'Situação funcional', type: 'select', options: ['Ativo', 'Inativo', 'Pendente', 'Recusado'] },
       { name: 'observacoes', label: 'Observações', type: 'textarea', full: true }
     ],
     columns: [
@@ -316,6 +317,16 @@ export default function App() {
   const [currentUserProfile, setCurrentUserProfile] = useState<AuthUserProfile | null>(null);
   const [userRole, setUserRole] = useState<UserRole>('Administrador');
   const [showLoginModal, setShowLoginModal] = useState(false);
+  const [isAuthChecking, setIsAuthChecking] = useState(true);
+
+  // Estados para aprovação e recusa de solicitações de usuários por Administradores
+  const [userToApprove, setUserToApprove] = useState<any | null>(null);
+  const [approvalRole, setApprovalRole] = useState<UserRole>('Usuário');
+  const [isApproving, setIsApproving] = useState(false);
+  const [userToReject, setUserToReject] = useState<any | null>(null);
+  const [rejectMotivo, setRejectMotivo] = useState('');
+  const [isRejecting, setIsRejecting] = useState(false);
+  const [usuarioSituacaoFilter, setUsuarioSituacaoFilter] = useState<string>('Todos');
 
   // Modals state
   const [modalConfig, setModalConfig] = useState<{
@@ -334,7 +345,7 @@ export default function App() {
     configured: isSupabaseConfigured(),
     connected: false,
     message: isSupabaseConfigured()
-      ? 'Verificando conexão com o Supabase...'
+      ? 'Aguardando autenticação institucional...'
       : 'Supabase não configurado (.env). Operando exclusivamente no armazenamento local.'
   });
   const [isMigrating, setIsMigrating] = useState(false);
@@ -345,7 +356,7 @@ export default function App() {
   } | null>(null);
   const [confirmLocalClear, setConfirmLocalClear] = useState(false);
 
-  // Inicialização do Supabase Auth e sessão
+  // Inicialização do Supabase Auth e verificação de sessão (sem carregar dados operacionais antes do login)
   useEffect(() => {
     async function initAuth() {
       if (isSupabaseConfigured() && supabase) {
@@ -359,7 +370,6 @@ export default function App() {
           } else {
             setCurrentAuthUser(null);
             setCurrentUserProfile(null);
-            setShowLoginModal(true);
           }
 
           const { data: authListener } = supabase.auth.onAuthStateChange(async (event, session) => {
@@ -372,7 +382,7 @@ export default function App() {
             } else if (event === 'SIGNED_OUT') {
               setCurrentAuthUser(null);
               setCurrentUserProfile(null);
-              setShowLoginModal(true);
+              setUserRole('Visualizador');
             }
           });
 
@@ -381,10 +391,13 @@ export default function App() {
           };
         } catch (err) {
           console.warn('[App] Erro na verificação de sessão:', err);
+        } finally {
+          setIsAuthChecking(false);
         }
       } else {
-        // Modo local offline
+        // Modo local offline (sem Supabase configurado)
         setUserRole('Administrador');
+        setIsAuthChecking(false);
       }
     }
 
@@ -399,9 +412,11 @@ export default function App() {
     }
   }, [activeView, userRole]);
 
-  // Verificação inicial de conectividade e sincronização com Supabase
+  // Consulta e sincronização de dados com Supabase:
+  // EXCLUSIVAMENTE executada após autenticação válida com perfil Ativo.
+  // Nenhum dado operacional é consultado ou carregado antes da autenticação.
   useEffect(() => {
-    if (isSupabaseConfigured()) {
+    if (isSupabaseConfigured() && currentAuthUser && currentUserProfile?.situacao === 'Ativo') {
       checkSupabaseConnection().then(status => {
         setSupabaseStatus(status);
         if (status.connected) {
@@ -411,9 +426,9 @@ export default function App() {
                 (acc: number, arr: any[]) => acc + (Array.isArray(arr) ? arr.length : 0),
                 0
               );
+              setDb(res.db);
+              saveNotificaDatabase(res.db);
               if (remoteTotal > 0) {
-                setDb(res.db);
-                saveNotificaDatabase(res.db);
                 showToast(`Sincronizado com o Supabase (${remoteTotal} registros remotos).`);
               }
             } else if (res.error) {
@@ -423,7 +438,7 @@ export default function App() {
         }
       });
     }
-  }, []);
+  }, [currentAuthUser, currentUserProfile]);
 
   // Persistência local desacoplada das telas (sempre preserva cópia local offline)
   useEffect(() => {
@@ -887,7 +902,114 @@ export default function App() {
     });
   };
 
+  const handleConfirmApproval = async () => {
+    if (!userToApprove) return;
+    setIsApproving(true);
+    try {
+      const res = await authService.approveUser(userToApprove.id, approvalRole);
+      if (!res.success) {
+        showToast(`Erro na aprovação: ${res.error}`);
+      } else {
+        const updatedUsuarios = db.usuarios.map(u => {
+          if (u.id === userToApprove.id) {
+            return {
+              ...u,
+              papel: approvalRole,
+              situacao: 'Ativo' as const,
+              status: 'Ativo' as const,
+              authUserId: res.authUserId || u.authUserId
+            };
+          }
+          return u;
+        });
+        const newDb = { ...db, usuarios: updatedUsuarios };
+        setDb(newDb);
+        saveNotificaDatabase(newDb);
+        showToast(res.message || 'Usuário aprovado e credencial provisionada com sucesso!');
+        setUserToApprove(null);
+      }
+    } catch (err: any) {
+      showToast(`Falha na aprovação: ${err?.message}`);
+    } finally {
+      setIsApproving(false);
+    }
+  };
+
+  const handleConfirmRejection = async () => {
+    if (!userToReject) return;
+    setIsRejecting(true);
+    try {
+      const res = await authService.rejectUser(userToReject.id, rejectMotivo);
+      if (!res.success) {
+        showToast(`Erro ao recusar: ${res.error}`);
+      } else {
+        const updatedUsuarios = db.usuarios.map(u => {
+          if (u.id === userToReject.id) {
+            return {
+              ...u,
+              situacao: 'Recusado' as const,
+              status: 'Inativo' as const,
+              observacoes: rejectMotivo ? `${u.observacoes ? u.observacoes + ' ' : ''}[Recusa: ${rejectMotivo}]` : u.observacoes
+            };
+          }
+          return u;
+        });
+        const newDb = { ...db, usuarios: updatedUsuarios };
+        setDb(newDb);
+        saveNotificaDatabase(newDb);
+        showToast('Solicitação de acesso recusada.');
+        setUserToReject(null);
+      }
+    } catch (err: any) {
+      showToast(`Falha ao recusar: ${err?.message}`);
+    } finally {
+      setIsRejecting(false);
+    }
+  };
+
   const pendingReviewsCount = db.revisoes.filter((item: any) => item.situacao === 'Pendente').length;
+
+  // Se o Supabase estiver configurado e o usuário NÃO estiver autenticado ou seu perfil não for Ativo:
+  // Renderiza EXCLUSIVAMENTE a página de login isolada (sem carregar dados ou telas do sistema)
+  if (isSupabaseConfigured() && (!currentAuthUser || currentUserProfile?.situacao !== 'Ativo')) {
+    if (isAuthChecking) {
+      return (
+        <div
+          style={{
+            minHeight: '100vh',
+            display: 'flex',
+            flexDirection: 'column',
+            alignItems: 'center',
+            justifyContent: 'center',
+            background: '#064e3b',
+            color: '#ffffff',
+            fontFamily: 'Inter, system-ui, sans-serif'
+          }}
+        >
+          <div style={{ fontSize: '32px', marginBottom: '12px' }}>⚖</div>
+          <div style={{ fontSize: '16px', fontWeight: 700, letterSpacing: '0.04em' }}>ADMINISTRA-CSB</div>
+          <div style={{ fontSize: '11px', opacity: 0.8, marginTop: '6px' }}>Verificando autenticação institucional...</div>
+        </div>
+      );
+    }
+
+    const pendingNotice = (currentAuthUser && currentUserProfile?.situacao === 'Pendente')
+      ? 'Sua solicitação de acesso está aguardando aprovação da Administração da CSB. Você poderá acessar o sistema assim que seu cadastro for ativado.'
+      : (currentAuthUser && currentUserProfile?.situacao === 'Recusado')
+      ? 'Sua solicitação de acesso foi recusada pela Administração da CSB.'
+      : null;
+
+    return (
+      <LoginPage
+        onLoginSuccess={(user, profile) => {
+          setCurrentAuthUser(user);
+          setCurrentUserProfile(profile);
+          setUserRole(profile?.papel || 'Usuário');
+        }}
+        pendingNotice={pendingNotice}
+      />
+    );
+  }
 
   return (
     <div className="shell">
@@ -1366,6 +1488,9 @@ export default function App() {
             const term = (searchTerms[activeView] || '').toLowerCase().trim();
 
             const filteredRecords = records.filter(rec => {
+              if (activeView === 'usuarios' && usuarioSituacaoFilter !== 'Todos') {
+                if (rec.situacao !== usuarioSituacaoFilter) return false;
+              }
               if (!term) return true;
               if (activeView === 'barragens') {
                 const resolvedEmp = resolveDamEntrepreneur(rec.empreendedor, db.empreendedores);
@@ -1395,6 +1520,10 @@ export default function App() {
               return config.search.some(f => String(rec[f] || '').toLowerCase().includes(term));
             });
 
+            const pendingUsersCount = activeView === 'usuarios'
+              ? records.filter((u: any) => u.situacao === 'Pendente').length
+              : 0;
+
             return (
               <div>
                 <div className="pagehead">
@@ -1415,14 +1544,87 @@ export default function App() {
                   </div>
                 </div>
 
+                {activeView === 'usuarios' && pendingUsersCount > 0 && userRole === 'Administrador' && (
+                  <div
+                    style={{
+                      marginBottom: '16px',
+                      padding: '16px',
+                      background: '#fffbeb',
+                      border: '1px solid #fde68a',
+                      borderRadius: '12px'
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '10px' }}>
+                      <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                        <span style={{ fontSize: '18px' }}>⏳</span>
+                        <strong style={{ fontSize: '13px', color: '#92400e' }}>
+                          Solicitações de Acesso Pendentes ({pendingUsersCount})
+                        </strong>
+                      </div>
+                      <span style={{ fontSize: '11px', color: '#b45309' }}>
+                        Defina a função do usuário para criar/ativar a credencial no Supabase Auth
+                      </span>
+                    </div>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                      {records
+                        .filter((u: any) => u.situacao === 'Pendente')
+                        .map((pu: any) => (
+                          <div
+                            key={pu.id}
+                            style={{
+                              display: 'flex',
+                              alignItems: 'center',
+                              justifyContent: 'space-between',
+                              background: '#ffffff',
+                              padding: '10px 14px',
+                              borderRadius: '8px',
+                              border: '1px solid #fcd34d'
+                            }}
+                          >
+                            <div>
+                              <strong style={{ fontSize: '13px', color: '#1f2937' }}>{pu.nome}</strong>
+                              <span style={{ fontSize: '11px', color: '#6b7280', marginLeft: '8px' }}>
+                                Matr. {pu.matricula || '—'} · {pu.email} · {pu.setor || pu.perfilProfissional || 'SEMA-MT'}
+                              </span>
+                            </div>
+                            <div style={{ display: 'flex', gap: '6px' }}>
+                              <button
+                                type="button"
+                                className="btn green small"
+                                style={{ padding: '4px 10px', fontSize: '11px' }}
+                                onClick={() => {
+                                  setUserToApprove(pu);
+                                  setApprovalRole('Usuário');
+                                }}
+                              >
+                                Aprovar Acesso
+                              </button>
+                              <button
+                                type="button"
+                                className="btn soft small"
+                                style={{ padding: '4px 10px', fontSize: '11px', color: '#dc2626' }}
+                                onClick={() => {
+                                  setUserToReject(pu);
+                                  setRejectMotivo('');
+                                }}
+                              >
+                                Recusar
+                              </button>
+                            </div>
+                          </div>
+                        ))}
+                    </div>
+                  </div>
+                )}
+
                 {activeView === 'usuarios' && (
-                  <div className="notice amber" style={{ marginBottom: '14px' }}>
-                    Gestão de usuários da Coordenadoria de Segurança de Barragens (CSB). O controle de acesso é gerido pelo Supabase Auth integrado às funções e permissões (RBAC).
+                  <div className="notice slate" style={{ marginBottom: '14px', fontSize: '11px' }}>
+                    Gestão de usuários da CSB: todos os registros (Ativos, Inativos, Pendentes e Recusados) são listados e protegidos por RLS.
                   </div>
                 )}
 
                 <div className="panel">
-                  <div className="toolbar">
+                  <div className="toolbar" style={{ flexWrap: 'wrap', gap: '10px' }}>
                     <div className="field-search">
                       <span>⌕</span>
                       <input
@@ -1434,7 +1636,34 @@ export default function App() {
                         }
                       />
                     </div>
-                    <span className="badge gray">{filteredRecords.length} registros</span>
+
+                    {activeView === 'usuarios' && (
+                      <div style={{ display: 'flex', gap: '6px', alignItems: 'center', flexWrap: 'wrap' }}>
+                        {['Todos', 'Pendente', 'Ativo', 'Inativo', 'Recusado'].map(st => {
+                          const count = st === 'Todos' ? records.length : records.filter((u: any) => u.situacao === st).length;
+                          const isSelected = usuarioSituacaoFilter === st;
+                          return (
+                            <button
+                              key={st}
+                              type="button"
+                              className={`btn ${isSelected ? 'soft' : 'light'} small`}
+                              style={{
+                                padding: '3px 8px',
+                                fontSize: '11px',
+                                fontWeight: isSelected ? 700 : 500,
+                                borderColor: isSelected ? '#047857' : undefined,
+                                color: isSelected ? '#047857' : undefined
+                              }}
+                              onClick={() => setUsuarioSituacaoFilter(st)}
+                            >
+                              {st === 'Todos' ? `Todos (${count})` : `${st}s (${count})`}
+                            </button>
+                          );
+                        })}
+                      </div>
+                    )}
+
+                    <span className="badge gray" style={{ marginLeft: 'auto' }}>{filteredRecords.length} registros</span>
                   </div>
 
                   <div className="tablewrap">
@@ -1478,6 +1707,30 @@ export default function App() {
                                   if (activeView === 'rts' && field === 'barragemVinculada') {
                                     value = resolveDamName(record.barragemVinculada, db.barragens);
                                   }
+                                  if (activeView === 'usuarios' && field === 'situacao') {
+                                    const sit = record.situacao || 'Ativo';
+                                    const badgeClass =
+                                      sit === 'Ativo'
+                                        ? 'green'
+                                        : sit === 'Pendente'
+                                        ? 'amber'
+                                        : sit === 'Recusado'
+                                        ? 'red'
+                                        : 'gray';
+                                    return (
+                                      <td key={field}>
+                                        <span className={`badge ${badgeClass}`}>{sit}</span>
+                                      </td>
+                                    );
+                                  }
+                                  if (activeView === 'usuarios' && field === 'papel') {
+                                    const p = record.papel || 'Usuário';
+                                    return (
+                                      <td key={field}>
+                                        <span className={`badge ${p === 'Administrador' ? 'blue' : 'gray'}`}>{p}</span>
+                                      </td>
+                                    );
+                                  }
                                   const className = fIdx === 0 ? 'td-main' : '';
                                   return (
                                     <td key={field} className={className}>
@@ -1487,6 +1740,33 @@ export default function App() {
                                 })}
                                 <td>
                                   <div className="row-actions">
+                                    {activeView === 'usuarios' && record.situacao === 'Pendente' && userRole === 'Administrador' && (
+                                      <>
+                                        <button
+                                          className="iconbtn"
+                                          style={{ color: '#047857', fontWeight: 700 }}
+                                          title="Aprovar e ativar usuário no Supabase Auth"
+                                          onClick={() => {
+                                            setUserToApprove(record);
+                                            setApprovalRole('Usuário');
+                                          }}
+                                        >
+                                          Aprovar
+                                        </button>
+                                        <button
+                                          className="iconbtn"
+                                          style={{ color: '#dc2626' }}
+                                          title="Recusar solicitação"
+                                          onClick={() => {
+                                            setUserToReject(record);
+                                            setRejectMotivo('');
+                                          }}
+                                        >
+                                          Recusar
+                                        </button>
+                                      </>
+                                    )}
+
                                     {userRole === 'Visualizador' ? (
                                       <button
                                         className="iconbtn"
@@ -2340,19 +2620,123 @@ export default function App() {
         );
       })()}
 
-      {/* LOGIN MODAL */}
-      <LoginModal
-        isOpen={showLoginModal}
-        allowClose={!isSupabaseConfigured() || Boolean(currentAuthUser)}
-        onClose={() => setShowLoginModal(false)}
-        onSuccess={sessionData => {
-          setShowLoginModal(false);
-          setCurrentAuthUser(sessionData.user);
-          setCurrentUserProfile(sessionData.profile);
-          setUserRole(sessionData.profile?.papel || 'Usuário');
-          showToast(`Bem-vindo, ${sessionData.profile?.nome || sessionData.user?.email}!`);
-        }}
-      />
+      {/* APPROVAL MODAL (Administrador aprova solicitação e define função) */}
+      {userToApprove && (
+        <div className="modal-back">
+          <div className="modal" style={{ maxWidth: '480px', width: '100%' }}>
+            <div className="modal-head">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ fontSize: '18px', color: '#047857' }}>✓</span>
+                <div>
+                  <h3 style={{ margin: 0, fontSize: '15px', fontWeight: 700 }}>Aprovar Solicitação de Acesso</h3>
+                  <p style={{ margin: 0, fontSize: '11px', color: '#6b7280' }}>
+                    Defina a função para provisionar a credencial no Supabase Auth
+                  </p>
+                </div>
+              </div>
+              <button type="button" className="modal-close" onClick={() => setUserToApprove(null)}>×</button>
+            </div>
+            <div className="modal-body">
+              <div
+                style={{
+                  padding: '12px 14px',
+                  background: '#f8fafc',
+                  borderRadius: '8px',
+                  border: '1px solid #e2e8f0',
+                  marginBottom: '14px',
+                  fontSize: '12px',
+                  lineHeight: '1.6'
+                }}
+              >
+                <div><strong>Servidor:</strong> {userToApprove.nome}</div>
+                <div><strong>Matrícula:</strong> {userToApprove.matricula || '—'}</div>
+                <div><strong>E-mail institucional:</strong> {userToApprove.email}</div>
+                <div><strong>Perfil Profissional:</strong> {userToApprove.perfilProfissional || '—'}</div>
+                <div><strong>Setor:</strong> {userToApprove.setor || '—'}</div>
+              </div>
+
+              <div className="form-field">
+                <label style={{ display: 'block', fontSize: '12px', fontWeight: 700, color: '#374151', marginBottom: '4px' }}>
+                  Atribuir Função / Papel Institucional (RBAC) *
+                </label>
+                <select
+                  className="select"
+                  value={approvalRole}
+                  onChange={e => setApprovalRole(e.target.value as UserRole)}
+                  disabled={isApproving}
+                >
+                  <option value="Administrador">Administrador (Acesso total)</option>
+                  <option value="Usuário">Usuário (Operacional: cria e edita próprios)</option>
+                  <option value="Visualizador">Visualizador (Somente leitura)</option>
+                </select>
+              </div>
+
+              <p style={{ fontSize: '11px', color: '#64748b', marginTop: '10px' }}>
+                Ao confirmar, a conta é provisionada no Supabase Auth com a senha escolhida pelo usuário (ou a padrão @12345) e o status é alterado para <strong>Ativo</strong>.
+              </p>
+            </div>
+            <div className="modal-foot">
+              <button type="button" className="btn light" onClick={() => setUserToApprove(null)} disabled={isApproving}>
+                Cancelar
+              </button>
+              <button type="button" className="btn green" onClick={handleConfirmApproval} disabled={isApproving}>
+                {isApproving ? 'Provisionando no Supabase Auth...' : 'Confirmar Aprovação e Ativar'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* REJECTION MODAL (Administrador recusa solicitação sem conceder acesso) */}
+      {userToReject && (
+        <div className="modal-back">
+          <div className="modal" style={{ maxWidth: '440px', width: '100%' }}>
+            <div className="modal-head">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ fontSize: '18px', color: '#dc2626' }}>✕</span>
+                <div>
+                  <h3 style={{ margin: 0, fontSize: '15px', fontWeight: 700, color: '#991b1b' }}>Recusar Solicitação de Acesso</h3>
+                  <p style={{ margin: 0, fontSize: '11px', color: '#6b7280' }}>
+                    O usuário não terá acesso concedido ao sistema
+                  </p>
+                </div>
+              </div>
+              <button type="button" className="modal-close" onClick={() => setUserToReject(null)}>×</button>
+            </div>
+            <div className="modal-body">
+              <p style={{ fontSize: '12px', color: '#374151', margin: '0 0 12px' }}>
+                Confirma a recusa da solicitação de acesso de <strong>{userToReject.nome}</strong> ({userToReject.email})?
+              </p>
+              <div className="form-field">
+                <label style={{ display: 'block', fontSize: '11px', fontWeight: 600, color: '#374151', marginBottom: '4px' }}>
+                  Motivo da recusa (opcional)
+                </label>
+                <input
+                  className="input"
+                  value={rejectMotivo}
+                  onChange={e => setRejectMotivo(e.target.value)}
+                  placeholder="Ex.: Matrícula ou vínculo funcional não identificado"
+                  disabled={isRejecting}
+                />
+              </div>
+            </div>
+            <div className="modal-foot">
+              <button type="button" className="btn light" onClick={() => setUserToReject(null)} disabled={isRejecting}>
+                Cancelar
+              </button>
+              <button
+                type="button"
+                className="btn"
+                style={{ background: '#dc2626', color: '#ffffff' }}
+                onClick={handleConfirmRejection}
+                disabled={isRejecting}
+              >
+                {isRejecting ? 'Registrando recusa...' : 'Confirmar Recusa'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
 
       {/* PRODUCTIVITY MODAL */}
       {prodModalIndex !== null && (() => {
