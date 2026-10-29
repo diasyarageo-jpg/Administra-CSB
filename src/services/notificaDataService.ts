@@ -48,6 +48,8 @@ export interface EmpreendedorRecord {
   observacoes?: string;
   empreendimentos?: EmpreendimentoRecord[];
   situacao?: string;
+  createdBy?: string;
+  updatedBy?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -68,6 +70,8 @@ export interface BarragemRecord {
   longitude?: string;
   situacao?: string;
   observacoes?: string;
+  createdBy?: string;
+  updatedBy?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -89,6 +93,8 @@ export interface ResponsavelTecnicoRecord {
   email?: string;
   situacao?: string;
   observacoes?: string;
+  createdBy?: string;
+  updatedBy?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -103,6 +109,8 @@ export interface RevisaoConciliacaoRecord {
   situacao: 'Pendente' | 'Conciliado' | 'Rejeitado';
   decisao?: string;
   responsavel?: string;
+  createdBy?: string;
+  updatedBy?: string;
   createdAt?: string;
   updatedAt: string;
 }
@@ -112,11 +120,16 @@ export interface UsuarioRecord {
   nome: string;
   login?: string;
   email: string;
-  papel: string;
+  matricula?: string;
+  perfilProfissional?: string;
   setor?: string;
+  papel: string;
   situacao?: 'Ativo' | 'Inativo' | 'Pendente';
   status?: 'Ativo' | 'Inativo';
+  authUserId?: string;
   observacoes?: string;
+  createdBy?: string;
+  updatedBy?: string;
   createdAt: string;
   updatedAt?: string;
 }
@@ -132,6 +145,8 @@ export interface PortariaRecord {
   orderPublished: boolean;
   draft: boolean;
   notes?: string;
+  createdBy?: string;
+  updatedBy?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -163,6 +178,8 @@ export interface ProdutividadeRecord {
   officialSheetAt?: string;
   description?: string;
   notes?: string;
+  createdBy?: string;
+  updatedBy?: string;
   createdAt: string;
   updatedAt: string;
 }
@@ -209,6 +226,8 @@ export function toDbEmpreendedor(r: any) {
     observacoes: r.observacoes ?? null,
     situacao: r.situacao ?? 'Ativo',
     empreendimentos: Array.isArray(r.empreendimentos) ? r.empreendimentos : [],
+    created_by: r.createdBy ?? r.created_by ?? null,
+    updated_by: r.updatedBy ?? r.updated_by ?? null,
     created_at: r.createdAt ?? r.created_at ?? new Date().toISOString(),
     updated_at: r.updatedAt ?? r.updated_at ?? new Date().toISOString()
   };
@@ -229,6 +248,8 @@ export function fromDbEmpreendedor(row: any): EmpreendedorRecord {
     observacoes: row.observacoes ?? '',
     situacao: row.situacao ?? 'Ativo',
     empreendimentos: Array.isArray(row.empreendimentos) ? row.empreendimentos : [],
+    createdBy: row.created_by ?? row.createdBy ?? '',
+    updatedBy: row.updated_by ?? row.updatedBy ?? '',
     createdAt: row.created_at ?? row.createdAt ?? new Date().toISOString(),
     updatedAt: row.updated_at ?? row.updatedAt ?? new Date().toISOString()
   };
@@ -251,6 +272,8 @@ export function toDbBarragem(r: any) {
     longitude: r.longitude ?? null,
     situacao: r.situacao ?? 'Aguardando confirmação',
     observacoes: r.observacoes ?? null,
+    created_by: r.createdBy ?? r.created_by ?? null,
+    updated_by: r.updatedBy ?? r.updated_by ?? null,
     created_at: r.createdAt ?? r.created_at ?? new Date().toISOString(),
     updated_at: r.updatedAt ?? r.updated_at ?? new Date().toISOString()
   };
@@ -273,6 +296,8 @@ export function fromDbBarragem(row: any): BarragemRecord {
     longitude: row.longitude ?? '',
     situacao: row.situacao ?? 'Aguardando confirmação',
     observacoes: row.observacoes ?? '',
+    createdBy: row.created_by ?? row.createdBy ?? '',
+    updatedBy: row.updated_by ?? row.updatedBy ?? '',
     createdAt: row.created_at ?? row.createdAt ?? new Date().toISOString(),
     updatedAt: row.updated_at ?? row.updatedAt ?? new Date().toISOString()
   };
@@ -300,6 +325,8 @@ export function toDbRt(r: any) {
     email: r.email ?? null,
     situacao: r.situacao ?? 'Ativo',
     observacoes: r.observacoes ?? null,
+    created_by: r.createdBy ?? r.created_by ?? null,
+    updated_by: r.updatedBy ?? r.updated_by ?? null,
     created_at: r.createdAt ?? r.created_at ?? new Date().toISOString(),
     updated_at: r.updatedAt ?? r.updated_at ?? new Date().toISOString()
   };
@@ -327,6 +354,8 @@ export function fromDbRt(row: any): ResponsavelTecnicoRecord {
     email: row.email ?? '',
     situacao: row.situacao ?? 'Ativo',
     observacoes: row.observacoes ?? '',
+    createdBy: row.created_by ?? row.createdBy ?? '',
+    updatedBy: row.updated_by ?? row.updatedBy ?? '',
     createdAt: row.created_at ?? row.createdAt ?? new Date().toISOString(),
     updatedAt: row.updated_at ?? row.updatedAt ?? new Date().toISOString()
   };
@@ -343,6 +372,8 @@ export function toDbRevisao(r: any) {
     situacao: r.situacao ?? 'Pendente',
     decisao: r.decisao ?? null,
     responsavel: r.responsavel ?? null,
+    created_by: r.createdBy ?? r.created_by ?? null,
+    updated_by: r.updatedBy ?? r.updated_by ?? null,
     created_at: r.createdAt ?? r.created_at ?? new Date().toISOString(),
     updated_at: r.updatedAt ?? r.updated_at ?? new Date().toISOString()
   };
@@ -359,6 +390,8 @@ export function fromDbRevisao(row: any): RevisaoConciliacaoRecord {
     situacao: row.situacao ?? 'Pendente',
     decisao: row.decisao ?? '',
     responsavel: row.responsavel ?? '',
+    createdBy: row.created_by ?? row.createdBy ?? '',
+    updatedBy: row.updated_by ?? row.updatedBy ?? '',
     createdAt: row.created_at ?? row.createdAt ?? new Date().toISOString(),
     updatedAt: row.updated_at ?? row.updatedAt ?? new Date().toISOString()
   };
@@ -370,11 +403,16 @@ export function toDbUsuario(r: any) {
     nome: String(r.nome || ''),
     login: r.login ?? r.email ?? '',
     email: String(r.email || ''),
+    matricula: r.matricula ?? null,
+    perfil_profissional: r.perfilProfissional ?? r.perfil_profissional ?? null,
     setor: r.setor ?? null,
-    papel: r.papel ?? 'Analista',
+    papel: r.papel ?? 'Usuário',
     situacao: r.situacao ?? r.status ?? 'Ativo',
     status: r.status ?? r.situacao ?? 'Ativo',
+    auth_user_id: r.authUserId ?? r.auth_user_id ?? null,
     observacoes: r.observacoes ?? null,
+    created_by: r.createdBy ?? r.created_by ?? null,
+    updated_by: r.updatedBy ?? r.updated_by ?? null,
     created_at: r.createdAt ?? r.created_at ?? new Date().toISOString(),
     updated_at: r.updatedAt ?? r.updated_at ?? new Date().toISOString()
   };
@@ -386,11 +424,16 @@ export function fromDbUsuario(row: any): UsuarioRecord {
     nome: row.nome ?? '',
     login: row.login ?? row.email ?? '',
     email: row.email ?? '',
+    matricula: row.matricula ?? row.matricula ?? '',
+    perfilProfissional: row.perfil_profissional ?? row.perfilProfissional ?? '',
     setor: row.setor ?? '',
-    papel: row.papel ?? 'Analista',
+    papel: row.papel ?? 'Usuário',
     situacao: row.situacao ?? row.status ?? 'Ativo',
     status: row.status ?? row.situacao ?? 'Ativo',
+    authUserId: row.auth_user_id ?? row.authUserId ?? '',
     observacoes: row.observacoes ?? '',
+    createdBy: row.created_by ?? row.createdBy ?? '',
+    updatedBy: row.updated_by ?? row.updatedBy ?? '',
     createdAt: row.created_at ?? row.createdAt ?? new Date().toISOString(),
     updatedAt: row.updated_at ?? row.updatedAt ?? new Date().toISOString()
   };
@@ -408,6 +451,8 @@ export function toDbPortaria(r: any) {
     order_published: Boolean(r.orderPublished ?? r.order_published),
     draft: Boolean(r.draft),
     notes: r.notes ?? null,
+    created_by: r.createdBy ?? r.created_by ?? null,
+    updated_by: r.updatedBy ?? r.updated_by ?? null,
     created_at: r.createdAt ?? r.created_at ?? new Date().toISOString(),
     updated_at: r.updatedAt ?? r.updated_at ?? new Date().toISOString()
   };
@@ -425,6 +470,8 @@ export function fromDbPortaria(row: any): PortariaRecord {
     orderPublished: Boolean(row.order_published ?? row.orderPublished),
     draft: Boolean(row.draft),
     notes: row.notes ?? '',
+    createdBy: row.created_by ?? row.createdBy ?? '',
+    updatedBy: row.updated_by ?? row.updatedBy ?? '',
     createdAt: row.created_at ?? row.createdAt ?? new Date().toISOString(),
     updatedAt: row.updated_at ?? row.updatedAt ?? new Date().toISOString()
   };
@@ -458,6 +505,8 @@ export function toDbProdutividade(r: any) {
     official_sheet_at: r.officialSheetAt ?? r.official_sheet_at ?? null,
     description: r.description ?? null,
     notes: r.notes ?? null,
+    created_by: r.createdBy ?? r.created_by ?? null,
+    updated_by: r.updatedBy ?? r.updated_by ?? null,
     created_at: r.createdAt ?? r.created_at ?? new Date().toISOString(),
     updated_at: r.updatedAt ?? r.updated_at ?? new Date().toISOString()
   };
@@ -491,6 +540,8 @@ export function fromDbProdutividade(row: any): ProdutividadeRecord {
     officialSheetAt: row.official_sheet_at ?? row.officialSheetAt ?? '',
     description: row.description ?? '',
     notes: row.notes ?? '',
+    createdBy: row.created_by ?? row.createdBy ?? '',
+    updatedBy: row.updated_by ?? row.updatedBy ?? '',
     createdAt: row.created_at ?? row.createdAt ?? new Date().toISOString(),
     updatedAt: row.updated_at ?? row.updatedAt ?? new Date().toISOString()
   };
@@ -672,7 +723,8 @@ export const notificaDataService = {
     currentDb: NotificaDatabase,
     collectionKey: K,
     record: any,
-    index: number | 'new' | null
+    index: number | 'new' | null,
+    currentUserId?: string
   ): Promise<SaveOperationResult> {
     const list = [...(currentDb[collectionKey] as any[])];
     const timestamp = new Date().toISOString();
@@ -681,6 +733,8 @@ export const notificaDataService = {
     const recordWithTimestamps = {
       ...record,
       id: String(id),
+      createdBy: record.createdBy || currentUserId || undefined,
+      updatedBy: currentUserId || record.updatedBy || undefined,
       updatedAt: timestamp,
       createdAt: record.createdAt || timestamp
     };

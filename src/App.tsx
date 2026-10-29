@@ -10,7 +10,8 @@ import {
 import {
   isSupabaseConfigured,
   checkSupabaseConnection,
-  SupabaseConnectionStatus
+  SupabaseConnectionStatus,
+  supabase
 } from './services/supabaseClient';
 import {
   getUfs,
@@ -25,6 +26,10 @@ import {
   RtModal,
   GenericRecordModal
 } from './components/CadastrosModals';
+import { authService } from './services/authService';
+import { UserRole, AuthUserProfile, PERFIS_PROFISSIONAIS, SETORES } from './types/auth';
+import { LoginModal } from './components/LoginModal';
+import { UsuarioModal } from './components/UsuarioModal';
 
 // ============================================================================
 // NOTIFICA CSB — AVISO DE TRANSIÇÃO E ARQUITETURA DE DADOS
@@ -274,34 +279,43 @@ const modules: Record<string, ModuleConfig> = {
     title: 'Gerenciamento de usuários',
     singular: 'usuário',
     icon: '♙',
-    search: ['nome', 'login', 'papel', 'setor'],
+    search: ['nome', 'matricula', 'login', 'email', 'papel', 'perfilProfissional', 'setor'],
     fields: [
       { name: 'nome', label: 'Nome completo', required: true },
-      { name: 'login', label: 'Identificação de acesso', required: true },
-      { name: 'email', label: 'E-mail institucional', type: 'email' },
-      { name: 'setor', label: 'Setor / unidade' },
-      { name: 'papel', label: 'Perfil', type: 'select', options: ['Administrador', 'Analista', 'Visualizador'] },
-      { name: 'situacao', label: 'Situação', type: 'select', options: ['Ativo', 'Inativo', 'Pendente'] },
+      { name: 'matricula', label: 'Matrícula funcional', required: true },
+      { name: 'login', label: 'Identificação de acesso' },
+      { name: 'email', label: 'E-mail institucional', type: 'email', required: true },
+      { name: 'perfilProfissional', label: 'Perfil profissional', type: 'select', options: [...PERFIS_PROFISSIONAIS] },
+      { name: 'setor', label: 'Setor de lotação', type: 'select', options: [...SETORES] },
+      { name: 'papel', label: 'Papel de acesso (RBAC)', type: 'select', options: ['Administrador', 'Usuário', 'Visualizador'] },
+      { name: 'situacao', label: 'Situação funcional', type: 'select', options: ['Ativo', 'Inativo', 'Pendente'] },
       { name: 'observacoes', label: 'Observações', type: 'textarea', full: true }
     ],
     columns: [
-      ['nome', 'Usuário'],
-      ['login', 'Identificação'],
+      ['nome', 'Nome do servidor'],
+      ['matricula', 'Matrícula'],
+      ['email', 'E-mail institucional'],
+      ['perfilProfissional', 'Perfil profissional'],
       ['setor', 'Setor'],
-      ['papel', 'Perfil'],
+      ['papel', 'Função / Papel'],
       ['situacao', 'Situação']
     ]
   }
 };
 
 export default function App() {
-  // Acesso direto sem login: o estado inicial carrega diretamente da camada de serviço local
   const [db, setDb] = useState<NotificaDatabase>(() => loadNotificaDatabase());
 
   const [activeView, setActiveView] = useState('home');
   const [menuOpen, setMenuOpen] = useState(false);
   const [searchTerms, setSearchTerms] = useState<Record<string, string>>({});
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  // Estado de Autenticação e RBAC
+  const [currentAuthUser, setCurrentAuthUser] = useState<any | null>(null);
+  const [currentUserProfile, setCurrentUserProfile] = useState<AuthUserProfile | null>(null);
+  const [userRole, setUserRole] = useState<UserRole>('Administrador');
+  const [showLoginModal, setShowLoginModal] = useState(false);
 
   // Modals state
   const [modalConfig, setModalConfig] = useState<{
@@ -330,6 +344,60 @@ export default function App() {
     summaries: MigrationSummary[];
   } | null>(null);
   const [confirmLocalClear, setConfirmLocalClear] = useState(false);
+
+  // Inicialização do Supabase Auth e sessão
+  useEffect(() => {
+    async function initAuth() {
+      if (isSupabaseConfigured() && supabase) {
+        try {
+          const { user } = await authService.getSession();
+          if (user) {
+            setCurrentAuthUser(user);
+            const prof = await authService.getUserProfile(user.id, user.email);
+            setCurrentUserProfile(prof);
+            setUserRole(prof?.papel || 'Usuário');
+          } else {
+            setCurrentAuthUser(null);
+            setCurrentUserProfile(null);
+            setShowLoginModal(true);
+          }
+
+          const { data: authListener } = supabase.auth.onAuthStateChange(async (event, session) => {
+            if (event === 'SIGNED_IN' && session?.user) {
+              setCurrentAuthUser(session.user);
+              const prof = await authService.getUserProfile(session.user.id, session.user.email);
+              setCurrentUserProfile(prof);
+              setUserRole(prof?.papel || 'Usuário');
+              setShowLoginModal(false);
+            } else if (event === 'SIGNED_OUT') {
+              setCurrentAuthUser(null);
+              setCurrentUserProfile(null);
+              setShowLoginModal(true);
+            }
+          });
+
+          return () => {
+            authListener?.subscription?.unsubscribe();
+          };
+        } catch (err) {
+          console.warn('[App] Erro na verificação de sessão:', err);
+        }
+      } else {
+        // Modo local offline
+        setUserRole('Administrador');
+      }
+    }
+
+    initAuth();
+  }, []);
+
+  // Proteção de rota do módulo Usuários
+  useEffect(() => {
+    if (activeView === 'usuarios' && userRole !== 'Administrador') {
+      setActiveView('home');
+      showToast('Acesso restrito: o módulo Usuários é restrito a Administradores.');
+    }
+  }, [activeView, userRole]);
 
   // Verificação inicial de conectividade e sincronização com Supabase
   useEffect(() => {
@@ -436,7 +504,7 @@ export default function App() {
     setDb(prev => ({ ...prev, [key]: currentList }));
     setModalConfig(null);
 
-    notificaDataService.saveRecord(db, key as any, record, index).then(res => {
+    notificaDataService.saveRecord(db, key as any, record, index, currentAuthUser?.id).then(res => {
       if (res.savedRemote) {
         showToast('Cadastro salvo no Supabase e no cache local.');
       } else if (res.error) {
@@ -466,7 +534,7 @@ export default function App() {
     setDb(prev => ({ ...prev, [key]: currentList }));
     setModalConfig(null);
 
-    notificaDataService.saveRecord(db, key as any, savedRecord, index).then(res => {
+    notificaDataService.saveRecord(db, key as any, savedRecord, index, currentAuthUser?.id).then(res => {
       if (res.savedRemote) {
         showToast('Cadastro salvo no Supabase e no cache local.');
       } else if (res.error) {
@@ -480,6 +548,13 @@ export default function App() {
   const handleArchiveRecord = (key: string, index: number) => {
     const list = [...(db[key as keyof typeof db] || [])];
     const record: any = list[index];
+
+    // Verificação de permissão para Usuário
+    if (userRole === 'Usuário' && record.createdBy && currentAuthUser?.id && record.createdBy !== currentAuthUser.id) {
+      showToast('Apenas o autor do registro ou um Administrador pode inativar este item.');
+      return;
+    }
+
     const label = record.nome || record.login || record.nomeFantasia || 'este registro';
     if (!confirm(`Inativar “${label}”? O registro será mantido na base.`)) return;
 
@@ -489,13 +564,36 @@ export default function App() {
 
     setDb(prev => ({ ...prev, [key]: list }));
 
-    notificaDataService.saveRecord(db, key as any, record, index).then(res => {
+    notificaDataService.saveRecord(db, key as any, record, index, currentAuthUser?.id).then(res => {
       if (res.savedRemote) {
         showToast('Registro inativado no Supabase; os dados foram preservados.');
       } else if (res.error) {
         showToast(`Inativado localmente. Alerta Supabase: ${res.error}`);
       } else {
         showToast('Registro inativado; os dados foram preservados.');
+      }
+    });
+  };
+
+  const handleDeleteRecord = (key: string, index: number) => {
+    if (userRole !== 'Administrador') {
+      showToast('Apenas Administradores têm permissão para excluir registros.');
+      return;
+    }
+
+    const list = [...(db[key as keyof typeof db] || [])];
+    const record: any = list[index];
+    const label = record.nome || record.login || record.nomeFantasia || 'este registro';
+    if (!confirm(`Confirma a exclusão definitiva de “${label}”? Esta ação é permanente.`)) return;
+
+    notificaDataService.deleteRecord(db, key as any, index).then(res => {
+      setDb(res.updatedDb);
+      if (res.deletedRemote) {
+        showToast('Registro excluído do Supabase e do cache local.');
+      } else if (res.error) {
+        showToast(`Removido localmente. Alerta Supabase: ${res.error}`);
+      } else {
+        showToast('Registro excluído localmente.');
       }
     });
   };
@@ -605,7 +703,7 @@ export default function App() {
     setDb(prev => ({ ...prev, produtividades: list }));
     setProdModalIndex(null);
 
-    notificaDataService.saveRecord(db, 'produtividades', record, prodModalIndex).then(res => {
+    notificaDataService.saveRecord(db, 'produtividades', record, prodModalIndex, currentAuthUser?.id).then(res => {
       if (res.savedRemote) {
         showToast('Lançamento salvo no Supabase e no cache local.');
       } else if (res.error) {
@@ -761,7 +859,7 @@ export default function App() {
     setDb(prev => ({ ...prev, portarias: list }));
     setPortariaModalIndex(null);
 
-    notificaDataService.saveRecord(db, 'portarias', record, portariaModalIndex).then(res => {
+    notificaDataService.saveRecord(db, 'portarias', record, portariaModalIndex, currentAuthUser?.id).then(res => {
       if (res.savedRemote) {
         showToast('Trâmite de Portaria salvo no Supabase e no cache local.');
       } else if (res.error) {
@@ -841,8 +939,8 @@ export default function App() {
             {db.usuarios[0]?.nome?.charAt(0) || 'A'}
           </div>
           <div>
-            <strong id="sideName">{db.usuarios[0]?.nome || 'Acesso Direto'}</strong>
-            <small id="sideRole">{db.usuarios[0]?.papel || 'Ambiente Administra Barragens'}</small>
+            <strong id="sideName">{currentUserProfile?.nome || currentAuthUser?.email || 'Servidor SEMA'}</strong>
+            <small id="sideRole">{currentUserProfile?.perfilProfissional || (userRole === 'Administrador' ? 'Administrador do Sistema' : userRole)}</small>
           </div>
         </div>
 
@@ -920,15 +1018,17 @@ export default function App() {
           </button>
 
           <div className="nav-label">Administração</div>
-          <button
-            className={`navbtn ${activeView === 'usuarios' ? 'active' : ''}`}
-            onClick={() => {
-              setActiveView('usuarios');
-              setMenuOpen(false);
-            }}
-          >
-            <span className="nav-ico">♙</span>Usuários
-          </button>
+          {userRole === 'Administrador' && (
+            <button
+              className={`navbtn ${activeView === 'usuarios' ? 'active' : ''}`}
+              onClick={() => {
+                setActiveView('usuarios');
+                setMenuOpen(false);
+              }}
+            >
+              <span className="nav-ico">♙</span>Usuários
+            </button>
+          )}
           <button
             className={`navbtn ${activeView === 'integracao' ? 'active' : ''}`}
             onClick={() => {
@@ -952,7 +1052,7 @@ export default function App() {
         <div className="sidefoot">
           Administra como <b>cadastro central</b>
           <br />
-          Versão local · dados neste navegador
+          {supabaseStatus.connected ? 'Conectado ao Supabase' : 'Versão local · dados neste navegador'}
         </div>
       </aside>
 
@@ -1001,9 +1101,68 @@ export default function App() {
                 <i /> DADOS LOCAIS · SUPABASE PENDENTE
               </span>
             )}
-            <span className="topname" id="topName">
-              {db.usuarios[0]?.nome || 'Acesso liberado (sem login)'}
-            </span>
+
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', lineHeight: 1.2 }}>
+                <span className="topname" style={{ fontWeight: 600 }}>
+                  {currentUserProfile?.nome || currentAuthUser?.email || 'Servidor SEMA-MT'}
+                </span>
+                <span style={{ fontSize: '10px', color: '#64748b' }}>
+                  {currentUserProfile?.matricula ? `Matr. ${currentUserProfile.matricula} · ` : ''}
+                  <span
+                    style={{
+                      fontWeight: 600,
+                      color:
+                        userRole === 'Administrador'
+                          ? '#7c3aed'
+                          : userRole === 'Usuário'
+                          ? '#0284c7'
+                          : '#475569'
+                    }}
+                  >
+                    {userRole}
+                  </span>
+                </span>
+              </div>
+
+              {currentAuthUser ? (
+                <button
+                  type="button"
+                  className="btn soft small"
+                  style={{ padding: '4px 8px', fontSize: '11px' }}
+                  onClick={async () => {
+                    await authService.logout();
+                    setCurrentAuthUser(null);
+                    setCurrentUserProfile(null);
+                    setShowLoginModal(true);
+                  }}
+                  title="Encerrar sessão"
+                >
+                  Sair
+                </button>
+              ) : isSupabaseConfigured() ? (
+                <button
+                  type="button"
+                  className="btn green small"
+                  style={{ padding: '4px 8px', fontSize: '11px' }}
+                  onClick={() => setShowLoginModal(true)}
+                >
+                  Entrar
+                </button>
+              ) : (
+                <select
+                  className="select"
+                  style={{ padding: '2px 6px', fontSize: '11px', height: '26px' }}
+                  value={userRole}
+                  onChange={e => setUserRole(e.target.value as UserRole)}
+                  title="Simular papel localmente (modo offline)"
+                >
+                  <option value="Administrador">Admin (Simulado)</option>
+                  <option value="Usuário">Usuário (Simulado)</option>
+                  <option value="Visualizador">Visualizador (Simulado)</option>
+                </select>
+              )}
+            </div>
           </div>
         </header>
 
@@ -1245,20 +1404,20 @@ export default function App() {
                     <p>Consulte e mantenha os registros desta base central do Administra.</p>
                   </div>
                   <div className="actions">
-                    <button
-                      className="btn green"
-                      onClick={() => handleOpenRecordModal(activeView)}
-                    >
-                      ＋ Novo cadastro
-                    </button>
+                    {userRole !== 'Visualizador' && (
+                      <button
+                        className="btn green"
+                        onClick={() => handleOpenRecordModal(activeView)}
+                      >
+                        ＋ Novo cadastro
+                      </button>
+                    )}
                   </div>
                 </div>
 
                 {activeView === 'usuarios' && (
                   <div className="notice amber" style={{ marginBottom: '14px' }}>
-                    Cada servidor deve ter identificação individual. Este protótipo não autentica
-                    usuários nem armazena senhas; o vínculo com o provedor de identidade será
-                    definido na integração.
+                    Gestão de usuários da Coordenadoria de Segurança de Barragens (CSB). O controle de acesso é gerido pelo Supabase Auth integrado às funções e permissões (RBAC).
                   </div>
                 )}
 
@@ -1328,20 +1487,56 @@ export default function App() {
                                 })}
                                 <td>
                                   <div className="row-actions">
-                                    <button
-                                      className="iconbtn"
-                                      title="Editar"
-                                      onClick={() => handleOpenRecordModal(activeView, originalIndex)}
-                                    >
-                                      Editar
-                                    </button>
-                                    <button
-                                      className="iconbtn"
-                                      title="Inativar"
-                                      onClick={() => handleArchiveRecord(activeView, originalIndex)}
-                                    >
-                                      Inativar
-                                    </button>
+                                    {userRole === 'Visualizador' ? (
+                                      <button
+                                        className="iconbtn"
+                                        title="Visualizar detalhes"
+                                        onClick={() => handleOpenRecordModal(activeView, originalIndex)}
+                                      >
+                                        Detalhes
+                                      </button>
+                                    ) : (
+                                      <>
+                                        {(userRole === 'Administrador' || !record.createdBy || record.createdBy === currentAuthUser?.id) ? (
+                                          <button
+                                            className="iconbtn"
+                                            title="Editar"
+                                            onClick={() => handleOpenRecordModal(activeView, originalIndex)}
+                                          >
+                                            Editar
+                                          </button>
+                                        ) : (
+                                          <button
+                                            className="iconbtn"
+                                            title="Registro criado por outro usuário. Somente leitura."
+                                            onClick={() => handleOpenRecordModal(activeView, originalIndex)}
+                                          >
+                                            Visualizar
+                                          </button>
+                                        )}
+
+                                        {(userRole === 'Administrador' || !record.createdBy || record.createdBy === currentAuthUser?.id) && (
+                                          <button
+                                            className="iconbtn"
+                                            title="Inativar registro"
+                                            onClick={() => handleArchiveRecord(activeView, originalIndex)}
+                                          >
+                                            Inativar
+                                          </button>
+                                        )}
+
+                                        {userRole === 'Administrador' && (
+                                          <button
+                                            className="iconbtn"
+                                            style={{ color: '#dc2626' }}
+                                            title="Excluir definitivamente"
+                                            onClick={() => handleDeleteRecord(activeView, originalIndex)}
+                                          >
+                                            Excluir
+                                          </button>
+                                        )}
+                                      </>
+                                    )}
                                   </div>
                                 </td>
                               </tr>
@@ -2122,6 +2317,17 @@ export default function App() {
             />
           );
         }
+        if (modalConfig.key === 'usuarios') {
+          return (
+            <UsuarioModal
+              key={`user-${modalConfig.index ?? 'new'}`}
+              record={modalConfig.record}
+              isNew={modalConfig.index === null}
+              onClose={() => setModalConfig(null)}
+              onSave={handleSaveCustomRecord}
+            />
+          );
+        }
         return (
           <GenericRecordModal
             key={`${modalConfig.key}-${modalConfig.index ?? 'new'}`}
@@ -2133,6 +2339,20 @@ export default function App() {
           />
         );
       })()}
+
+      {/* LOGIN MODAL */}
+      <LoginModal
+        isOpen={showLoginModal}
+        allowClose={!isSupabaseConfigured() || Boolean(currentAuthUser)}
+        onClose={() => setShowLoginModal(false)}
+        onSuccess={sessionData => {
+          setShowLoginModal(false);
+          setCurrentAuthUser(sessionData.user);
+          setCurrentUserProfile(sessionData.profile);
+          setUserRole(sessionData.profile?.papel || 'Usuário');
+          showToast(`Bem-vindo, ${sessionData.profile?.nome || sessionData.user?.email}!`);
+        }}
+      />
 
       {/* PRODUCTIVITY MODAL */}
       {prodModalIndex !== null && (() => {
