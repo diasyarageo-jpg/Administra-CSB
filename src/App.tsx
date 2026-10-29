@@ -2672,7 +2672,7 @@ export default function App() {
               </div>
 
               <p style={{ fontSize: '11px', color: '#64748b', marginTop: '10px' }}>
-                Ao confirmar, a conta é provisionada no Supabase Auth com a senha escolhida pelo usuário (ou a padrão @12345) e o status é alterado para <strong>Ativo</strong>.
+                Ao confirmar, a conta é provisionada no Supabase Auth por fluxo seguro de convite institucional e o status é alterado para <strong>Ativo</strong>.
               </p>
             </div>
             <div className="modal-foot">

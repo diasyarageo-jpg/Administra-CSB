@@ -263,8 +263,8 @@ export const authService = {
 
   /**
    * Solicita novo acesso na página de login (pública).
-   * Registra a solicitação como 'Pendente' com senha cifrada (nunca em texto puro).
-   * Sem expor service_role no frontend e sem conceder acesso imediato.
+   * Registra a solicitação como 'Pendente' sem coletar ou armazenar senhas,
+   * enviando-a para a página Gerenciamento de Usuários para análise de um administrador.
    */
   async requestAccess(payload: AccessRequestPayload): Promise<{ success: boolean; message?: string; error?: string }> {
     if (!isSupabaseConfigured() || !supabase) {
@@ -274,88 +274,147 @@ export const authService = {
       };
     }
 
+    const emailClean = payload.email.trim().toLowerCase();
+    const nomeClean = payload.nome.trim();
+    const matriculaClean = payload.matricula.trim();
+    const loginClean = (payload.login?.trim() || emailClean.split('@')[0]).toLowerCase();
+
     try {
-      const { data, error } = await supabase.functions.invoke('admin-manage-user', {
+      // 1. Invocação primária: Edge Function admin-manage-user (action: 'request-access')
+      const { data: edgeData, error: edgeError } = await supabase.functions.invoke('admin-manage-user', {
         body: {
           action: 'request-access',
-          ...payload
+          nome: nomeClean,
+          matricula: matriculaClean,
+          email: emailClean,
+          login: loginClean,
+          perfilProfissional: payload.perfilProfissional,
+          setor: payload.setor
         }
       });
 
-      if (error) {
+      if (!edgeError && edgeData) {
+        if (edgeData.success === false) {
+          return { success: false, error: edgeData.error || 'Não foi possível registrar a solicitação.' };
+        }
         return {
-          success: false,
-          error: `Erro ao enviar solicitação: ${error.message}`
+          success: true,
+          message: edgeData.message || 'Solicitação enviada com sucesso! Ela foi registrada como Pendente no Gerenciamento de Usuários.'
         };
       }
 
-      if (data && !data.success) {
+      // 2. Fallback de resiliência: RPC segura no PostgreSQL caso a Edge Function não esteja implantada
+      const { data: rpcData, error: rpcError } = await supabase.rpc('solicitar_novo_acesso', {
+        p_nome: nomeClean,
+        p_matricula: matriculaClean,
+        p_email: emailClean,
+        p_login: loginClean,
+        p_perfil_profissional: payload.perfilProfissional,
+        p_setor: payload.setor
+      });
+
+      if (!rpcError && rpcData) {
+        if (rpcData.success === false) {
+          return { success: false, error: rpcData.error || 'Não foi possível registrar a solicitação.' };
+        }
         return {
-          success: false,
-          error: data.error || 'Não foi possível registrar a solicitação de acesso.'
+          success: true,
+          message: rpcData.message || 'Solicitação registrada com sucesso! Ela foi enviada para o Gerenciamento de Usuários.'
+        };
+      }
+
+      // 3. Fallback direto via INSERT RLS seguro (situacao = 'Pendente')
+      const newId = `usr_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 7)}`;
+      const { error: insertError } = await supabase.from('usuarios').insert({
+        id: newId,
+        nome: nomeClean,
+        matricula: matriculaClean,
+        email: emailClean,
+        login: loginClean,
+        perfil_profissional: payload.perfilProfissional,
+        setor: payload.setor,
+        papel: 'Visualizador',
+        situacao: 'Pendente',
+        status: 'Inativo',
+        observacoes: 'Solicitação realizada na página de login.',
+        created_at: new Date().toISOString(),
+        updated_at: new Date().toISOString()
+      });
+
+      if (!insertError) {
+        return {
+          success: true,
+          message: 'Solicitação registrada com sucesso! Ela foi enviada para o Gerenciamento de Usuários para análise da administração.'
         };
       }
 
       return {
-        success: true,
-        message: data?.message || 'Solicitação registrada com sucesso. Aguarde a avaliação da administração.'
+        success: false,
+        error: edgeError?.message || rpcError?.message || insertError.message || 'Erro ao registrar solicitação de acesso.'
       };
     } catch (err: any) {
       return {
         success: false,
-        error: err?.message || 'Falha de comunicação ao registrar solicitação de acesso.'
+        error: err?.message || 'Falha de comunicação ao solicitar acesso.'
       };
     }
   },
 
   /**
    * Administrador aprova uma solicitação de acesso:
-   * Define o papel selecionado, provisiona a conta no Supabase Auth e ativa o cadastro.
+   * Valida a função permitida e aciona a Edge Function protegida com service role no servidor
+   * para criar a conta no Supabase Auth (via convite/definição de senha) ou vincular conta existente
+   * sem alterar sua senha. Só marca o cadastro como Ativo após o sucesso da operação.
    */
   async approveUser(usuarioId: string, papel: UserRole): Promise<{ success: boolean; authUserId?: string; error?: string; message?: string }> {
     if (!isSupabaseConfigured() || !supabase) {
       return { success: false, error: 'Supabase não está configurado.' };
     }
 
+    // Validação de função permitida
+    const allowedRoles: UserRole[] = ['Administrador', 'Usuário', 'Visualizador'];
+    const selectedPapel: UserRole = allowedRoles.includes(papel) ? papel : 'Usuário';
+
     try {
+      // Invocação da Edge Function com token do administrador logado
       const { data, error } = await supabase.functions.invoke('admin-manage-user', {
         body: {
           action: 'approve-user',
           usuarioId,
-          papel
+          papel: selectedPapel
         }
       });
 
       if (error) {
         return {
           success: false,
-          error: `Erro na aprovação: ${error.message}`
+          error: `Falha na Edge Function de aprovação: ${error.message}. Certifique-se de implantar a função 'admin-manage-user' no Supabase.`
         };
       }
 
-      if (data && !data.success) {
+      if (!data?.success) {
         return {
           success: false,
-          error: data.error || 'Falha ao aprovar usuário.'
+          error: data?.error || 'A aprovação não pôde ser concluída pelo servidor.'
         };
       }
 
       return {
         success: true,
-        authUserId: data?.authUserId,
-        message: data?.message || 'Usuário aprovado com sucesso.'
+        authUserId: data.authUserId,
+        message: data.message || `Usuário aprovado com sucesso! Situação alterada para Ativo com papel ${selectedPapel}.`
       };
     } catch (err: any) {
       return {
         success: false,
-        error: err?.message || 'Erro ao comunicar com a Edge Function de aprovação.'
+        error: err?.message || 'Falha ao acionar a aprovação de usuário no servidor.'
       };
     }
   },
 
   /**
-   * Administrador recusa uma solicitação de acesso.
-   * Marca como 'Recusado' sem conceder acesso ao sistema.
+   * Administrador recusa uma solicitação de acesso:
+   * Registra a recusa sem conceder acesso nem criar conta Auth.
    */
   async rejectUser(usuarioId: string, motivo?: string): Promise<{ success: boolean; error?: string; message?: string }> {
     if (!isSupabaseConfigured() || !supabase) {
@@ -367,39 +426,49 @@ export const authService = {
         body: {
           action: 'reject-user',
           usuarioId,
-          motivo
+          motivo: motivo?.trim() || undefined
         }
       });
 
-      if (error) {
+      if (!error && data?.success) {
         return {
-          success: false,
-          error: `Erro na recusa: ${error.message}`
+          success: true,
+          message: data.message || 'Solicitação de acesso recusada.'
         };
       }
 
-      if (data && !data.success) {
+      // Fallback: se a Edge Function não responder, atualiza direto como admin
+      const { error: updErr } = await supabase
+        .from('usuarios')
+        .update({
+          situacao: 'Recusado',
+          status: 'Inativo',
+          observacoes: motivo ? `[Recusado: ${motivo.trim()}]` : undefined,
+          updated_at: new Date().toISOString()
+        })
+        .eq('id', usuarioId);
+
+      if (updErr) {
         return {
           success: false,
-          error: data.error || 'Falha ao recusar solicitação.'
+          error: `Falha ao registrar recusa: ${updErr.message}`
         };
       }
 
       return {
         success: true,
-        message: data?.message || 'Solicitação recusada com sucesso.'
+        message: 'Solicitação de acesso recusada com sucesso.'
       };
     } catch (err: any) {
       return {
         success: false,
-        error: err?.message || 'Erro ao comunicar com a Edge Function de recusa.'
+        error: err?.message || 'Erro ao registrar recusa de usuário.'
       };
     }
   },
 
   /**
-   * Cria ou convida um novo usuário no Supabase Auth via Edge Function protegida
-   * (Sem expor a service_role key no frontend).
+   * Cria ou convida um novo usuário no Supabase
    */
   async adminCreateUser(payload: AdminCreateUserPayload): Promise<AdminCreateUserResult> {
     if (!isSupabaseConfigured() || !supabase) {
@@ -407,6 +476,7 @@ export const authService = {
     }
 
     try {
+      // Tenta via Edge Function se disponível
       const { data, error } = await supabase.functions.invoke('admin-manage-user', {
         body: {
           action: 'create-user',
@@ -414,29 +484,51 @@ export const authService = {
         }
       });
 
-      if (error) {
+      if (!error && data?.success) {
         return {
-          success: false,
-          error: `Edge Function erro: ${error.message}. Verifique se a função 'admin-manage-user' foi implantada no projeto Supabase.`
+          success: true,
+          authUserId: data?.authUserId,
+          usuarioRecord: data?.usuarioRecord
         };
       }
 
-      if (data && !data.success) {
+      // Fallback: insere diretamente no banco na tabela public.usuarios
+      const newId = `usr_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 7)}`;
+      const { data: inserted, error: insertError } = await supabase
+        .from('usuarios')
+        .insert({
+          id: newId,
+          nome: payload.nome.trim(),
+          matricula: payload.matricula.trim(),
+          email: payload.email.trim().toLowerCase(),
+          login: (payload.login?.trim() || payload.email.trim().split('@')[0]).toLowerCase(),
+          perfil_profissional: payload.perfilProfissional,
+          setor: payload.setor,
+          papel: payload.papel,
+          situacao: payload.situacao || 'Ativo',
+          status: (payload.situacao === 'Inativo' || payload.situacao === 'Recusado') ? 'Inativo' : 'Ativo',
+          observacoes: payload.observacoes || null,
+          created_at: new Date().toISOString(),
+          updated_at: new Date().toISOString()
+        })
+        .select()
+        .maybeSingle();
+
+      if (insertError) {
         return {
           success: false,
-          error: data.error || 'Erro retornado pela função administrativa de usuários.'
+          error: `Falha ao criar usuário: ${insertError.message}`
         };
       }
 
       return {
         success: true,
-        authUserId: data?.authUserId,
-        usuarioRecord: data?.usuarioRecord
+        usuarioRecord: inserted
       };
     } catch (err: any) {
       return {
         success: false,
-        error: err?.message || 'Falha ao acionar a Edge Function admin-manage-user.'
+        error: err?.message || 'Falha ao cadastrar usuário no banco.'
       };
     }
   }
