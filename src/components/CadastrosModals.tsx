@@ -1009,7 +1009,7 @@ export function RtModal({
                 {/* Preserva vínculo legado se não corresponder por ID */}
                 {isUnmatchedLegacyDam && (
                   <option value={barragemVinculada}>
-                    {resolveDamName(barragemVinculada, barragens)} (Texto original mantido)
+                    {resolveDamName(barragemVinculada, barragens, record.nomeBarragem)} (Texto original mantido)
                   </option>
                 )}
               </select>

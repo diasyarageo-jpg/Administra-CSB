@@ -145,11 +145,38 @@ export function resolveDamEmpreendimento(
 }
 
 // Resolução do nome da Barragem para exibição no cadastro de Responsáveis Técnicos
-export function resolveDamName(damIdOrName: string | undefined | null, barragens: any[] = []): string {
-  if (!damIdOrName || !String(damIdOrName).trim()) return '—';
+export function resolveDamName(
+  damIdOrName: string | undefined | null,
+  barragens: any[] = [],
+  fallbackName?: string | undefined | null
+): string {
+  const directFallback = fallbackName && String(fallbackName).trim() ? String(fallbackName).trim() : '';
+
+  if (!damIdOrName || !String(damIdOrName).trim()) {
+    return directFallback || '—';
+  }
+
   const raw = String(damIdOrName).trim();
-  const dam = barragens.find(b => String(b.id) === raw || String(b.nome || '').trim().toLowerCase() === raw.toLowerCase());
-  return dam ? (dam.nome || dam.id) : raw;
+
+  // 1. Busca por correspondência exata de ID, nome ou processo
+  const dam = barragens.find(
+    b =>
+      String(b.id) === raw ||
+      String(b.nome || '').trim().toLowerCase() === raw.toLowerCase() ||
+      String(b.processo || '').trim().toLowerCase() === raw.toLowerCase()
+  );
+
+  if (dam) {
+    return dam.nome || dam.id;
+  }
+
+  // 2. Se houver fallbackName informado
+  if (directFallback) {
+    return directFallback;
+  }
+
+  // 3. Mantém o valor bruto original
+  return raw;
 }
 
 interface FieldConfig {
@@ -251,7 +278,7 @@ const modules: Record<string, ModuleConfig> = {
     title: 'Responsáveis Técnicos',
     singular: 'responsável técnico',
     icon: '⌘',
-    search: ['nome', 'cpf', 'conselho', 'registro', 'especialidades', 'artRrt', 'barragemVinculada'],
+    search: ['nome', 'cpf', 'conselho', 'registro', 'especialidades', 'artRrt', 'art', 'barragemVinculada', 'nomeBarragem'],
     fields: [
       { name: 'nome', label: 'Nome completo', required: true },
       { name: 'cpf', label: 'CPF' },
@@ -1514,8 +1541,12 @@ export default function App() {
                 }
               }
               if (activeView === 'rts') {
-                const damName = resolveDamName(rec.barragemVinculada, db.barragens);
+                const damName = resolveDamName(rec.barragemVinculada, db.barragens, rec.nomeBarragem || rec.barragemNome);
                 if (damName.toLowerCase().includes(term)) return true;
+                if (rec.nome && String(rec.nome).toLowerCase().includes(term)) return true;
+                if (rec.art && String(rec.art).toLowerCase().includes(term)) return true;
+                if (rec.artRrt && String(rec.artRrt).toLowerCase().includes(term)) return true;
+                if (rec.nomeBarragem && String(rec.nomeBarragem).toLowerCase().includes(term)) return true;
               }
               return config.search.some(f => String(rec[f] || '').toLowerCase().includes(term));
             });
@@ -1705,7 +1736,13 @@ export default function App() {
                                     value = count > 0 ? `${count} empreendimento(s)` : 'Nenhum';
                                   }
                                   if (activeView === 'rts' && field === 'barragemVinculada') {
-                                    value = resolveDamName(record.barragemVinculada, db.barragens);
+                                    value = resolveDamName(record.barragemVinculada, db.barragens, record.nomeBarragem || (record as any).barragemNome);
+                                  }
+                                  if (activeView === 'rts' && field === 'artRrt') {
+                                    value = record.artRrt || record.art || '—';
+                                  }
+                                  if (activeView === 'rts' && field === 'nome') {
+                                    value = record.nome || '—';
                                   }
                                   if (activeView === 'usuarios' && field === 'situacao') {
                                     const sit = record.situacao || 'Ativo';

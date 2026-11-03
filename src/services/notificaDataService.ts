@@ -88,6 +88,8 @@ export interface ResponsavelTecnicoRecord {
   artRrt?: string;
   barragemVinculada?: string;
   barragensVinculadas?: string[];
+  nomeBarragem?: string;
+  barragemId?: string;
   validade?: string;
   telefone?: string;
   email?: string;
@@ -304,6 +306,8 @@ export function fromDbBarragem(row: any): BarragemRecord {
 }
 
 export function toDbRt(r: any) {
+  const artVal = r.artRrt ?? r.art_rrt ?? r.art ?? null;
+  const damVal = r.barragemVinculada ?? r.barragem_vinculada ?? r.barragem_id ?? null;
   return {
     id: String(r.id),
     nome: String(r.nome || ''),
@@ -312,13 +316,14 @@ export function toDbRt(r: any) {
     uf_conselho: r.ufConselho ?? r.uf_conselho ?? null,
     registro: r.registro ?? null,
     especialidades: r.especialidades ?? null,
-    art: r.art ?? null,
-    art_rrt: r.artRrt ?? r.art_rrt ?? null,
-    barragem_vinculada: r.barragemVinculada ?? r.barragem_vinculada ?? null,
+    art: artVal,
+    art_rrt: artVal,
+    barragem_vinculada: damVal,
+    barragem_id: r.barragemId ?? damVal,
     barragens_vinculadas: Array.isArray(r.barragensVinculadas)
       ? r.barragensVinculadas
-      : r.barragemVinculada
-      ? [r.barragemVinculada]
+      : damVal
+      ? [damVal]
       : [],
     validade: r.validade ?? null,
     telefone: r.telefone ?? null,
@@ -333,27 +338,111 @@ export function toDbRt(r: any) {
 }
 
 export function fromDbRt(row: any): ResponsavelTecnicoRecord {
+  // 1. Identificador único do vínculo na tabela responsaveis_tecnicos_barragens
+  const id = String(
+    row.id ??
+    row.id_vinculo ??
+    row.vinculo_id ??
+    row.id_rt ??
+    row.rt_id ??
+    row.id_responsavel ??
+    row.responsavel_id ??
+    ''
+  );
+
+  // 2. Nome do Responsável Técnico (tratamento tolerante de colunas legadas e importadas)
+  const nome = String(
+    row.nome ??
+    row.nome_responsavel ??
+    row.responsavel_tecnico ??
+    row.responsavel ??
+    row.nome_rt ??
+    row.rt_nome ??
+    row.nome_profissional ??
+    row.profissional ??
+    ''
+  ).trim();
+
+  // 3. Documento ART / RRT
+  const artVal = String(
+    row.art_rrt ??
+    row.artRrt ??
+    row.art ??
+    row.numero_art ??
+    row.num_art ??
+    row.art_numero ??
+    row.n_art ??
+    row.numero_rrt ??
+    row.rrt ??
+    row.documento_art ??
+    ''
+  ).trim();
+
+  // 4. Barragem Vinculada (ID ou referência textual da estrutura)
+  const damRef = String(
+    row.barragem_vinculada ??
+    row.barragemVinculada ??
+    row.barragem_id ??
+    row.id_barragem ??
+    row.barragem ??
+    row.nome_barragem ??
+    row.barragem_nome ??
+    row.dam_id ??
+    row.codigo_barragem ??
+    ''
+  ).trim();
+
+  // 5. Nome da Barragem (caso o vínculo contenha o nome textual da estrutura desnormalizado)
+  const damName = String(
+    row.nome_barragem ??
+    row.barragem_nome ??
+    row.barragem_identificacao ??
+    (typeof row.barragem === 'string' && isNaN(Number(row.barragem)) && !row.barragem.startsWith('bar_') ? row.barragem : '') ??
+    ''
+  ).trim();
+
+  // 6. Dados complementares profissionais (sem inventar dados; campos ausentes ficam vazios)
+  const cpf = String(row.cpf ?? row.cpf_responsavel ?? row.cpf_rt ?? row.cpf_cnpj ?? '').trim();
+  const conselho = String(row.conselho ?? row.conselho_profissional ?? row.orgao_classe ?? row.crea ?? '').trim();
+  const ufConselho = String(row.uf_conselho ?? row.ufConselho ?? row.crea_uf ?? row.uf ?? row.estado_conselho ?? '').trim();
+  const registro = String(row.registro ?? row.numero_registro ?? row.registro_crea ?? row.crea_numero ?? row.num_registro ?? row.registro_profissional ?? '').trim();
+  const especialidades = String(row.especialidades ?? row.especialidade ?? row.qualificacao ?? row.formacao ?? row.funcao ?? '').trim();
+  const validade = String(row.validade ?? row.validade_art ?? row.data_validade ?? row.data_fim ?? row.vencimento ?? row.data_vencimento ?? '').trim();
+  const telefone = String(row.telefone ?? row.fone ?? row.contato ?? row.telefone_responsavel ?? '').trim();
+  const email = String(row.email ?? row.e_mail ?? row.email_responsavel ?? row.contato_email ?? '').trim();
+
+  // 7. Situação / Status
+  const situacao = String(
+    row.situacao ??
+    row.status ??
+    (row.ativo === false ? 'Inativo' : 'Ativo')
+  ).trim() || 'Ativo';
+
+  const observacoes = String(row.observacoes ?? row.obs ?? row.observacao ?? row.notas ?? '').trim();
+
   return {
-    id: String(row.id),
-    nome: row.nome ?? '',
-    cpf: row.cpf ?? '',
-    conselho: row.conselho ?? '',
-    ufConselho: row.uf_conselho ?? row.ufConselho ?? '',
-    registro: row.registro ?? '',
-    especialidades: row.especialidades ?? '',
-    art: row.art ?? '',
-    artRrt: row.art_rrt ?? row.artRrt ?? '',
-    barragemVinculada: row.barragem_vinculada ?? row.barragemVinculada ?? '',
+    id,
+    nome,
+    cpf,
+    conselho,
+    ufConselho,
+    registro,
+    especialidades,
+    art: artVal,
+    artRrt: artVal,
+    barragemVinculada: damRef,
     barragensVinculadas: Array.isArray(row.barragens_vinculadas)
       ? row.barragens_vinculadas
-      : Array.isArray(row.barragensVinculadas)
-      ? row.barragensVinculadas
+      : damRef
+      ? [damRef]
       : [],
-    validade: row.validade ?? '',
-    telefone: row.telefone ?? '',
-    email: row.email ?? '',
-    situacao: row.situacao ?? 'Ativo',
-    observacoes: row.observacoes ?? '',
+    nomeBarragem: damName || undefined,
+    barragemId: String(row.barragem_id ?? row.id_barragem ?? '').trim() || undefined,
+    validade,
+    telefone,
+    email,
+    situacao,
+    observacoes,
     createdBy: row.created_by ?? row.createdBy ?? '',
     updatedBy: row.updated_by ?? row.updatedBy ?? '',
     createdAt: row.created_at ?? row.createdAt ?? new Date().toISOString(),
@@ -580,7 +669,7 @@ export const collectionConverters: Record<
 > = {
   empreendedores: { table: 'empreendedores', toDb: toDbEmpreendedor, fromDb: fromDbEmpreendedor },
   barragens: { table: 'barragens', toDb: toDbBarragem, fromDb: fromDbBarragem },
-  rts: { table: 'rts', toDb: toDbRt, fromDb: fromDbRt },
+  rts: { table: 'responsaveis_tecnicos_barragens', toDb: toDbRt, fromDb: fromDbRt },
   revisoes: { table: 'revisoes', toDb: toDbRevisao, fromDb: fromDbRevisao },
   usuarios: { table: 'usuarios', toDb: toDbUsuario, fromDb: fromDbUsuario },
   portarias: { table: 'portarias', toDb: toDbPortaria, fromDb: fromDbPortaria },
@@ -696,7 +785,28 @@ export const notificaDataService = {
 
       for (const col of collections) {
         const conf = collectionConverters[col];
-        const { data, error } = await supabase.from(conf.table).select('*');
+        let { data, error } = await supabase.from(conf.table).select('*');
+
+        // Tratamento resiliente para a coleção rts:
+        // A tabela com os 64 registros importados é 'responsaveis_tecnicos_barragens'.
+        // Se a consulta falhar (ex: por RLS pendente) ou retornar vazia enquanto 'rts' tiver dados,
+        // realiza fallback para 'rts' de forma transparente.
+        if (col === 'rts') {
+          if (error && conf.table === 'responsaveis_tecnicos_barragens') {
+            console.warn('[Notifica CSB] Consulta a responsaveis_tecnicos_barragens retornou erro, tentando fallback para rts:', error.message);
+            const fallback = await supabase.from('rts').select('*');
+            if (!fallback.error && fallback.data) {
+              data = fallback.data;
+              error = null;
+            }
+          } else if (!error && (!data || data.length === 0)) {
+            const fallback = await supabase.from('rts').select('*');
+            if (!fallback.error && fallback.data && fallback.data.length > 0) {
+              data = fallback.data;
+            }
+          }
+        }
+
         if (error) {
           throw new Error(`Erro ao ler tabela '${conf.table}': ${error.message} (${error.code})`);
         }
@@ -766,9 +876,27 @@ export const notificaDataService = {
       const conf = collectionConverters[collectionKey];
       const payload = conf.toDb(recordWithTimestamps);
 
-      const { error } = await supabase
+      let { error } = await supabase
         .from(conf.table)
         .upsert(payload, { onConflict: 'id' });
+
+      // Se falhar em responsaveis_tecnicos_barragens por coluna inexistente, tenta payload com colunas essenciais
+      if (error && collectionKey === 'rts' && error.code === '42703') {
+        const leanPayload: any = {
+          id: payload.id,
+          nome: payload.nome,
+          art: payload.art,
+          barragem_id: payload.barragem_id || payload.barragem_vinculada
+        };
+        if (payload.cpf) leanPayload.cpf = payload.cpf;
+        if (payload.registro) leanPayload.registro = payload.registro;
+        if (payload.conselho) leanPayload.conselho = payload.conselho;
+        if (payload.situacao) leanPayload.situacao = payload.situacao;
+        const retry = await supabase.from(conf.table).upsert(leanPayload, { onConflict: 'id' });
+        if (!retry.error) {
+          error = null;
+        }
+      }
 
       if (error) {
         return {
