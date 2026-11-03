@@ -296,10 +296,9 @@ const modules: Record<string, ModuleConfig> = {
     ],
     columns: [
       ['nome', 'Responsável técnico'],
-      ['conselho', 'Conselho'],
-      ['registro', 'Registro'],
-      ['artRrt', 'ART/RRT'],
-      ['barragemVinculada', 'Barragem vinculada'],
+      ['conselho', 'Conselho / Registro'],
+      ['cpf', 'CPF'],
+      ['vinculos', 'Vínculos de ART / Barragens'],
       ['situacao', 'Situação']
     ]
   },
@@ -1361,6 +1360,9 @@ export default function App() {
                   <div>
                     <div className="label">Responsáveis técnicos</div>
                     <div className="value">{db.rts.length}</div>
+                    <div style={{ fontSize: '11px', color: '#64748b', marginTop: '3px' }}>
+                      {db.rts.reduce((sum, r) => sum + (r.vinculos?.length || (r.art || r.artRrt ? 1 : 0)), 0)} vínculos de ART
+                    </div>
                   </div>
                   <div className="stat-ico">⌘</div>
                 </div>
@@ -1541,12 +1543,22 @@ export default function App() {
                 }
               }
               if (activeView === 'rts') {
-                const damName = resolveDamName(rec.barragemVinculada, db.barragens, rec.nomeBarragem || rec.barragemNome);
-                if (damName.toLowerCase().includes(term)) return true;
                 if (rec.nome && String(rec.nome).toLowerCase().includes(term)) return true;
+                if (rec.cpf && String(rec.cpf).toLowerCase().includes(term)) return true;
+                if (rec.registro && String(rec.registro).toLowerCase().includes(term)) return true;
+                if (rec.conselho && String(rec.conselho).toLowerCase().includes(term)) return true;
+                if (rec.email && String(rec.email).toLowerCase().includes(term)) return true;
+                if (rec.especialidades && String(rec.especialidades).toLowerCase().includes(term)) return true;
                 if (rec.art && String(rec.art).toLowerCase().includes(term)) return true;
                 if (rec.artRrt && String(rec.artRrt).toLowerCase().includes(term)) return true;
-                if (rec.nomeBarragem && String(rec.nomeBarragem).toLowerCase().includes(term)) return true;
+                const vinculos = rec.vinculos || [];
+                for (const v of vinculos) {
+                  if (v.art && String(v.art).toLowerCase().includes(term)) return true;
+                  const vDam = resolveDamName(v.barragemId, db.barragens, v.barragemNome);
+                  if (vDam.toLowerCase().includes(term)) return true;
+                }
+                const damName = resolveDamName(rec.barragemVinculada, db.barragens, rec.nomeBarragem || rec.barragemNome);
+                if (damName.toLowerCase().includes(term)) return true;
               }
               return config.search.some(f => String(rec[f] || '').toLowerCase().includes(term));
             });
@@ -1735,14 +1747,119 @@ export default function App() {
                                     const count = record.empreendimentos?.length || 0;
                                     value = count > 0 ? `${count} empreendimento(s)` : 'Nenhum';
                                   }
-                                  if (activeView === 'rts' && field === 'barragemVinculada') {
-                                    value = resolveDamName(record.barragemVinculada, db.barragens, record.nomeBarragem || (record as any).barragemNome);
-                                  }
-                                  if (activeView === 'rts' && field === 'artRrt') {
-                                    value = record.artRrt || record.art || '—';
-                                  }
                                   if (activeView === 'rts' && field === 'nome') {
-                                    value = record.nome || '—';
+                                    const rtRec = record as any;
+                                    const vinculosCount = rtRec.vinculos?.length || (rtRec.art || rtRec.artRrt ? 1 : 0);
+                                    return (
+                                      <td key={field} className="td-main">
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '3px' }}>
+                                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                                            <span style={{ fontWeight: 600, color: '#0f172a' }}>{record.nome || '—'}</span>
+                                            {vinculosCount > 1 && (
+                                              <span className="badge blue" style={{ fontSize: '10px', padding: '1px 5px' }}>
+                                                {vinculosCount} ARTs
+                                              </span>
+                                            )}
+                                          </div>
+                                          {rtRec.requiresReview && (
+                                            <div style={{ display: 'inline-flex', alignItems: 'center', gap: '4px' }}>
+                                              <span
+                                                style={{
+                                                  fontSize: '10px',
+                                                  color: '#b45309',
+                                                  background: '#fef3c7',
+                                                  border: '1px solid #fde68a',
+                                                  borderRadius: '3px',
+                                                  padding: '1px 5px',
+                                                  fontWeight: 600
+                                                }}
+                                                title={rtRec.reviewReason || 'Registro sem identificador confiável isolado para revisão manual'}
+                                              >
+                                                ⚠️ Revisão necessária
+                                              </span>
+                                            </div>
+                                          )}
+                                        </div>
+                                      </td>
+                                    );
+                                  }
+                                  if (activeView === 'rts' && field === 'conselho') {
+                                    const conselho = record.conselho || '';
+                                    const uf = record.ufConselho ? `/${record.ufConselho}` : '';
+                                    const reg = record.registro ? ` nº ${record.registro}` : '';
+                                    const display = `${conselho}${uf}${reg}`.trim();
+                                    return (
+                                      <td key={field}>
+                                        <span style={{ fontSize: '12px', color: '#334155' }}>{display || '—'}</span>
+                                      </td>
+                                    );
+                                  }
+                                  if (activeView === 'rts' && field === 'cpf') {
+                                    return (
+                                      <td key={field}>
+                                        <span style={{ fontFamily: 'monospace', fontSize: '12px', color: '#334155' }}>
+                                          {record.cpf || '—'}
+                                        </span>
+                                      </td>
+                                    );
+                                  }
+                                  if (activeView === 'rts' && field === 'vinculos') {
+                                    const rtRec = record as any;
+                                    const vinculos: any[] = rtRec.vinculos && rtRec.vinculos.length > 0
+                                      ? rtRec.vinculos
+                                      : (rtRec.art || rtRec.artRrt || rtRec.barragemVinculada)
+                                        ? [{ id: 'legacy', art: rtRec.art || rtRec.artRrt, barragemId: rtRec.barragemVinculada, barragemNome: rtRec.nomeBarragem || rtRec.barragemNome }]
+                                        : [];
+
+                                    if (vinculos.length === 0) {
+                                      return (
+                                        <td key={field}>
+                                          <span style={{ color: '#94a3b8', fontSize: '12px' }}>Nenhum vínculo</span>
+                                        </td>
+                                      );
+                                    }
+
+                                    return (
+                                      <td key={field}>
+                                        <div style={{ display: 'flex', flexDirection: 'column', gap: '3px', fontSize: '11px', maxWidth: '340px' }}>
+                                          <div style={{ fontWeight: 600, color: '#334155', display: 'flex', alignItems: 'center', gap: '5px' }}>
+                                            <span>{vinculos.length} vínculo{vinculos.length > 1 ? 's' : ''}</span>
+                                          </div>
+                                          {vinculos.slice(0, 2).map((v, vi) => {
+                                            const damName = resolveDamName(v.barragemId, db.barragens, v.barragemNome);
+                                            return (
+                                              <div key={v.id || vi} style={{ display: 'flex', alignItems: 'center', gap: '5px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                                <span style={{ fontFamily: 'monospace', fontWeight: 600, color: '#0f766e', background: '#f0fdf4', padding: '0 4px', borderRadius: '3px', border: '1px solid #bbf7d0', flexShrink: 0 }}>
+                                                  {v.art ? `ART: ${v.art}` : 'S/ ART'}
+                                                </span>
+                                                <span style={{ color: '#475569', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                                  ➔ {damName}
+                                                </span>
+                                              </div>
+                                            );
+                                          })}
+                                          {vinculos.length > 2 && (
+                                            <span style={{ color: '#64748b', fontSize: '10px', fontStyle: 'italic' }}>
+                                              +{vinculos.length - 2} outro{vinculos.length - 2 > 1 ? 's' : ''}...
+                                            </span>
+                                          )}
+                                        </div>
+                                      </td>
+                                    );
+                                  }
+                                  if (activeView === 'rts' && field === 'situacao') {
+                                    const sit = record.situacao || 'Ativo';
+                                    const badgeClass =
+                                      sit === 'Ativo'
+                                        ? 'green'
+                                        : sit === 'Inativo'
+                                        ? 'gray'
+                                        : 'amber';
+                                    return (
+                                      <td key={field}>
+                                        <span className={`badge ${badgeClass}`}>{sit}</span>
+                                      </td>
+                                    );
                                   }
                                   if (activeView === 'usuarios' && field === 'situacao') {
                                     const sit = record.situacao || 'Ativo';
@@ -2629,6 +2746,7 @@ export default function App() {
               record={modalConfig.record}
               isNew={modalConfig.index === null}
               barragens={db.barragens}
+              existingRts={db.rts}
               onClose={() => setModalConfig(null)}
               onSave={handleSaveCustomRecord}
             />

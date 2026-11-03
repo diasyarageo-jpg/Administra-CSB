@@ -76,6 +76,21 @@ export interface BarragemRecord {
   updatedAt: string;
 }
 
+export interface RtVinculo {
+  id: string;
+  rtId?: string;
+  art: string;
+  artRrt?: string;
+  barragemVinculada: string;
+  barragemId?: string;
+  nomeBarragem?: string;
+  validade?: string;
+  situacao?: string;
+  observacoes?: string;
+  originTable?: 'responsaveis_tecnicos_barragens' | 'rts' | 'local';
+  rawRecord?: any;
+}
+
 export interface ResponsavelTecnicoRecord {
   id: string;
   nome: string;
@@ -84,6 +99,12 @@ export interface ResponsavelTecnicoRecord {
   ufConselho?: string;
   registro?: string;
   especialidades?: string;
+  telefone?: string;
+  email?: string;
+  situacao?: string;
+  observacoes?: string;
+  vinculos: RtVinculo[];
+  // Campos de compatibilidade para buscas diretas e visualização legada
   art?: string;
   artRrt?: string;
   barragemVinculada?: string;
@@ -91,10 +112,9 @@ export interface ResponsavelTecnicoRecord {
   nomeBarragem?: string;
   barragemId?: string;
   validade?: string;
-  telefone?: string;
-  email?: string;
-  situacao?: string;
-  observacoes?: string;
+  hasReliableIdentifier?: boolean;
+  requiresReview?: boolean;
+  reviewReason?: string;
   createdBy?: string;
   updatedBy?: string;
   createdAt: string;
@@ -305,31 +325,43 @@ export function fromDbBarragem(row: any): BarragemRecord {
   };
 }
 
+export function cleanCpf(cpf: string | undefined | null): string {
+  if (!cpf) return '';
+  return String(cpf).replace(/\D/g, '').trim();
+}
+
+export function cleanRegistro(reg: string | undefined | null): string {
+  if (!reg) return '';
+  return String(reg).replace(/[^a-zA-Z0-9]/g, '').toUpperCase().trim();
+}
+
 export function toDbRt(r: any) {
-  const artVal = r.artRrt ?? r.art_rrt ?? r.art ?? null;
-  const damVal = r.barragemVinculada ?? r.barragem_vinculada ?? r.barragem_id ?? null;
+  const artVal = r.artRrt ?? r.art_rrt ?? r.art ?? (r.vinculos?.[0]?.art || null);
+  const damVal = r.barragemVinculada ?? r.barragem_vinculada ?? r.barragem_id ?? (r.vinculos?.[0]?.barragemVinculada || null);
   return {
     id: String(r.id),
     nome: String(r.nome || ''),
-    cpf: r.cpf ?? null,
-    conselho: r.conselho ?? null,
+    cpf: r.cpf || null,
+    conselho: r.conselho || null,
     uf_conselho: r.ufConselho ?? r.uf_conselho ?? null,
-    registro: r.registro ?? null,
-    especialidades: r.especialidades ?? null,
+    registro: r.registro || null,
+    especialidades: r.especialidades || null,
     art: artVal,
     art_rrt: artVal,
     barragem_vinculada: damVal,
     barragem_id: r.barragemId ?? damVal,
     barragens_vinculadas: Array.isArray(r.barragensVinculadas)
       ? r.barragensVinculadas
+      : Array.isArray(r.vinculos)
+      ? r.vinculos.map((v: any) => v.barragemVinculada)
       : damVal
       ? [damVal]
       : [],
-    validade: r.validade ?? null,
-    telefone: r.telefone ?? null,
-    email: r.email ?? null,
-    situacao: r.situacao ?? 'Ativo',
-    observacoes: r.observacoes ?? null,
+    validade: r.validade ?? (r.vinculos?.[0]?.validade || null),
+    telefone: r.telefone || null,
+    email: r.email || null,
+    situacao: r.situacao || 'Ativo',
+    observacoes: r.observacoes || null,
     created_by: r.createdBy ?? r.created_by ?? null,
     updated_by: r.updatedBy ?? r.updated_by ?? null,
     created_at: r.createdAt ?? r.created_at ?? new Date().toISOString(),
@@ -420,6 +452,25 @@ export function fromDbRt(row: any): ResponsavelTecnicoRecord {
 
   const observacoes = String(row.observacoes ?? row.obs ?? row.observacao ?? row.notas ?? '').trim();
 
+  const cCpf = cleanCpf(cpf);
+  const cReg = cleanRegistro(registro);
+  const hasReliableId = Boolean((cCpf && cCpf.length === 11) || (cReg && cReg.length >= 3));
+
+  const singleVinculo: RtVinculo = {
+    id: id || `vinc_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+    rtId: row.rt_id || row.id_rt || undefined,
+    art: artVal,
+    artRrt: artVal,
+    barragemVinculada: damRef,
+    barragemId: String(row.barragem_id ?? row.id_barragem ?? '').trim() || undefined,
+    nomeBarragem: damName || undefined,
+    validade,
+    situacao,
+    observacoes: observacoes || undefined,
+    originTable: 'responsaveis_tecnicos_barragens',
+    rawRecord: row
+  };
+
   return {
     id,
     nome,
@@ -428,6 +479,7 @@ export function fromDbRt(row: any): ResponsavelTecnicoRecord {
     ufConselho,
     registro,
     especialidades,
+    vinculos: Array.isArray(row.vinculos) ? row.vinculos : (artVal || damRef ? [singleVinculo] : []),
     art: artVal,
     artRrt: artVal,
     barragemVinculada: damRef,
@@ -443,11 +495,170 @@ export function fromDbRt(row: any): ResponsavelTecnicoRecord {
     email,
     situacao,
     observacoes,
+    hasReliableIdentifier: hasReliableId,
+    requiresReview: !hasReliableId,
+    reviewReason: !hasReliableId
+      ? 'Registro importado sem identificador único confiável (CPF ou Registro ausente).'
+      : undefined,
     createdBy: row.created_by ?? row.createdBy ?? '',
     updatedBy: row.updated_by ?? row.updatedBy ?? '',
     createdAt: row.created_at ?? row.createdAt ?? new Date().toISOString(),
     updatedAt: row.updated_at ?? row.updatedAt ?? new Date().toISOString()
   };
+}
+
+/**
+ * Agrupa vínculos de responsaveis_tecnicos_barragens em profissionais únicos (public.rts).
+ * 
+ * Regra estrita de segurança cadastral:
+ * - Só agrupa quando houver identificador confiável inequívoco: CPF (11 dígitos) ou Registro profissional.
+ * - Registros sem identificador confiável NUNCA são unidos por nomes iguais ou parecidos;
+ *   permanecem isolados e sinalizados para conferência manual.
+ */
+export function groupRtLinksIntoProfessionals(
+  rawLinks: any[] = [],
+  existingProfessionals: any[] = []
+): ResponsavelTecnicoRecord[] {
+  const result: ResponsavelTecnicoRecord[] = [];
+  const mapByKey = new Map<string, ResponsavelTecnicoRecord>();
+
+  // 1. Indexa profissionais cadastrados em public.rts (se houver)
+  for (const prof of existingProfessionals) {
+    const pCpf = cleanCpf(prof.cpf);
+    const pReg = cleanRegistro(prof.registro);
+    const pCons = String(prof.conselho || '').trim().toUpperCase();
+
+    const record: ResponsavelTecnicoRecord = {
+      id: String(prof.id),
+      nome: String(prof.nome || '').trim(),
+      cpf: prof.cpf ? String(prof.cpf).trim() : undefined,
+      conselho: prof.conselho ? String(prof.conselho).trim() : undefined,
+      ufConselho: prof.ufConselho || prof.uf_conselho ? String(prof.ufConselho || prof.uf_conselho).trim() : undefined,
+      registro: prof.registro ? String(prof.registro).trim() : undefined,
+      especialidades: prof.especialidades ? String(prof.especialidades).trim() : undefined,
+      telefone: prof.telefone ? String(prof.telefone).trim() : undefined,
+      email: prof.email ? String(prof.email).trim() : undefined,
+      situacao: prof.situacao || 'Ativo',
+      observacoes: prof.observacoes ? String(prof.observacoes).trim() : undefined,
+      vinculos: Array.isArray(prof.vinculos) ? prof.vinculos : [],
+      hasReliableIdentifier: Boolean((pCpf && pCpf.length === 11) || (pReg && pReg.length >= 3)),
+      requiresReview: false,
+      createdBy: prof.createdBy || prof.created_by,
+      updatedBy: prof.updatedBy || prof.updated_by,
+      createdAt: prof.createdAt || prof.created_at || new Date().toISOString(),
+      updatedAt: prof.updatedAt || prof.updated_at || new Date().toISOString()
+    };
+
+    result.push(record);
+    if (prof.id) mapByKey.set(`id:${prof.id}`, record);
+    if (pCpf && pCpf.length === 11) mapByKey.set(`cpf:${pCpf}`, record);
+    if (pReg && pReg.length >= 3) mapByKey.set(`reg:${pCons}_${pReg}`, record);
+  }
+
+  // 2. Processa cada vínculo importado de responsaveis_tecnicos_barragens
+  for (const row of rawLinks) {
+    const rawParsed = fromDbRt(row);
+    const linkId = String(rawParsed.id || row.id || `vinc_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`);
+    const art = rawParsed.art || rawParsed.artRrt || '';
+    const dam = rawParsed.barragemVinculada || '';
+    const damName = rawParsed.nomeBarragem || undefined;
+
+    const vinculoItem: RtVinculo = {
+      id: linkId,
+      rtId: row.rt_id || row.id_rt || undefined,
+      art,
+      artRrt: art,
+      barragemVinculada: dam,
+      barragemId: rawParsed.barragemId || dam,
+      nomeBarragem: damName,
+      validade: rawParsed.validade || undefined,
+      situacao: rawParsed.situacao || 'Ativo',
+      observacoes: rawParsed.observacoes || undefined,
+      originTable: 'responsaveis_tecnicos_barragens',
+      rawRecord: row
+    };
+
+    const linkCpf = cleanCpf(rawParsed.cpf);
+    const linkReg = cleanRegistro(rawParsed.registro);
+    const linkCons = String(rawParsed.conselho || '').trim().toUpperCase();
+    const explicitRtId = row.rt_id || row.id_rt;
+
+    // Procura correspondência inequívoca por identificador confiável
+    let matched: ResponsavelTecnicoRecord | undefined = undefined;
+
+    if (explicitRtId && mapByKey.has(`id:${explicitRtId}`)) {
+      matched = mapByKey.get(`id:${explicitRtId}`);
+    } else if (linkCpf && linkCpf.length === 11 && mapByKey.has(`cpf:${linkCpf}`)) {
+      matched = mapByKey.get(`cpf:${linkCpf}`);
+    } else if (linkReg && linkReg.length >= 3 && mapByKey.has(`reg:${linkCons}_${linkReg}`)) {
+      matched = mapByKey.get(`reg:${linkCons}_${linkReg}`);
+    }
+
+    if (matched) {
+      // Correspondência confiável encontrada: agrega o vínculo à ficha do profissional
+      const exists = matched.vinculos.some(v => v.id === vinculoItem.id);
+      if (!exists) {
+        matched.vinculos.push(vinculoItem);
+      }
+      if (!matched.cpf && rawParsed.cpf) matched.cpf = rawParsed.cpf;
+      if (!matched.registro && rawParsed.registro) matched.registro = rawParsed.registro;
+      if (!matched.conselho && rawParsed.conselho) matched.conselho = rawParsed.conselho;
+      if (!matched.ufConselho && rawParsed.ufConselho) matched.ufConselho = rawParsed.ufConselho;
+      if (!matched.especialidades && rawParsed.especialidades) matched.especialidades = rawParsed.especialidades;
+      if (!matched.email && rawParsed.email) matched.email = rawParsed.email;
+      if (!matched.telefone && rawParsed.telefone) matched.telefone = rawParsed.telefone;
+      matched.art = matched.vinculos[0]?.art || '';
+      matched.artRrt = matched.vinculos[0]?.artRrt || '';
+      matched.barragemVinculada = matched.vinculos[0]?.barragemVinculada || '';
+      matched.barragensVinculadas = matched.vinculos.map(v => v.barragemVinculada);
+      matched.nomeBarragem = matched.vinculos[0]?.nomeBarragem;
+    } else {
+      // Sem correspondência confiável prévia
+      const hasCpf = Boolean(linkCpf && linkCpf.length === 11);
+      const hasReg = Boolean(linkReg && linkReg.length >= 3);
+      const hasReliableId = hasCpf || hasReg;
+
+      const profId = explicitRtId || `rt_${linkId}`;
+      const newProf: ResponsavelTecnicoRecord = {
+        id: profId,
+        nome: rawParsed.nome || 'Responsável Técnico sem nome',
+        cpf: rawParsed.cpf || undefined,
+        conselho: rawParsed.conselho || undefined,
+        ufConselho: rawParsed.ufConselho || undefined,
+        registro: rawParsed.registro || undefined,
+        especialidades: rawParsed.especialidades || undefined,
+        telefone: rawParsed.telefone || undefined,
+        email: rawParsed.email || undefined,
+        situacao: rawParsed.situacao || 'Ativo',
+        observacoes: rawParsed.observacoes || undefined,
+        vinculos: [vinculoItem],
+        art: vinculoItem.art,
+        artRrt: vinculoItem.artRrt,
+        barragemVinculada: vinculoItem.barragemVinculada,
+        barragensVinculadas: [vinculoItem.barragemVinculada],
+        nomeBarragem: vinculoItem.nomeBarragem,
+        hasReliableIdentifier: hasReliableId,
+        requiresReview: !hasReliableId,
+        reviewReason: !hasReliableId
+          ? 'Registro importado sem identificador único confiável (CPF ou Registro ausente).'
+          : undefined,
+        createdBy: rawParsed.createdBy,
+        updatedBy: rawParsed.updatedBy,
+        createdAt: rawParsed.createdAt || new Date().toISOString(),
+        updatedAt: rawParsed.updatedAt || new Date().toISOString()
+      };
+
+      vinculoItem.rtId = profId;
+      result.push(newProf);
+
+      // Só indexa se possuir identificador confiável; registros sem identificador NUNCA são mesclados por nome
+      if (hasCpf) mapByKey.set(`cpf:${linkCpf}`, newProf);
+      if (hasReg) mapByKey.set(`reg:${linkCons}_${linkReg}`, newProf);
+      if (profId) mapByKey.set(`id:${profId}`, newProf);
+    }
+  }
+
+  return result;
 }
 
 export function toDbRevisao(r: any) {
@@ -669,7 +880,7 @@ export const collectionConverters: Record<
 > = {
   empreendedores: { table: 'empreendedores', toDb: toDbEmpreendedor, fromDb: fromDbEmpreendedor },
   barragens: { table: 'barragens', toDb: toDbBarragem, fromDb: fromDbBarragem },
-  rts: { table: 'responsaveis_tecnicos_barragens', toDb: toDbRt, fromDb: fromDbRt },
+  rts: { table: 'rts', toDb: toDbRt, fromDb: fromDbRt },
   revisoes: { table: 'revisoes', toDb: toDbRevisao, fromDb: fromDbRevisao },
   usuarios: { table: 'usuarios', toDb: toDbUsuario, fromDb: fromDbUsuario },
   portarias: { table: 'portarias', toDb: toDbPortaria, fromDb: fromDbPortaria },
@@ -695,7 +906,28 @@ export function loadNotificaDatabase(): NotificaDatabase {
     return {
       empreendedores: Array.isArray(parsed.empreendedores) ? parsed.empreendedores : [],
       barragens: Array.isArray(parsed.barragens) ? parsed.barragens : [],
-      rts: Array.isArray(parsed.rts) ? parsed.rts : [],
+      rts: Array.isArray(parsed.rts)
+        ? parsed.rts.map((r: any) => ({
+            ...r,
+            vinculos: Array.isArray(r.vinculos)
+              ? r.vinculos
+              : (r.art || r.artRrt || r.barragemVinculada)
+              ? [
+                  {
+                    id: String(r.id || `vinc_${Date.now()}`),
+                    art: r.art || r.artRrt || '',
+                    artRrt: r.artRrt || r.art || '',
+                    barragemVinculada: r.barragemVinculada || '',
+                    barragemId: r.barragemId || r.barragemVinculada,
+                    nomeBarragem: r.nomeBarragem,
+                    validade: r.validade,
+                    situacao: r.situacao || 'Ativo',
+                    observacoes: r.observacoes
+                  }
+                ]
+              : []
+          }))
+        : [],
       revisoes: Array.isArray(parsed.revisoes) ? parsed.revisoes : [],
       usuarios: Array.isArray(parsed.usuarios) ? parsed.usuarios : [],
       portarias: Array.isArray(parsed.portarias) ? parsed.portarias : [],
@@ -784,33 +1016,33 @@ export const notificaDataService = {
       ];
 
       for (const col of collections) {
+        if (col === 'rts') continue;
         const conf = collectionConverters[col];
-        let { data, error } = await supabase.from(conf.table).select('*');
-
-        // Tratamento resiliente para a coleção rts:
-        // A tabela com os 64 registros importados é 'responsaveis_tecnicos_barragens'.
-        // Se a consulta falhar (ex: por RLS pendente) ou retornar vazia enquanto 'rts' tiver dados,
-        // realiza fallback para 'rts' de forma transparente.
-        if (col === 'rts') {
-          if (error && conf.table === 'responsaveis_tecnicos_barragens') {
-            console.warn('[Notifica CSB] Consulta a responsaveis_tecnicos_barragens retornou erro, tentando fallback para rts:', error.message);
-            const fallback = await supabase.from('rts').select('*');
-            if (!fallback.error && fallback.data) {
-              data = fallback.data;
-              error = null;
-            }
-          } else if (!error && (!data || data.length === 0)) {
-            const fallback = await supabase.from('rts').select('*');
-            if (!fallback.error && fallback.data && fallback.data.length > 0) {
-              data = fallback.data;
-            }
-          }
-        }
-
+        const { data, error } = await supabase.from(conf.table).select('*');
         if (error) {
           throw new Error(`Erro ao ler tabela '${conf.table}': ${error.message} (${error.code})`);
         }
         result[col] = (data || []).map(conf.fromDb);
+      }
+
+      // Consulta relacional para RTs: consulta public.rts (profissionais) e public.responsaveis_tecnicos_barragens (vínculos)
+      let rtsProfissionais: any[] = [];
+      const rtsRes = await supabase.from('rts').select('*');
+      if (!rtsRes.error && Array.isArray(rtsRes.data)) {
+        rtsProfissionais = rtsRes.data;
+      }
+
+      let rtsVinculos: any[] = [];
+      const vinculosRes = await supabase.from('responsaveis_tecnicos_barragens').select('*');
+      if (!vinculosRes.error && Array.isArray(vinculosRes.data)) {
+        rtsVinculos = vinculosRes.data;
+      }
+
+      // Agrupa com a regra estrita de identificador confiável
+      if (rtsVinculos.length === 0 && rtsProfissionais.length > 0) {
+        result.rts = groupRtLinksIntoProfessionals(rtsProfissionais, []);
+      } else {
+        result.rts = groupRtLinksIntoProfessionals(rtsVinculos, rtsProfissionais);
       }
 
       return {
@@ -872,31 +1104,119 @@ export const notificaDataService = {
       };
     }
 
+    // Tratamento relacional seguro para Responsáveis Técnicos
+    if (collectionKey === 'rts') {
+      try {
+        const rtPayload = {
+          id: String(recordWithTimestamps.id),
+          nome: String(recordWithTimestamps.nome || ''),
+          cpf: recordWithTimestamps.cpf || null,
+          conselho: recordWithTimestamps.conselho || null,
+          uf_conselho: recordWithTimestamps.ufConselho || null,
+          registro: recordWithTimestamps.registro || null,
+          especialidades: recordWithTimestamps.especialidades || null,
+          telefone: recordWithTimestamps.telefone || null,
+          email: recordWithTimestamps.email || null,
+          situacao: recordWithTimestamps.situacao || 'Ativo',
+          observacoes: recordWithTimestamps.observacoes || null,
+          created_by: recordWithTimestamps.createdBy || null,
+          updated_by: recordWithTimestamps.updatedBy || null,
+          created_at: recordWithTimestamps.createdAt || timestamp,
+          updated_at: timestamp
+        };
+
+        // 1. Grava a ficha do profissional em public.rts
+        const rtsSave = await supabase.from('rts').upsert(rtPayload, { onConflict: 'id' });
+
+        // 2. Grava cada vínculo em public.responsaveis_tecnicos_barragens
+        const vinculos = Array.isArray(recordWithTimestamps.vinculos) ? recordWithTimestamps.vinculos : [];
+        const vinculoErrors: string[] = [];
+
+        for (const vinc of vinculos) {
+          const vincId = vinc.id || `vinc_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+          const vincPayload: any = {
+            id: String(vincId),
+            rt_id: String(recordWithTimestamps.id),
+            nome: String(recordWithTimestamps.nome || ''),
+            art: vinc.art || vinc.artRrt || '',
+            art_rrt: vinc.art || vinc.artRrt || '',
+            barragem_id: vinc.barragemId || vinc.barragemVinculada || null,
+            barragem_vinculada: vinc.barragemVinculada || null,
+            nome_barragem: vinc.nomeBarragem || null,
+            validade: vinc.validade || null,
+            situacao: vinc.situacao || recordWithTimestamps.situacao || 'Ativo',
+            observacoes: vinc.observacoes || null,
+            created_by: recordWithTimestamps.createdBy || null,
+            updated_by: recordWithTimestamps.updatedBy || null,
+            created_at: timestamp,
+            updated_at: timestamp
+          };
+
+          let { error: vErr } = await supabase
+            .from('responsaveis_tecnicos_barragens')
+            .upsert(vincPayload, { onConflict: 'id' });
+
+          if (vErr && vErr.code === '42703') {
+            const lean: any = {
+              id: vincPayload.id,
+              nome: vincPayload.nome,
+              art: vincPayload.art,
+              barragem_id: vincPayload.barragem_id
+            };
+            const retry = await supabase.from('responsaveis_tecnicos_barragens').upsert(lean, { onConflict: 'id' });
+            if (!retry.error) vErr = null;
+          }
+
+          if (vErr) {
+            vinculoErrors.push(`ART ${vinc.art}: ${vErr.message}`);
+          }
+        }
+
+        // 3. Exclui vínculos removidos pelo usuário nesta edição (se houver)
+        if (Array.isArray(recordWithTimestamps.removedLinkIds) && recordWithTimestamps.removedLinkIds.length > 0) {
+          for (const remId of recordWithTimestamps.removedLinkIds) {
+            await supabase.from('responsaveis_tecnicos_barragens').delete().eq('id', String(remId));
+          }
+        }
+
+        if (rtsSave.error && vinculoErrors.length > 0) {
+          return {
+            updatedDb,
+            savedLocal: true,
+            savedRemote: false,
+            error: `Erro ao gravar profissional (${rtsSave.error.message}) e vínculos: ${vinculoErrors.join('; ')}`
+          };
+        } else if (vinculoErrors.length > 0) {
+          return {
+            updatedDb,
+            savedLocal: true,
+            savedRemote: true,
+            error: `Ficha salva, mas houve aviso em alguns vínculos: ${vinculoErrors.join('; ')}`
+          };
+        }
+
+        return {
+          updatedDb,
+          savedLocal: true,
+          savedRemote: true
+        };
+      } catch (err: any) {
+        return {
+          updatedDb,
+          savedLocal: true,
+          savedRemote: false,
+          error: `Falha na gravação do profissional e vínculos: ${err?.message || 'Indisponível'}`
+        };
+      }
+    }
+
     try {
       const conf = collectionConverters[collectionKey];
       const payload = conf.toDb(recordWithTimestamps);
 
-      let { error } = await supabase
+      const { error } = await supabase
         .from(conf.table)
         .upsert(payload, { onConflict: 'id' });
-
-      // Se falhar em responsaveis_tecnicos_barragens por coluna inexistente, tenta payload com colunas essenciais
-      if (error && collectionKey === 'rts' && error.code === '42703') {
-        const leanPayload: any = {
-          id: payload.id,
-          nome: payload.nome,
-          art: payload.art,
-          barragem_id: payload.barragem_id || payload.barragem_vinculada
-        };
-        if (payload.cpf) leanPayload.cpf = payload.cpf;
-        if (payload.registro) leanPayload.registro = payload.registro;
-        if (payload.conselho) leanPayload.conselho = payload.conselho;
-        if (payload.situacao) leanPayload.situacao = payload.situacao;
-        const retry = await supabase.from(conf.table).upsert(leanPayload, { onConflict: 'id' });
-        if (!retry.error) {
-          error = null;
-        }
-      }
 
       if (error) {
         return {
@@ -947,6 +1267,34 @@ export const notificaDataService = {
         deletedLocal: true,
         deletedRemote: false
       };
+    }
+
+    // Exclusão relacional para Responsáveis Técnicos
+    if (collectionKey === 'rts') {
+      try {
+        if (Array.isArray(recordToDelete.vinculos)) {
+          for (const v of recordToDelete.vinculos) {
+            if (v.id) {
+              await supabase.from('responsaveis_tecnicos_barragens').delete().eq('id', String(v.id));
+            }
+          }
+        }
+        await supabase.from('responsaveis_tecnicos_barragens').delete().eq('rt_id', String(recordToDelete.id));
+        await supabase.from('rts').delete().eq('id', String(recordToDelete.id));
+
+        return {
+          updatedDb,
+          deletedLocal: true,
+          deletedRemote: true
+        };
+      } catch (err: any) {
+        return {
+          updatedDb,
+          deletedLocal: true,
+          deletedRemote: false,
+          error: `Falha ao excluir profissional no Supabase: ${err?.message}`
+        };
+      }
     }
 
     try {
