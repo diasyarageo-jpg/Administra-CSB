@@ -540,8 +540,10 @@ export function BarragemModal({
     }).catch(() => {});
   }, []);
 
-  // Empreendedores ativos e preservação de inativo/legado
-  const activeEmps = empreendedores.filter(e => e.situacao === 'Ativo');
+  // Empreendedores ativos e preservação de inativo/legado (em ordem alfabética)
+  const activeEmps = empreendedores
+    .filter(e => e.situacao === 'Ativo')
+    .sort((a, b) => String(a.nome || '').localeCompare(String(b.nome || ''), 'pt-BR', { sensitivity: 'base' }));
   const linkedEmp = selectedEmpId ? empreendedores.find(e => String(e.id) === String(selectedEmpId)) : null;
   const isLinkedInactive = linkedEmp && linkedEmp.situacao !== 'Ativo';
   const isUnmatchedLegacyEmp = !linkedEmp && Boolean(record.empreendedor && String(record.empreendedor).trim());
@@ -1313,11 +1315,14 @@ export function RtModal({
                     onChange={e => setVincBarragem(e.target.value)}
                   >
                     <option value="">Selecione a estrutura...</option>
-                    {barragens.map(b => (
-                      <option key={b.id} value={b.id}>
-                        {b.nome}{b.municipio ? ` — ${b.municipio}` : ''}
-                      </option>
-                    ))}
+                    {barragens
+                      .slice()
+                      .sort((a, b) => String(a.nome || '').localeCompare(String(b.nome || ''), 'pt-BR', { sensitivity: 'base' }))
+                      .map(b => (
+                        <option key={b.id} value={b.id}>
+                          {b.nome}{b.municipio ? ` — ${b.municipio}` : ''}
+                        </option>
+                      ))}
                     {vincBarragem && !barragens.some(b => String(b.id) === vincBarragem) && (
                       <option value={vincBarragem}>
                         {vincBarragem} (Identificação mantida)

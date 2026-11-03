@@ -1563,6 +1563,12 @@ export default function App() {
               return config.search.some(f => String(rec[f] || '').toLowerCase().includes(term));
             });
 
+            if (activeView === 'empreendedores' || activeView === 'barragens' || activeView === 'rts') {
+              filteredRecords.sort((a, b) =>
+                String(a.nome || '').localeCompare(String(b.nome || ''), 'pt-BR', { sensitivity: 'base' })
+              );
+            }
+
             const pendingUsersCount = activeView === 'usuarios'
               ? records.filter((u: any) => u.situacao === 'Pendente').length
               : 0;

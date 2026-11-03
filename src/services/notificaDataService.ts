@@ -658,7 +658,9 @@ export function groupRtLinksIntoProfessionals(
     }
   }
 
-  return result;
+  return result.sort((a, b) =>
+    String(a.nome || '').localeCompare(String(b.nome || ''), 'pt-BR', { sensitivity: 'base' })
+  );
 }
 
 export function toDbRevisao(r: any) {
@@ -903,10 +905,15 @@ export function loadNotificaDatabase(): NotificaDatabase {
       return { ...emptyDatabase };
     }
     const parsed = JSON.parse(raw);
+    const sortByName = (list: any[]) =>
+      list.slice().sort((a, b) =>
+        String(a.nome || '').localeCompare(String(b.nome || ''), 'pt-BR', { sensitivity: 'base' })
+      );
+
     return {
-      empreendedores: Array.isArray(parsed.empreendedores) ? parsed.empreendedores : [],
-      barragens: Array.isArray(parsed.barragens) ? parsed.barragens : [],
-      rts: Array.isArray(parsed.rts)
+      empreendedores: sortByName(Array.isArray(parsed.empreendedores) ? parsed.empreendedores : []),
+      barragens: sortByName(Array.isArray(parsed.barragens) ? parsed.barragens : []),
+      rts: sortByName(Array.isArray(parsed.rts)
         ? parsed.rts.map((r: any) => ({
             ...r,
             vinculos: Array.isArray(r.vinculos)
@@ -927,7 +934,7 @@ export function loadNotificaDatabase(): NotificaDatabase {
                 ]
               : []
           }))
-        : [],
+        : []),
       revisoes: Array.isArray(parsed.revisoes) ? parsed.revisoes : [],
       usuarios: Array.isArray(parsed.usuarios) ? parsed.usuarios : [],
       portarias: Array.isArray(parsed.portarias) ? parsed.portarias : [],
@@ -1044,6 +1051,16 @@ export const notificaDataService = {
       } else {
         result.rts = groupRtLinksIntoProfessionals(rtsVinculos, rtsProfissionais);
       }
+
+      result.empreendedores.sort((a, b) =>
+        String(a.nome || '').localeCompare(String(b.nome || ''), 'pt-BR', { sensitivity: 'base' })
+      );
+      result.barragens.sort((a, b) =>
+        String(a.nome || '').localeCompare(String(b.nome || ''), 'pt-BR', { sensitivity: 'base' })
+      );
+      result.rts.sort((a, b) =>
+        String(a.nome || '').localeCompare(String(b.nome || ''), 'pt-BR', { sensitivity: 'base' })
+      );
 
       return {
         success: true,
