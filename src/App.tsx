@@ -382,6 +382,27 @@ export default function App() {
   } | null>(null);
   const [confirmLocalClear, setConfirmLocalClear] = useState(false);
 
+  // Identificação responsiva da tela (mobile / tablet / desktop)
+  const [screenType, setScreenType] = useState<'mobile' | 'tablet' | 'desktop'>(() => {
+    if (typeof window === 'undefined') return 'desktop';
+    const w = window.innerWidth;
+    return w <= 720 ? 'mobile' : w <= 1020 ? 'tablet' : 'desktop';
+  });
+
+  useEffect(() => {
+    const updateScreen = () => {
+      const w = window.innerWidth;
+      const next: 'mobile' | 'tablet' | 'desktop' =
+        w <= 720 ? 'mobile' : w <= 1020 ? 'tablet' : 'desktop';
+      setScreenType(next);
+      if (next !== 'mobile') {
+        setMenuOpen(false);
+      }
+    };
+    window.addEventListener('resize', updateScreen);
+    return () => window.removeEventListener('resize', updateScreen);
+  }, []);
+
   // Inicialização do Supabase Auth e verificação de sessão (sem carregar dados operacionais antes do login)
   useEffect(() => {
     async function initAuth() {
@@ -1038,14 +1059,15 @@ export default function App() {
   }
 
   return (
-    <div className="shell">
+    <div className="shell" data-screen={screenType}>
       {/* Toast Notification */}
       {toastMessage && (
         <div
           style={{
             position: 'fixed',
-            right: '20px',
-            bottom: '20px',
+            right: '16px',
+            bottom: '16px',
+            maxWidth: 'calc(100vw - 32px)',
             zIndex: 100,
             padding: '12px 16px',
             borderRadius: '10px',
@@ -1071,7 +1093,9 @@ export default function App() {
       <aside className={`sidebar ${menuOpen ? 'open' : ''}`} id="sidebar">
         <div className="brand">
           <div className="brand-lockup">
-            <div className="logo">CSB</div>
+            <div className="logo">
+              <img src="/logo-csb.svg" alt="Logo CSB" className="logo-img" />
+            </div>
             <div>
               <h1>
                 ADMINISTRA<br />
@@ -1207,7 +1231,7 @@ export default function App() {
       {/* Main Content */}
       <main className="main">
         <header className="topbar">
-          <div style={{ display: 'flex', alignItems: 'center' }}>
+          <div style={{ display: 'flex', alignItems: 'center', minWidth: 0, flex: 1 }}>
             <button
               className="menu-toggle"
               onClick={() => setMenuOpen(!menuOpen)}
@@ -1216,7 +1240,9 @@ export default function App() {
               ☰
             </button>
             <div className="crumb">
-              SEMA/MT <span style={{ color: '#cbd5e1', margin: '0 7px' }}>/</span>
+              <span className="crumb-prefix">
+                SEMA/MT <span style={{ color: '#cbd5e1', margin: '0 7px' }}>/</span>
+              </span>
               <strong id="crumb">{viewNames[activeView] || 'Painel de Controle'}</strong>
             </div>
           </div>
@@ -1228,7 +1254,7 @@ export default function App() {
                 onClick={() => setActiveView('integracao')}
                 title={supabaseStatus.message}
               >
-                <i style={{ background: '#10b981' }} /> SUPABASE CONECTADO ({supabaseStatus.latencyMs}ms)
+                <i style={{ background: '#10b981' }} /> SUPABASE<span className="pill-detail"> CONECTADO ({supabaseStatus.latencyMs}ms)</span>
               </span>
             ) : supabaseStatus.configured ? (
               <span
@@ -1237,7 +1263,7 @@ export default function App() {
                 onClick={() => setActiveView('integracao')}
                 title={supabaseStatus.message}
               >
-                <i style={{ background: '#f59e0b' }} /> SUPABASE ERRO / LOCAL
+                <i style={{ background: '#f59e0b' }} /> SUPABASE<span className="pill-detail"> ERRO / LOCAL</span>
               </span>
             ) : (
               <span
@@ -1246,17 +1272,19 @@ export default function App() {
                 style={{ cursor: 'pointer' }}
                 title="Armazenamento local no navegador. Clique para ver configuração do Supabase."
               >
-                <i /> DADOS LOCAIS · SUPABASE PENDENTE
+                <i /> DADOS LOCAIS<span className="pill-detail"> · SUPABASE PENDENTE</span>
               </span>
             )}
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-              <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', lineHeight: 1.2 }}>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
+              <div className="top-user-meta" style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', lineHeight: 1.2 }}>
                 <span className="topname" style={{ fontWeight: 600 }}>
                   {currentUserProfile?.nome || currentAuthUser?.email || 'Servidor SEMA-MT'}
                 </span>
-                <span style={{ fontSize: '10px', color: '#64748b' }}>
-                  {currentUserProfile?.matricula ? `Matr. ${currentUserProfile.matricula} · ` : ''}
+                <span style={{ fontSize: '10px', color: '#64748b', whiteSpace: 'nowrap' }}>
+                  {currentUserProfile?.matricula ? (
+                    <span className="top-user-matricula">Matr. {currentUserProfile.matricula} · </span>
+                  ) : null}
                   <span
                     style={{
                       fontWeight: 600,

@@ -137,12 +137,12 @@ export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
     <div
       style={{
         minHeight: '100vh',
-        width: '100vw',
+        width: '100%',
         background: '#0b1426',
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
-        padding: '24px 16px',
+        padding: '20px 14px',
         boxSizing: 'border-box',
         fontFamily: 'Inter, system-ui, -apple-system, sans-serif'
       }}
@@ -163,10 +163,12 @@ export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
           style={{
             background: '#f8fafc',
             borderBottom: '1px solid #e2e8f0',
-            padding: '10px 24px',
+            padding: '10px 20px',
             display: 'flex',
+            flexWrap: 'wrap',
             alignItems: 'center',
             justifyContent: 'space-between',
+            gap: '4px 12px',
             fontSize: '11px',
             color: '#64748b'
           }}
@@ -246,23 +248,16 @@ export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
                 display: 'inline-flex',
                 alignItems: 'center',
                 justifyContent: 'center',
-                color: '#64748b',
-                marginBottom: '16px'
+                padding: '6px',
+                marginBottom: '16px',
+                overflow: 'hidden'
               }}
             >
-              <svg
-                width="28"
-                height="28"
-                viewBox="0 0 24 24"
-                fill="none"
-                stroke="currentColor"
-                strokeWidth="2"
-                strokeLinecap="round"
-                strokeLinejoin="round"
-              >
-                <rect x="3" y="11" width="18" height="11" rx="2" ry="2" />
-                <path d="M7 11V7a5 5 0 0 1 10 0v4" />
-              </svg>
+              <img
+                src="/logo-csb.svg"
+                alt="Logo Administra-CSB"
+                style={{ width: '100%', height: '100%', objectFit: 'contain' }}
+              />
             </div>
 
             <h1
@@ -662,7 +657,7 @@ export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
                   />
                 </div>
 
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: '10px' }}>
                   <div>
                     <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: '#334155', marginBottom: '4px' }}>
                       Matrícula funcional *
@@ -734,7 +729,7 @@ export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
                   />
                 </div>
 
-                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: '10px' }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: '10px' }}>
                   <div>
                     <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: '#334155', marginBottom: '4px' }}>
                       Perfil profissional *

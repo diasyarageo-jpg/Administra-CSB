@@ -1,0 +1,17 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="0 0 64 64" fill="none">
+  <defs>
+    <linearGradient id="csbBg" x1="0" y1="0" x2="64" y2="64" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#059669" />
+      <stop offset="100%" stop-color="#0f172a" />
+    </linearGradient>
+    <linearGradient id="csbWater" x1="12" y1="36" x2="52" y2="54" gradientUnits="userSpaceOnUse">
+      <stop offset="0%" stop-color="#34d399" />
+      <stop offset="100%" stop-color="#0284c7" />
+    </linearGradient>
+  </defs>
+  <rect width="64" height="64" rx="16" fill="url(#csbBg)" />
+  <path d="M14 42L24 20H32L25 42H14Z" fill="#f8fafc" />
+  <path d="M27 42L33 24H40L37 42H27Z" fill="#cbd5e1" opacity="0.9" />
+  <path d="M10 45C15 41 20 41 25 45C30 49 35 49 40 45C45 41 50 41 54 45V50C50 46 45 46 40 50C35 54 30 54 25 50C20 46 15 46 10 50V45Z" fill="url(#csbWater)" />
+  <circle cx="46" cy="18" r="5" fill="#10b981" stroke="#ffffff" stroke-width="2" />
+</svg>

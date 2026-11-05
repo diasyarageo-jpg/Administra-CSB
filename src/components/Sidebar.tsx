@@ -115,8 +115,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
         {/* Brand Lockup */}
         <div className="p-5 border-b border-slate-800 flex items-center justify-between">
           <div className="flex items-center gap-3">
-            <div className="w-11 h-11 rounded-xl bg-gradient-to-br from-emerald-500 to-teal-700 p-0.5 shadow-md flex items-center justify-center text-white shrink-0">
-              <Waves size={24} className="stroke-[2.5]" />
+            <div className="w-11 h-11 rounded-xl bg-white p-1 shadow-md flex items-center justify-center shrink-0 overflow-hidden">
+              <img src="/logo-csb.svg" alt="Logo CSB" className="w-full h-full object-contain" />
             </div>
             <div>
               <h1 className="text-sm font-extrabold tracking-tight text-white leading-tight">
