@@ -28,6 +28,7 @@ import {
 } from './components/CadastrosModals';
 import { authService } from './services/authService';
 import { UserRole, AuthUserProfile, PERFIS_PROFISSIONAIS, SETORES } from './types/auth';
+import { DocumentosView } from './components/DocumentosView';
 import { LoginModal } from './components/LoginModal';
 import { LoginPage } from './components/LoginPage';
 import { UsuarioModal } from './components/UsuarioModal';
@@ -216,6 +217,7 @@ const viewNames: Record<string, string> = {
   revisoes: 'Conciliação de cadastros',
   produtividade: 'Produtividade',
   portarias: 'Portarias',
+  documentos: 'Documentos',
   usuarios: 'Usuários',
   integracao: 'Estrutura de integração',
   referencias: 'Referências centrais'
@@ -1187,6 +1189,15 @@ export default function App() {
             }}
           >
             <span className="nav-ico">▣</span>Portarias
+          </button>
+          <button
+            className={`navbtn ${activeView === 'documentos' ? 'active' : ''}`}
+            onClick={() => {
+              setActiveView('documentos');
+              setMenuOpen(false);
+            }}
+          >
+            <span className="nav-ico">▤</span>Documentos
           </button>
 
           <div className="nav-label">Administração</div>
@@ -2429,6 +2440,18 @@ export default function App() {
                 </div>
               </div>
             </div>
+          )}
+
+          {/* DOCUMENTOS (CATÁLOGO CENTRAL) */}
+          {activeView === 'documentos' && (
+            <DocumentosView
+              commonData={{
+                empreendedores: db.empreendedores,
+                barragens: db.barragens,
+                rts: db.rts
+              }}
+              onNotify={showToast}
+            />
           )}
 
           {/* ESTRUTURA DE INTEGRAÇÃO */}
