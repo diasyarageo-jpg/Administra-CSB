@@ -22,9 +22,10 @@ export interface DamDocumentItem {
   numero?: string;
   data: string;
   dataTimestamp: number;
-  origemSistema: 'Classifica' | 'Notifica' | 'Fiscaliza' | 'SEMA-MT' | string;
+  origemSistema: 'Classifica' | 'Notifica' | 'Fiscaliza' | 'SISB-MT' | 'SEMA-MT' | string;
   situacao: string;
   color: string;
+  analistas?: string[];
   resumo?: string;
 }
 
@@ -34,11 +35,13 @@ interface ParsedDam {
   lon: number;
   nome: string;
   empreendedorNome: string;
+  empreendedorId?: string;
   municipio: string;
   car: string;
   processo: string;
   situacao: string;
   documentos: DamDocumentItem[];
+  analistas: string[];
 }
 
 /**
@@ -93,6 +96,63 @@ export function parseCoord(val?: string | number | null, isLongitude = false): n
   return isNaN(directNum) ? null : directNum;
 }
 
+/**
+ * Converte valor numérico decimal em formato GMS padronizado: xx° xx' xx,xx" S/W
+ */
+export function decimalToGMS(dec: number, isLongitude = false): string {
+  const abs = Math.abs(dec);
+  const d = Math.floor(abs);
+  const m = Math.floor((abs - d) * 60);
+  const s = ((abs - d - m / 60) * 3600).toFixed(2).replace('.', ',');
+  const dir = isLongitude ? 'W' : 'S';
+  return `${d}° ${String(m).padStart(2, '0')}' ${s.padStart(5, '0')}" ${dir}`;
+}
+
+/**
+ * Aplica máscara em tempo real para coordenadas GMS enquanto o usuário digita:
+ * xx° xx' xx,xx" S (ou W para longitude).
+ */
+export function formatGMSAutoMask(rawVal: string, isLongitude = false): string {
+  if (!rawVal) return '';
+
+  const clean = rawVal.trim();
+  const dirDefault = isLongitude ? 'W' : 'S';
+
+  // Se o usuário colou formato decimal puro com ponto/vírgula (ex: -15.5986)
+  if (/^-?\d+([.,]\d+)?$/.test(clean) && (clean.includes('.') || clean.includes(','))) {
+    const num = parseFloat(clean.replace(',', '.'));
+    if (!isNaN(num)) {
+      return decimalToGMS(num, isLongitude);
+    }
+  }
+
+  // Extrai somente números digitados
+  const digits = clean.replace(/[^0-9]/g, '');
+  if (!digits) return '';
+
+  const maxDegDigits = isLongitude ? 3 : 2;
+  const degDigits = digits.length > (maxDegDigits + 4) ? maxDegDigits : (digits.length >= 2 ? 2 : digits.length);
+
+  const deg = digits.slice(0, degDigits);
+  if (digits.length <= degDigits) {
+    return `${deg}°`;
+  }
+
+  const min = digits.slice(degDigits, degDigits + 2);
+  if (digits.length <= degDigits + 2) {
+    return `${deg}° ${min}'`;
+  }
+
+  const sec = digits.slice(degDigits + 2, degDigits + 4);
+  if (digits.length <= degDigits + 4) {
+    return `${deg}° ${min}' ${sec}" ${dirDefault}`;
+  }
+
+  // Decimais dos segundos
+  const secDec = digits.slice(degDigits + 4, degDigits + 6);
+  return `${deg}° ${min}' ${sec},${secDec}" ${dirDefault}`;
+}
+
 const TILE_SERVERS = {
   satellite: {
     name: 'Satélite',
@@ -126,6 +186,30 @@ function getTipoColor(tipo: string): string {
   if (t.includes('ofício') || t.includes('oficio')) return '#8b5cf6'; // Roxo
   if (t.includes('vistoria')) return '#059669'; // Verde
   return '#64748b'; // Cinza neutro
+}
+
+const SISTEMAS_DEFAULT = {
+  sisb: true,
+  classifica: true,
+  notifica: true,
+  fiscaliza: true
+};
+
+/**
+ * Calcula distância euclidiana aproximada em km entre dois pontos geográficos
+ */
+function calculateDistanceKm(lat1: number, lon1: number, lat2: number, lon2: number): number {
+  const R = 6371; // Raio da Terra em km
+  const dLat = ((lat2 - lat1) * Math.PI) / 180;
+  const dLon = ((lon2 - lon1) * Math.PI) / 180;
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos((lat1 * Math.PI) / 180) *
+      Math.cos((lat2 * Math.PI) / 180) *
+      Math.sin(dLon / 2) *
+      Math.sin(dLon / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
 }
 
 /**
@@ -162,6 +246,7 @@ function resolveDamDocuments(
         origemSistema: c.origemSistema,
         situacao: c.situacao || 'Emitido',
         color: getTipoColor(c.tipoNome || ''),
+        analistas: c.analistasElaboradores || [],
         resumo: c.analistasElaboradores?.length ? `Elaborado por: ${c.analistasElaboradores.join(', ')}` : undefined
       });
     }
@@ -180,9 +265,10 @@ function resolveDamDocuments(
         numero: d.numero,
         data: d.data || d.dataEmissao || '—',
         dataTimestamp: ts,
-        origemSistema: d.origem || d.origemSistema || 'SEMA-MT',
+        origemSistema: d.origem || d.origemSistema || 'SISB-MT',
         situacao: d.situacao || 'Emitido',
-        color: getTipoColor(tipo)
+        color: getTipoColor(tipo),
+        analistas: d.analistas || (d.analista ? [d.analista] : [])
       });
     }
   }
@@ -201,7 +287,8 @@ function resolveDamDocuments(
       dataTimestamp: ts,
       origemSistema: 'Classifica',
       situacao: 'Vigente',
-      color: getTipoColor('Parecer de Classificação')
+      color: getTipoColor('Parecer de Classificação'),
+      analistas: ['Equipe de Classificação CSB']
     });
   }
 
@@ -218,7 +305,8 @@ function resolveDamDocuments(
       dataTimestamp: ts,
       origemSistema: 'Notifica',
       situacao: 'Emitido',
-      color: getTipoColor('Notificação')
+      color: getTipoColor('Notificação'),
+      analistas: ['Fiscalização SEMA/CSB']
     });
   }
 
@@ -228,14 +316,15 @@ function resolveDamDocuments(
     docs.push({
       id: `oficio_${dam.id}`,
       tipo: 'Ofício',
-      tipoCodigo: 'OFICIO',
+      tipoCodigo: 'Ofício',
       titulo: 'Ofício de Convocação e Instrução Cadastral',
       numero: num || '075/2023',
       data: dam.dataOficio || '2023-06-25',
       dataTimestamp: ts,
       origemSistema: 'Fiscaliza',
       situacao: 'Emitido',
-      color: getTipoColor('Ofício')
+      color: getTipoColor('Ofício'),
+      analistas: ['Coordenação CSB/SURH']
     });
   }
 
@@ -246,7 +335,6 @@ function resolveDamDocuments(
     const anoAtual = 2024;
     const anoAnterior = 2023;
 
-    // Adiciona Parecer de Classificação
     docs.push({
       id: `pc_${dam.id || seed}`,
       tipo: 'Parecer de Classificação',
@@ -257,10 +345,10 @@ function resolveDamDocuments(
       dataTimestamp: new Date(`${anoAtual}-05-${(seed % 20 + 1).toString().padStart(2, '0')}`).getTime(),
       origemSistema: 'Classifica',
       situacao: 'Vigente',
-      color: getTipoColor('Parecer de Classificação')
+      color: getTipoColor('Parecer de Classificação'),
+      analistas: ['Eng. Tiago Silva (CSB)', 'Geól. Mariana Lopes']
     });
 
-    // Se seed for par, tem Notificação
     if (seed % 2 === 0) {
       docs.push({
         id: `not_${dam.id || seed}`,
@@ -272,11 +360,11 @@ function resolveDamDocuments(
         dataTimestamp: new Date(`${anoAnterior}-11-${(seed % 25 + 1).toString().padStart(2, '0')}`).getTime(),
         origemSistema: 'Notifica',
         situacao: 'Emitido',
-        color: getTipoColor('Notificação')
+        color: getTipoColor('Notificação'),
+        analistas: ['Eng. Rafael Costa (CSB)']
       });
     }
 
-    // Se seed for divisível por 3 ou for ímpar, tem Ofício
     if (seed % 3 === 0 || seed % 2 !== 0) {
       docs.push({
         id: `of_${dam.id || seed}`,
@@ -288,12 +376,13 @@ function resolveDamDocuments(
         dataTimestamp: new Date(`${anoAnterior}-08-${(seed % 22 + 1).toString().padStart(2, '0')}`).getTime(),
         origemSistema: 'Fiscaliza',
         situacao: 'Emitido',
-        color: getTipoColor('Ofício')
+        color: getTipoColor('Ofício'),
+        analistas: ['Equipe de Fiscalização CSB']
       });
     }
   }
 
-  // Ordenação mandatória: "caso tenha mais de um, liste todos desde os mais recentes ate os mais novos"
+  // Ordenação mandatória: do mais recente ao mais novo
   return docs.sort((a, b) => b.dataTimestamp - a.dataTimestamp);
 }
 
@@ -311,6 +400,7 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
   const outerMaskLayerRef = useRef<L.GeoJSON | null>(null);
   const stateBorderLayerRef = useRef<L.GeoJSON | null>(null);
   const municipalLayerRef = useRef<L.GeoJSON | null>(null);
+  const searchPinMarkerRef = useRef<L.Marker | null>(null);
 
   // Inicie o mapa sempre na camada de "satélite"
   const [activeLayer, setActiveLayer] = useState<'satellite' | 'streets' | 'topo'>('satellite');
@@ -319,6 +409,27 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
   const [catalogoDocs, setCatalogoDocs] = useState<DocumentoCatalogoItem[]>(propDocumentos || []);
   const [showMunicipalities, setShowMunicipalities] = useState<boolean>(true);
   const [showOuterMask, setShowOuterMask] = useState<boolean>(true);
+
+  // ============================================================================
+  // ESTADOS DOS NOVOS FILTROS E PESQUISA POR COORDENADAS GMS
+  // ============================================================================
+  const [inputLat, setInputLat] = useState<string>('');
+  const [inputLong, setInputLong] = useState<string>('');
+  const [coordSearchFeedback, setCoordSearchFeedback] = useState<string | null>(null);
+
+  // Caixinhas de seleção para ativar e desativar informações de sistemas
+  const [activeSystems, setActiveSystems] = useState({
+    sisb: true,
+    classifica: true,
+    notifica: true,
+    fiscaliza: true
+  });
+
+  // Filtros de pesquisa por analista, por município, por empreendedor, por nome
+  const [searchNome, setSearchNome] = useState<string>('');
+  const [filterMunicipio, setFilterMunicipio] = useState<string>('TODOS');
+  const [filterEmpreendedor, setFilterEmpreendedor] = useState<string>('TODOS');
+  const [filterAnalista, setFilterAnalista] = useState<string>('TODOS');
 
   // Carrega catálogo central de documentos se não fornecido via prop
   useEffect(() => {
@@ -341,6 +452,49 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
     };
   }, [propDocumentos, empreendedores, barragens]);
 
+  // Lista única de analistas, municípios e empreendedores para os dropdowns
+  const { allMunicipios, allEmpreendedores, allAnalistas } = useMemo(() => {
+    const munSet = new Set<string>();
+    const empSet = new Set<string>();
+    const anaSet = new Set<string>();
+
+    for (const b of barragens) {
+      if (b.municipio) munSet.add(String(b.municipio).trim());
+      if (b.municipality) munSet.add(String(b.municipality).trim());
+      const emp = resolveDamEntrepreneur(b.empreendedor || b.entrepreneurId, empreendedores);
+      if (emp.displayName && emp.displayName !== '—') {
+        empSet.add(emp.displayName.trim());
+      } else if (b.entrepreneurName) {
+        empSet.add(String(b.entrepreneurName).trim());
+      }
+    }
+
+    for (const e of empreendedores) {
+      if (e.nome) empSet.add(String(e.nome).trim());
+      if (e.name) empSet.add(String(e.name).trim());
+    }
+
+    for (const d of catalogoDocs) {
+      if (Array.isArray(d.analistasElaboradores)) {
+        d.analistasElaboradores.forEach(a => a && anaSet.add(String(a).trim()));
+      }
+      if (d.responsavelTecnicoNome) anaSet.add(String(d.responsavelTecnicoNome).trim());
+    }
+
+    // Analistas padrão de segurança de barragens da CSB / SEMA-MT
+    anaSet.add('Eng. Tiago Silva (CSB)');
+    anaSet.add('Geól. Mariana Lopes');
+    anaSet.add('Eng. Rafael Costa (CSB)');
+    anaSet.add('Fiscalização SEMA/CSB');
+    anaSet.add('Coordenação CSB/SURH');
+
+    return {
+      allMunicipios: Array.from(munSet).sort((a, b) => a.localeCompare(b, 'pt-BR')),
+      allEmpreendedores: Array.from(empSet).sort((a, b) => a.localeCompare(b, 'pt-BR')),
+      allAnalistas: Array.from(anaSet).sort((a, b) => a.localeCompare(b, 'pt-BR'))
+    };
+  }, [barragens, empreendedores, catalogoDocs]);
+
   // Filtra e converte coordenadas válidas das barragens com documentos vinculados
   const { mappedDams, unmappedCount } = useMemo(() => {
     const mapped: ParsedDam[] = [];
@@ -359,19 +513,27 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
         lon <= -49
       ) {
         const emp = resolveDamEntrepreneur(b.empreendedor || b.entrepreneurId, empreendedores);
+        const empNome = emp.displayName !== '—' ? emp.displayName : (b.entrepreneurName || '—');
         const damDocs = resolveDamDocuments(b, catalogoDocs);
+
+        // Agrega analistas de todos os documentos vinculados
+        const analistasDam = Array.from(
+          new Set(damDocs.flatMap(d => d.analistas || []))
+        );
 
         mapped.push({
           raw: b,
           lat,
           lon,
           nome: b.nome || b.name || 'Barragem sem identificação',
-          empreendedorNome: emp.displayName !== '—' ? emp.displayName : (b.entrepreneurName || '—'),
+          empreendedorNome: empNome,
+          empreendedorId: b.empreendedor || b.entrepreneurId,
           municipio: b.municipio || b.municipality || 'Mato Grosso',
           car: b.car || b.codeSnisb || '—',
           processo: b.processo || b.processNumber || '—',
           situacao: b.situacao || (b.alertLevel ? `Alerta: ${b.alertLevel}` : 'Ativa'),
-          documentos: damDocs
+          documentos: damDocs,
+          analistas: analistasDam
         });
       } else {
         unmapped++;
@@ -380,6 +542,60 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
 
     return { mappedDams: mapped, unmappedCount: unmapped };
   }, [barragens, empreendedores, catalogoDocs]);
+
+  // Aplica filtros de pesquisa: por analista, por município, por empreendedor, por nome e sistemas ativos
+  const filteredMappedDams = useMemo(() => {
+    return mappedDams.filter(dam => {
+      // 1. Filtro por Nome da Barragem
+      if (searchNome.trim()) {
+        const q = searchNome.toLowerCase().trim();
+        const matchesNome =
+          dam.nome.toLowerCase().includes(q) ||
+          dam.car.toLowerCase().includes(q) ||
+          dam.processo.toLowerCase().includes(q);
+        if (!matchesNome) return false;
+      }
+
+      // 2. Filtro por Município
+      if (filterMunicipio !== 'TODOS') {
+        if (dam.municipio.toLowerCase().trim() !== filterMunicipio.toLowerCase().trim()) {
+          return false;
+        }
+      }
+
+      // 3. Filtro por Empreendedor
+      if (filterEmpreendedor !== 'TODOS') {
+        if (dam.empreendedorNome.toLowerCase().trim() !== filterEmpreendedor.toLowerCase().trim()) {
+          return false;
+        }
+      }
+
+      // 4. Filtro por Analista
+      if (filterAnalista !== 'TODOS') {
+        const hasAnalista = dam.analistas.some(
+          a => a.toLowerCase().trim() === filterAnalista.toLowerCase().trim()
+        );
+        if (!hasAnalista) return false;
+      }
+
+      // 5. Filtro por Sistemas Ativos (SISB-MT, Classifica, Notifica, Fiscaliza)
+      // Se todos desativados, oculta tudo; caso contrário, verifica se a estrutura tem correspondência
+      const activeOrigens: string[] = [];
+      if (activeSystems.classifica) activeOrigens.push('classifica');
+      if (activeSystems.notifica) activeOrigens.push('notifica');
+      if (activeSystems.fiscaliza) activeOrigens.push('fiscaliza');
+      if (activeSystems.sisb) activeOrigens.push('sisb-mt', 'sema-mt', 'sisbam');
+
+      // Se SISB-MT estiver ativo, mantém cadastros básicos de barragem
+      if (activeSystems.sisb) return true;
+
+      // Se SISB-MT estiver desativado, exibe apenas se tiver documentos de sistemas ativos
+      const hasDocFromActiveSystem = dam.documentos.some(d =>
+        activeOrigens.includes((d.origemSistema || '').toLowerCase())
+      );
+      return hasDocFromActiveSystem;
+    });
+  }, [mappedDams, searchNome, filterMunicipio, filterEmpreendedor, filterAnalista, activeSystems]);
 
   // Sincroniza seleção externa via selectedDamId
   useEffect(() => {
@@ -394,7 +610,6 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
     if (!mapContainerRef.current) return;
 
     if (!mapInstanceRef.current) {
-      // Centro geográfico de Mato Grosso
       const map = L.map(mapContainerRef.current, {
         center: [-12.68, -55.9],
         zoom: 6,
@@ -445,7 +660,11 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
           fillOpacity: 0
         },
         onEachFeature: (feature, layer) => {
-          const munNome = feature.properties?.name || feature.properties?.NM_MUNICIP || feature.properties?.NOME || feature.properties?.id;
+          const munNome =
+            feature.properties?.name ||
+            feature.properties?.NM_MUNICIP ||
+            feature.properties?.NOME ||
+            feature.properties?.id;
           if (munNome) {
             layer.bindTooltip(
               `<div style="font-family: Inter, system-ui, sans-serif; font-size: 10px; font-weight: 700; color: #0f172a; padding: 2px 4px;">📍 Município: ${munNome}</div>`,
@@ -456,7 +675,6 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
       }).addTo(map);
       municipalLayerRef.current = munGroup;
 
-      // Carrega GeoJSON detalhado dos municípios de MT
       fetch('/data/geojs-51-mun.json')
         .then(res => res.json())
         .then(data => {
@@ -482,6 +700,7 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
         outerMaskLayerRef.current = null;
         stateBorderLayerRef.current = null;
         municipalLayerRef.current = null;
+        searchPinMarkerRef.current = null;
       }
     };
   }, []);
@@ -529,7 +748,6 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
 
     baseTileLayerRef.current = newLayer;
 
-    // Garante ordem visual correta: Base -> Máscara -> Municípios -> Limite Estadual -> Marcadores
     if (outerMaskLayerRef.current && map.hasLayer(outerMaskLayerRef.current)) {
       outerMaskLayerRef.current.bringToFront();
     }
@@ -546,7 +764,7 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
     }
   }, [activeLayer]);
 
-  // Atualiza marcadores das barragens no mapa com informações de documentos vinculados
+  // Atualiza marcadores das barragens no mapa com informações de documentos filtrados por sistemas
   useEffect(() => {
     const map = mapInstanceRef.current;
     const group = markersLayerRef.current;
@@ -556,7 +774,7 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
 
     const bounds = L.latLngBounds([]);
 
-    mappedDams.forEach(dam => {
+    filteredMappedDams.forEach(dam => {
       const isSelected = selectedDam?.raw.id === dam.raw.id || selectedDamId === dam.raw.id;
       const color =
         dam.situacao === 'Ativa'
@@ -599,10 +817,19 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
 
       const marker = L.marker([dam.lat, dam.lon], { icon: customIcon });
 
-      // Documentos listados do mais recente ao mais novo
+      // Filtra documentos pelos sistemas ativos
+      const visibleDocs = dam.documentos.filter(d => {
+        const orig = (d.origemSistema || '').toLowerCase();
+        if (orig.includes('classifica') && !activeSystems.classifica) return false;
+        if (orig.includes('notifica') && !activeSystems.notifica) return false;
+        if (orig.includes('fiscaliza') && !activeSystems.fiscaliza) return false;
+        if ((orig.includes('sisb') || orig.includes('sema')) && !activeSystems.sisb) return false;
+        return true;
+      });
+
       const docsListHtml =
-        dam.documentos.length > 0
-          ? dam.documentos
+        visibleDocs.length > 0
+          ? visibleDocs
               .map(
                 d => `
                 <div style="margin-top: 4px; padding: 3px 6px; background: rgba(15, 23, 42, 0.05); border-left: 3px solid ${d.color}; border-radius: 3px;">
@@ -621,9 +848,8 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
               `
               )
               .join('')
-          : '<div style="font-size: 10px; color: #94a3b8; font-style: italic; margin-top: 4px;">Nenhum documento registrado</div>';
+          : '<div style="font-size: 10px; color: #94a3b8; font-style: italic; margin-top: 4px;">Nenhum documento ativo pelos sistemas selecionados</div>';
 
-      // Tooltip informativo com lista de documentos do mais recente ao mais novo
       marker.bindTooltip(
         `
         <div style="font-family: Inter, system-ui, sans-serif; font-size: 11px; padding: 3px 4px; line-height: 1.35; max-width: 280px;">
@@ -641,7 +867,7 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
           <div style="margin-top: 8px; border-top: 1px dashed #cbd5e1; padding-top: 6px;">
             <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 2px;">
               <span style="font-weight: 800; font-size: 10.5px; color: #0284c7;">
-                📑 Documentos (${dam.documentos.length})
+                📑 Documentos (${visibleDocs.length})
               </span>
               <span style="font-size: 9px; color: #64748b;">(mais recente → mais antigo)</span>
             </div>
@@ -665,12 +891,12 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
       bounds.extend([dam.lat, dam.lon]);
     });
 
-    if (mappedDams.length > 0) {
+    if (filteredMappedDams.length > 0 && !searchPinMarkerRef.current) {
       map.fitBounds(bounds, { padding: [40, 40], maxZoom: 12 });
-    } else {
+    } else if (filteredMappedDams.length === 0 && !searchPinMarkerRef.current) {
       map.setView([-12.68, -55.9], 6);
     }
-  }, [mappedDams, selectedDam?.raw.id, selectedDamId]);
+  }, [filteredMappedDams, selectedDam?.raw.id, selectedDamId, activeSystems]);
 
   // Redimensionamento do mapa quando expande/recolhe
   useEffect(() => {
@@ -681,6 +907,121 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
     }
   }, [isExpanded]);
 
+  // ============================================================================
+  // FUNÇÕES DE LOCALIZAÇÃO POR COORDENADAS GMS E LIMPEZA
+  // ============================================================================
+  const handleLocalizarCoordenada = () => {
+    setCoordSearchFeedback(null);
+    const map = mapInstanceRef.current;
+    if (!map) return;
+
+    if (!inputLat.trim() || !inputLong.trim()) {
+      setCoordSearchFeedback('Preencha latitude e longitude em GMS.');
+      return;
+    }
+
+    const lat = parseCoord(inputLat, false);
+    const lon = parseCoord(inputLong, true);
+
+    if (lat === null || lon === null) {
+      setCoordSearchFeedback('Coordenadas GMS inválidas. Ex: 15° 35\' 55" S');
+      return;
+    }
+
+    // Remove pin anterior se existente
+    if (searchPinMarkerRef.current) {
+      map.removeLayer(searchPinMarkerRef.current);
+      searchPinMarkerRef.current = null;
+    }
+
+    // Calcula barragem mais próxima
+    let closestDam: ParsedDam | null = null;
+    let minDistanceKm = Infinity;
+
+    for (const d of mappedDams) {
+      const dist = calculateDistanceKm(lat, lon, d.lat, d.lon);
+      if (dist < minDistanceKm) {
+        minDistanceKm = dist;
+        closestDam = d;
+      }
+    }
+
+    // Cria ícone de radar com pulso luminoso
+    const searchIcon = L.divIcon({
+      className: 'search-radar-marker',
+      html: `
+        <div style="position: relative; width: 36px; height: 36px; display: flex; align-items: center; justify-content: center;">
+          <div style="position: absolute; width: 36px; height: 36px; border-radius: 50%; background: rgba(56, 189, 248, 0.4); animation: pulse 1.8s infinite ease-out;"></div>
+          <div style="position: absolute; width: 22px; height: 22px; border-radius: 50%; background: #0284c7; border: 3px solid #ffffff; box-shadow: 0 4px 10px rgba(0,0,0,0.5); display: flex; align-items: center; justify-content: center; color: white; font-size: 11px; font-weight: 900;">
+            ⌖
+          </div>
+        </div>
+      `,
+      iconSize: [36, 36],
+      iconAnchor: [18, 18]
+    });
+
+    const searchMarker = L.marker([lat, lon], { icon: searchIcon, zIndexOffset: 1000 });
+
+    const distText =
+      minDistanceKm < 1
+        ? `${Math.round(minDistanceKm * 1000)} metros`
+        : `${minDistanceKm.toFixed(2)} km`;
+
+    const popupHtml = `
+      <div style="font-family: Inter, system-ui, sans-serif; font-size: 11.5px; padding: 2px 4px; line-height: 1.4; min-width: 210px;">
+        <strong style="color: #0284c7; font-size: 12.5px; display: block; border-bottom: 1px solid #e2e8f0; padding-bottom: 4px; margin-bottom: 4px;">
+          📍 Ponto Pesquisado
+        </strong>
+        <div><b>GMS:</b> ${inputLat} / ${inputLong}</div>
+        <div style="color: #64748b; font-size: 10.5px; margin-bottom: 6px;"><b>Decimal:</b> ${lat.toFixed(5)}, ${lon.toFixed(5)}</div>
+        ${
+          closestDam
+            ? `
+          <div style="background: #f1f5f9; padding: 6px 8px; border-radius: 6px; border: 1px solid #cbd5e1; font-size: 10.5px;">
+            <span style="color: #475569; display: block;">Barragem mais próxima:</span>
+            <strong style="color: #0f172a; display: block;">${closestDam.nome}</strong>
+            <span style="color: #059669; font-weight: 700;">Distância: ${distText}</span>
+          </div>
+        `
+            : ''
+        }
+      </div>
+    `;
+
+    searchMarker.bindPopup(popupHtml).addTo(map);
+    searchPinMarkerRef.current = searchMarker;
+
+    map.setView([lat, lon], 13, { animate: true });
+    searchMarker.openPopup();
+
+    if (closestDam && minDistanceKm < 5) {
+      setSelectedDam(closestDam);
+    }
+
+    setCoordSearchFeedback(`Ponto localizado (${lat.toFixed(4)}, ${lon.toFixed(4)})`);
+  };
+
+  const handleLimparCoordenadas = () => {
+    setInputLat('');
+    setInputLong('');
+    setCoordSearchFeedback(null);
+    if (searchPinMarkerRef.current && mapInstanceRef.current) {
+      mapInstanceRef.current.removeLayer(searchPinMarkerRef.current);
+      searchPinMarkerRef.current = null;
+    }
+    handleCenterMatoGrosso();
+  };
+
+  const handleClearAllFilters = () => {
+    setSearchNome('');
+    setFilterMunicipio('TODOS');
+    setFilterEmpreendedor('TODOS');
+    setFilterAnalista('TODOS');
+    setActiveSystems(SISTEMAS_DEFAULT);
+    handleLimparCoordenadas();
+  };
+
   const handleCenterMatoGrosso = () => {
     if (mapInstanceRef.current) {
       mapInstanceRef.current.setView([-12.68, -55.9], 6, { animate: true });
@@ -688,11 +1029,23 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
   };
 
   const handleFitAllDams = () => {
-    if (mapInstanceRef.current && mappedDams.length > 0) {
-      const bounds = L.latLngBounds(mappedDams.map(d => [d.lat, d.lon]));
+    if (mapInstanceRef.current && filteredMappedDams.length > 0) {
+      const bounds = L.latLngBounds(filteredMappedDams.map(d => [d.lat, d.lon]));
       mapInstanceRef.current.fitBounds(bounds, { padding: [40, 40], maxZoom: 12 });
     }
   };
+
+  const hasActiveFilters =
+    Boolean(searchNome) ||
+    filterMunicipio !== 'TODOS' ||
+    filterEmpreendedor !== 'TODOS' ||
+    filterAnalista !== 'TODOS' ||
+    !activeSystems.sisb ||
+    !activeSystems.classifica ||
+    !activeSystems.notifica ||
+    !activeSystems.fiscaliza ||
+    Boolean(inputLat) ||
+    Boolean(inputLong);
 
   return (
     <div
@@ -705,53 +1058,240 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
         boxShadow: '0 4px 14px #0f172a06'
       }}
     >
-      {/* Barra de Título e Controles do Minimapa */}
+      {/* ==================================================================== */}
+      {/* BARRA SUPERIOR: PESQUISA POR COORDENADAS GMS E SELEÇÃO DE SISTEMAS   */}
+      {/* ==================================================================== */}
       <div
         style={{
           padding: '12px 18px',
-          borderBottom: isExpanded ? '1px solid var(--line)' : 'none',
+          borderBottom: '1px solid var(--line)',
+          background: '#fbfcfd',
           display: 'flex',
           flexWrap: 'wrap',
           alignItems: 'center',
           justifyContent: 'space-between',
-          gap: '10px',
-          background: '#fbfcfd'
+          gap: '12px'
         }}
       >
-        <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-          <span style={{ fontSize: '18px' }}>🗺️</span>
-          <div>
-            <h3
+        {/* Bloco de Coordenadas GMS conforme layout fornecido */}
+        <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <span
               style={{
-                margin: 0,
-                fontSize: '13px',
+                fontSize: '11px',
                 fontWeight: 800,
-                color: 'var(--navy)',
-                letterSpacing: '-0.2px'
+                color: '#475569',
+                letterSpacing: '0.3px'
               }}
             >
-              Minimapa de Localização das Barragens — Mato Grosso (IBGE)
-            </h3>
-            <span style={{ fontSize: '11px', color: '#64748b' }}>
-              Limite estadual do IBGE, recorte municipal e documentos vinculados (Parecer, Notificação, Ofício)
+              LAT:
             </span>
+            <input
+              type="text"
+              value={inputLat}
+              onChange={e => setInputLat(formatGMSAutoMask(e.target.value, false))}
+              placeholder="Ex: 15° 35' 55&quot; S"
+              style={{
+                height: '34px',
+                width: '145px',
+                background: '#ffffff',
+                border: '1px solid #cbd5e1',
+                borderRadius: '10px',
+                padding: '0 10px',
+                fontSize: '11px',
+                fontWeight: 600,
+                color: '#0f172a',
+                outline: 'none',
+                boxShadow: 'inset 0 1px 2px rgba(0,0,0,0.03)'
+              }}
+            />
+          </div>
+
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+            <span
+              style={{
+                fontSize: '11px',
+                fontWeight: 800,
+                color: '#475569',
+                letterSpacing: '0.3px'
+              }}
+            >
+              LONG:
+            </span>
+            <input
+              type="text"
+              value={inputLong}
+              onChange={e => setInputLong(formatGMSAutoMask(e.target.value, true))}
+              placeholder="Ex: 56° 05' 47&quot; W"
+              style={{
+                height: '34px',
+                width: '145px',
+                background: '#ffffff',
+                border: '1px solid #cbd5e1',
+                borderRadius: '10px',
+                padding: '0 10px',
+                fontSize: '11px',
+                fontWeight: 600,
+                color: '#0f172a',
+                outline: 'none',
+                boxShadow: 'inset 0 1px 2px rgba(0,0,0,0.03)'
+              }}
+            />
+          </div>
+
+          <button
+            type="button"
+            onClick={handleLocalizarCoordenada}
+            style={{
+              height: '34px',
+              background: '#0f172a',
+              color: '#ffffff',
+              border: 'none',
+              borderRadius: '20px',
+              padding: '0 14px',
+              fontSize: '11px',
+              fontWeight: 800,
+              cursor: 'pointer',
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: '6px',
+              letterSpacing: '0.4px',
+              transition: 'background 0.15s ease'
+            }}
+            title="Localizar ponto no mapa pela coordenada geográfica informada"
+          >
+            <span>⌖</span>
+            <span>LOCALIZAR</span>
+          </button>
+
+          <button
+            type="button"
+            onClick={handleLimparCoordenadas}
+            style={{
+              height: '34px',
+              background: '#ffffff',
+              color: '#475569',
+              border: '1px solid #cbd5e1',
+              borderRadius: '20px',
+              padding: '0 12px',
+              fontSize: '11px',
+              fontWeight: 800,
+              cursor: 'pointer',
+              letterSpacing: '0.3px',
+              transition: 'background 0.15s ease'
+            }}
+            title="Limpar coordenadas digitadas e ponto pesquisado"
+          >
+            LIMPAR
+          </button>
+
+          {/* Divisor vertical */}
+          <div
+            style={{
+              width: '1px',
+              height: '24px',
+              background: '#cbd5e1',
+              margin: '0 4px'
+            }}
+          />
+
+          {/* Caixinhas de seleção para ativar e desativar informações de sistemas */}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+            <span style={{ fontSize: '11px', fontWeight: 700, color: '#64748b' }}>
+              Sistemas:
+            </span>
+
+            <label
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '5px',
+                fontSize: '11px',
+                fontWeight: 700,
+                cursor: 'pointer',
+                color: activeSystems.sisb ? '#0f172a' : '#94a3b8'
+              }}
+              title="Ativar/desativar registros e informações advindas do SISB-MT"
+            >
+              <input
+                type="checkbox"
+                checked={activeSystems.sisb}
+                onChange={e => setActiveSystems({ ...activeSystems, sisb: e.target.checked })}
+                style={{ cursor: 'pointer', accentColor: '#0f172a' }}
+              />
+              <span style={{ color: activeSystems.sisb ? '#0f172a' : '#94a3b8' }}>SISB-MT</span>
+            </label>
+
+            <label
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '5px',
+                fontSize: '11px',
+                fontWeight: 700,
+                cursor: 'pointer',
+                color: activeSystems.classifica ? '#0284c7' : '#94a3b8'
+              }}
+              title="Ativar/desativar documentos de Parecer de Classificação do sistema Classifica"
+            >
+              <input
+                type="checkbox"
+                checked={activeSystems.classifica}
+                onChange={e => setActiveSystems({ ...activeSystems, classifica: e.target.checked })}
+                style={{ cursor: 'pointer', accentColor: '#0284c7' }}
+              />
+              <span>Classifica</span>
+            </label>
+
+            <label
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '5px',
+                fontSize: '11px',
+                fontWeight: 700,
+                cursor: 'pointer',
+                color: activeSystems.notifica ? '#d97706' : '#94a3b8'
+              }}
+              title="Ativar/desativar notificações do sistema Notifica"
+            >
+              <input
+                type="checkbox"
+                checked={activeSystems.notifica}
+                onChange={e => setActiveSystems({ ...activeSystems, notifica: e.target.checked })}
+                style={{ cursor: 'pointer', accentColor: '#d97706' }}
+              />
+              <span>Notifica</span>
+            </label>
+
+            <label
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: '5px',
+                fontSize: '11px',
+                fontWeight: 700,
+                cursor: 'pointer',
+                color: activeSystems.fiscaliza ? '#059669' : '#94a3b8'
+              }}
+              title="Ativar/desativar ofícios e vistorias do sistema Fiscaliza"
+            >
+              <input
+                type="checkbox"
+                checked={activeSystems.fiscaliza}
+                onChange={e => setActiveSystems({ ...activeSystems, fiscaliza: e.target.checked })}
+                style={{ cursor: 'pointer', accentColor: '#059669' }}
+              />
+              <span>Fiscaliza</span>
+            </label>
           </div>
         </div>
 
+        {/* Controles de camadas e mapa */}
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
-          <span
-            className="badge green"
-            title={`${mappedDams.length} barragens possuem coordenadas geográficas válidas`}
-          >
-            ● {mappedDams.length} mapeada{mappedDams.length !== 1 ? 's' : ''}
-          </span>
-
-          {unmappedCount > 0 && (
-            <span
-              className="badge gray"
-              title={`${unmappedCount} barragens cadastradas sem latitude/longitude informada`}
-            >
-              ○ {unmappedCount} sem coordenadas
+          {coordSearchFeedback && (
+            <span style={{ fontSize: '11px', fontWeight: 600, color: '#0284c7' }}>
+              {coordSearchFeedback}
             </span>
           )}
 
@@ -786,7 +1326,6 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
                 ))}
               </div>
 
-              {/* Botão de alternar limites municipais */}
               <button
                 type="button"
                 className={`btn light small ${showMunicipalities ? 'active' : ''}`}
@@ -801,7 +1340,6 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
                 {showMunicipalities ? '✓ Municípios (50%)' : '○ Municípios'}
               </button>
 
-              {/* Botão de alternar máscara externa */}
               <button
                 type="button"
                 className={`btn light small ${showOuterMask ? 'active' : ''}`}
@@ -823,7 +1361,7 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
                 title="Ajustar zoom para abranger todas as barragens"
                 style={{ padding: '4px 8px', fontSize: '10.5px' }}
               >
-                ⊙ Enquadrar todas
+                ⊙ Enquadrar
               </button>
 
               <button
@@ -849,7 +1387,227 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
         </div>
       </div>
 
-      {/* Conteúdo do Mapa e Painel de Resumo */}
+      {/* ==================================================================== */}
+      {/* BARRA INFERIOR DE FILTROS: ANALISTA, MUNICÍPIO, EMPREENDEDOR E NOME   */}
+      {/* ==================================================================== */}
+      <div
+        style={{
+          padding: '10px 18px',
+          borderBottom: isExpanded ? '1px solid var(--line)' : 'none',
+          background: '#ffffff',
+          display: 'flex',
+          flexWrap: 'wrap',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: '10px'
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', flex: 1 }}>
+          {/* 1. Filtro por Nome da Barragem */}
+          <div style={{ position: 'relative', minWidth: '180px', flex: '1 1 180px' }}>
+            <span
+              style={{
+                position: 'absolute',
+                left: '10px',
+                top: '50%',
+                transform: 'translateY(-50%)',
+                color: '#94a3b8',
+                fontSize: '12px'
+              }}
+            >
+              ⌕
+            </span>
+            <input
+              type="text"
+              value={searchNome}
+              onChange={e => setSearchNome(e.target.value)}
+              placeholder="Pesquisar por nome da barragem, CAR ou processo..."
+              style={{
+                width: '100%',
+                height: '32px',
+                paddingLeft: '28px',
+                paddingRight: '10px',
+                background: '#f8fafc',
+                border: '1px solid #cbd5e1',
+                borderRadius: '10px',
+                fontSize: '11px',
+                color: '#0f172a',
+                outline: 'none'
+              }}
+            />
+          </div>
+
+          {/* 2. Filtro por Município */}
+          <div style={{ display: 'inline-flex', alignItems: 'center', position: 'relative' }}>
+            <span
+              style={{
+                position: 'absolute',
+                left: '8px',
+                top: '50%',
+                transform: 'translateY(-50%)',
+                fontSize: '11px',
+                color: '#64748b',
+                pointerEvents: 'none'
+              }}
+            >
+              ⏚
+            </span>
+            <select
+              value={filterMunicipio}
+              onChange={e => setFilterMunicipio(e.target.value)}
+              style={{
+                height: '32px',
+                paddingLeft: '24px',
+                paddingRight: '22px',
+                background: '#f8fafc',
+                border: '1px solid #cbd5e1',
+                borderRadius: '10px',
+                fontSize: '11px',
+                fontWeight: 700,
+                color: filterMunicipio === 'TODOS' ? '#475569' : '#0f172a',
+                outline: 'none',
+                cursor: 'pointer'
+              }}
+            >
+              <option value="TODOS">MUNICÍPIOS (TODOS)</option>
+              {allMunicipios.map(m => (
+                <option key={m} value={m}>
+                  {m}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* 3. Filtro por Empreendedor */}
+          <div style={{ display: 'inline-flex', alignItems: 'center', position: 'relative' }}>
+            <span
+              style={{
+                position: 'absolute',
+                left: '8px',
+                top: '50%',
+                transform: 'translateY(-50%)',
+                fontSize: '11px',
+                color: '#64748b',
+                pointerEvents: 'none'
+              }}
+            >
+              🏢
+            </span>
+            <select
+              value={filterEmpreendedor}
+              onChange={e => setFilterEmpreendedor(e.target.value)}
+              style={{
+                height: '32px',
+                paddingLeft: '24px',
+                paddingRight: '22px',
+                background: '#f8fafc',
+                border: '1px solid #cbd5e1',
+                borderRadius: '10px',
+                fontSize: '11px',
+                fontWeight: 700,
+                color: filterEmpreendedor === 'TODOS' ? '#475569' : '#0f172a',
+                outline: 'none',
+                cursor: 'pointer',
+                maxWidth: '220px'
+              }}
+            >
+              <option value="TODOS">EMPREENDEDOR (TODOS)</option>
+              {allEmpreendedores.map(emp => (
+                <option key={emp} value={emp}>
+                  {emp}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {/* 4. Filtro por Analista */}
+          <div style={{ display: 'inline-flex', alignItems: 'center', position: 'relative' }}>
+            <span
+              style={{
+                position: 'absolute',
+                left: '8px',
+                top: '50%',
+                transform: 'translateY(-50%)',
+                fontSize: '11px',
+                color: '#64748b',
+                pointerEvents: 'none'
+              }}
+            >
+              👤
+            </span>
+            <select
+              value={filterAnalista}
+              onChange={e => setFilterAnalista(e.target.value)}
+              style={{
+                height: '32px',
+                paddingLeft: '24px',
+                paddingRight: '22px',
+                background: '#f8fafc',
+                border: '1px solid #cbd5e1',
+                borderRadius: '10px',
+                fontSize: '11px',
+                fontWeight: 700,
+                color: filterAnalista === 'TODOS' ? '#475569' : '#0f172a',
+                outline: 'none',
+                cursor: 'pointer',
+                maxWidth: '220px'
+              }}
+            >
+              <option value="TODOS">ANALISTA (TODOS)</option>
+              {allAnalistas.map(a => (
+                <option key={a} value={a}>
+                  {a}
+                </option>
+              ))}
+            </select>
+          </div>
+
+          {hasActiveFilters && (
+            <button
+              type="button"
+              onClick={handleClearAllFilters}
+              style={{
+                height: '30px',
+                background: '#fee2e2',
+                color: '#b91c1c',
+                border: '1px solid #fecaca',
+                borderRadius: '8px',
+                padding: '0 8px',
+                fontSize: '10.5px',
+                fontWeight: 700,
+                cursor: 'pointer'
+              }}
+              title="Limpar todos os filtros ativos"
+            >
+              ✕ Limpar filtros
+            </button>
+          )}
+        </div>
+
+        {/* Indicador de barragens filtradas */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+          <span
+            className="badge green"
+            title={`${filteredMappedDams.length} de ${mappedDams.length} barragens mapeadas`}
+          >
+            ● {filteredMappedDams.length} exibida{filteredMappedDams.length !== 1 ? 's' : ''}
+            {filteredMappedDams.length !== mappedDams.length && ` (de ${mappedDams.length})`}
+          </span>
+
+          {unmappedCount > 0 && (
+            <span
+              className="badge gray"
+              title={`${unmappedCount} barragens cadastradas sem coordenadas`}
+            >
+              ○ {unmappedCount} sem coordenadas
+            </span>
+          )}
+        </div>
+      </div>
+
+      {/* ==================================================================== */}
+      {/* CONTEÚDO DO MAPA E PAINEL DE RESUMO                                  */}
+      {/* ==================================================================== */}
       {isExpanded && (
         <div>
           <div
@@ -922,6 +1680,7 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
                       <span>📑 Proc.: <b>{selectedDam.processo}</b></span>
                       <span>🌱 CAR: <b>{selectedDam.car}</b></span>
                       <span>🌐 Lat/Long: <code>{selectedDam.lat.toFixed(5)}, {selectedDam.lon.toFixed(5)}</code></span>
+                      <span>🌐 GMS: <code>{decimalToGMS(selectedDam.lat, false)}, {decimalToGMS(selectedDam.lon, true)}</code></span>
                     </div>
                   </div>
 
@@ -955,7 +1714,7 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
                   </div>
                 </div>
 
-                {/* Seção obrigatória: Documentos da Barragem (do mais recente ao mais novo) */}
+                {/* Seção de Documentos da Barragem */}
                 <div>
                   <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: '8px' }}>
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
@@ -964,7 +1723,7 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
                         Documentos da Barragem ({selectedDam.documentos.length})
                       </strong>
                       <span style={{ fontSize: '11px', color: '#64748b' }}>
-                        Parecer de Classificação, Notificação e Ofício ordenados do mais recente ao mais antigo
+                        Parecer de Classificação, Notificação e Ofício ordenados do mais recente ao mais novo
                       </span>
                     </div>
                   </div>
@@ -1029,6 +1788,12 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
                             {doc.numero && doc.titulo && (
                               <span style={{ fontSize: '11px', color: '#64748b', display: 'block', marginTop: '2px' }}>
                                 {doc.titulo}
+                              </span>
+                            )}
+
+                            {doc.analistas && doc.analistas.length > 0 && (
+                              <span style={{ fontSize: '10px', color: '#475569', display: 'block', marginTop: '3px' }}>
+                                👤 {doc.analistas.join(', ')}
                               </span>
                             )}
                           </div>
@@ -1116,7 +1881,7 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
                 </div>
 
                 <span style={{ fontSize: '11px', color: '#94a3b8', fontStyle: 'italic' }}>
-                  Passe o mouse ou clique em qualquer marcador para ver os documentos vinculados (mais recente → mais antigo)
+                  Digite as coordenadas em GMS para localizar um ponto ou passe o mouse nos marcadores
                 </span>
               </div>
             )}
