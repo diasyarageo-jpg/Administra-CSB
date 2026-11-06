@@ -29,6 +29,7 @@ import {
 import { authService } from './services/authService';
 import { UserRole, AuthUserProfile, PERFIS_PROFISSIONAIS, SETORES } from './types/auth';
 import { DocumentosView } from './components/DocumentosView';
+import { PaginationBar, PageSizeOption, paginateList } from './components/PaginationBar';
 import { LoginModal } from './components/LoginModal';
 import { LoginPage } from './components/LoginPage';
 import { UsuarioModal } from './components/UsuarioModal';
@@ -404,6 +405,14 @@ export default function App() {
     window.addEventListener('resize', updateScreen);
     return () => window.removeEventListener('resize', updateScreen);
   }, []);
+
+  // Paginação global das listagens (padrão 20 itens por página)
+  const [listPage, setListPage] = useState<number>(1);
+  const [listPageSize, setListPageSize] = useState<PageSizeOption>(20);
+
+  useEffect(() => {
+    setListPage(1);
+  }, [activeView, searchTerms, usuarioSituacaoFilter]);
 
   // Inicialização do Supabase Auth e verificação de sessão (sem carregar dados operacionais antes do login)
   useEffect(() => {
@@ -1096,7 +1105,7 @@ export default function App() {
         <div className="brand">
           <div className="brand-lockup">
             <div className="logo">
-              <img src="/logo-csb.svg" alt="Logo CSB" className="logo-img" />
+              <img src="/assets/aistudio/SISBAM-MT_S__DESENHO_76e8031e.png" alt="Logo CSB" className="logo-img" />
             </div>
             <div>
               <h1>
@@ -1765,8 +1774,10 @@ export default function App() {
                         </tr>
                       </thead>
                       <tbody>
-                        {filteredRecords.length > 0 ? (
-                          filteredRecords.map((record, index) => {
+                        {(() => {
+                          const { pagedItems } = paginateList(filteredRecords, listPage, listPageSize);
+                          return pagedItems.length > 0 ? (
+                            pagedItems.map((record, index) => {
                             const originalIndex = records.indexOf(record);
                             return (
                               <tr key={record.id || index}>
@@ -2022,19 +2033,27 @@ export default function App() {
                             );
                           })
                         ) : (
-                          <tr>
-                            <td colSpan={config.columns.length + 1}>
-                              <div className="empty">
-                                <div className="empty-icon">{config.icon}</div>
-                                <b>Nenhum cadastro</b>
-                                <p>Esta lista permanece vazia até que um registro seja incluído.</p>
-                              </div>
-                            </td>
-                          </tr>
-                        )}
+                            <tr>
+                              <td colSpan={config.columns.length + 1}>
+                                <div className="empty">
+                                  <div className="empty-icon">{config.icon}</div>
+                                  <b>Nenhum cadastro</b>
+                                  <p>Esta lista permanece vazia até que um registro seja incluído.</p>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })()}
                       </tbody>
                     </table>
                   </div>
+                  <PaginationBar
+                    totalItems={filteredRecords.length}
+                    currentPage={listPage}
+                    pageSize={listPageSize}
+                    onPageChange={setListPage}
+                    onPageSizeChange={setListPageSize}
+                  />
                 </div>
               </div>
             );
@@ -2132,8 +2151,10 @@ export default function App() {
                         </tr>
                       </thead>
                       <tbody>
-                        {filtered.length > 0 ? (
-                          filtered.map((record, index) => {
+                        {(() => {
+                          const { pagedItems } = paginateList(filtered, listPage, listPageSize);
+                          return pagedItems.length > 0 ? (
+                            pagedItems.map((record, index) => {
                             const originalIndex = records.indexOf(record);
                             const details = [
                               record.productCode ? `Código ${record.productCode}` : '',
@@ -2230,10 +2251,18 @@ export default function App() {
                               </div>
                             </td>
                           </tr>
-                        )}
+                        );
+                        })()}
                       </tbody>
                     </table>
                   </div>
+                  <PaginationBar
+                    totalItems={filtered.length}
+                    currentPage={listPage}
+                    pageSize={listPageSize}
+                    onPageChange={setListPage}
+                    onPageSizeChange={setListPageSize}
+                  />
                 </div>
 
                 <div className="panel" style={{ marginTop: '14px' }}>
@@ -2353,8 +2382,10 @@ export default function App() {
                         </tr>
                       </thead>
                       <tbody>
-                        {filtered.length > 0 ? (
-                          filtered.map((record, index) => {
+                        {(() => {
+                          const { pagedItems } = paginateList(filtered, listPage, listPageSize);
+                          return pagedItems.length > 0 ? (
+                            pagedItems.map((record, index) => {
                             const originalIndex = records.indexOf(record);
                             const complete = record.secretarySigned && record.extractPublished && record.orderPublished;
                             const status = record.draft ? 'Rascunho' : complete ? 'Concluído' : 'Pendente';
@@ -2387,19 +2418,27 @@ export default function App() {
                             );
                           })
                         ) : (
-                          <tr>
-                            <td colSpan={6}>
-                              <div className="empty">
-                                <div className="empty-icon">▣</div>
-                                <b>Nenhum trâmite de Portaria</b>
-                                <p>Os registros começam vazios. Use “Novo trâmite” para incluir um registro.</p>
-                              </div>
-                            </td>
-                          </tr>
-                        )}
+                            <tr>
+                              <td colSpan={6}>
+                                <div className="empty">
+                                  <div className="empty-icon">▣</div>
+                                  <b>Nenhum trâmite de Portaria</b>
+                                  <p>Os registros começam vazios. Use “Novo trâmite” para incluir um registro.</p>
+                                </div>
+                              </td>
+                            </tr>
+                          );
+                        })()}
                       </tbody>
                     </table>
                   </div>
+                  <PaginationBar
+                    totalItems={filtered.length}
+                    currentPage={listPage}
+                    pageSize={listPageSize}
+                    onPageChange={setListPage}
+                    onPageSizeChange={setListPageSize}
+                  />
                 </div>
               </div>
             );

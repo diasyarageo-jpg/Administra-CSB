@@ -116,7 +116,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
         <div className="p-5 border-b border-slate-800 flex items-center justify-between">
           <div className="flex items-center gap-3">
             <div className="w-11 h-11 rounded-xl bg-white p-1 shadow-md flex items-center justify-center shrink-0 overflow-hidden">
-              <img src="/logo-csb.svg" alt="Logo CSB" className="w-full h-full object-contain" />
+              <img src="/assets/aistudio/SISBAM-MT_S__DESENHO_76e8031e.png" alt="Logo CSB" className="w-full h-full object-contain" />
             </div>
             <div>
               <h1 className="text-sm font-extrabold tracking-tight text-white leading-tight">

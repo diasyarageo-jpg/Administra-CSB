@@ -254,7 +254,7 @@ export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
               }}
             >
               <img
-                src="/logo-csb.svg"
+                src="/assets/aistudio/SISBAM-MT_S__DESENHO_76e8031e.png"
                 alt="Logo Administra-CSB"
                 style={{ width: '100%', height: '100%', objectFit: 'contain' }}
               />

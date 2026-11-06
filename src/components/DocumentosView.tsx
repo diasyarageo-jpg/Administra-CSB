@@ -13,6 +13,7 @@ import {
   carregarCatalogoDocumentos,
   filterAndSortDocumentos
 } from '../services/documentosService';
+import { PaginationBar, PageSizeOption, paginateList } from './PaginationBar';
 
 interface DocumentosViewProps {
   commonData: AdministraCommonData;
@@ -80,6 +81,10 @@ export const DocumentosView: React.FC<DocumentosViewProps> = ({
   const [selectedDoc, setSelectedDoc] = useState<DocumentoCatalogoItem | null>(null);
   const [accessingDocId, setAccessingDocId] = useState<string | null>(null);
 
+  // Paginação (padrão 20 itens por página)
+  const [currentPage, setCurrentPage] = useState<number>(1);
+  const [pageSize, setPageSize] = useState<PageSizeOption>(20);
+
   const sincronizar = async () => {
     setLoading(true);
     setSyncError(null);
@@ -123,6 +128,15 @@ export const DocumentosView: React.FC<DocumentosViewProps> = ({
     ordenarPor,
     direcao
   ]);
+
+  useEffect(() => {
+    setCurrentPage(1);
+  }, [busca, origemFiltro, tipoFiltro, dataInicio, dataFim, analistaFiltro, ordenarPor, direcao]);
+
+  const { pagedItems: pagedDocs, safePage } = useMemo(
+    () => paginateList(filteredDocs, currentPage, pageSize),
+    [filteredDocs, currentPage, pageSize]
+  );
 
   const hasActiveFilters = Boolean(
     busca.trim() ||
@@ -459,8 +473,9 @@ export const DocumentosView: React.FC<DocumentosViewProps> = ({
             )}
           </div>
         ) : (
-          /* Tabela Responsiva de Documentos */
-          <div className="tablewrap">
+          <>
+            {/* Tabela Responsiva de Documentos */}
+            <div className="tablewrap">
             <table>
               <thead>
                 <tr>
@@ -475,7 +490,7 @@ export const DocumentosView: React.FC<DocumentosViewProps> = ({
                 </tr>
               </thead>
               <tbody>
-                {filteredDocs.map(doc => {
+                {pagedDocs.map(doc => {
                   const isBusy = accessingDocId === doc.id;
                   const isUnavailable = doc.situacao === 'Indisponível na origem';
                   return (
@@ -587,6 +602,14 @@ export const DocumentosView: React.FC<DocumentosViewProps> = ({
               </tbody>
             </table>
           </div>
+          <PaginationBar
+            totalItems={filteredDocs.length}
+            currentPage={safePage}
+            pageSize={pageSize}
+            onPageChange={setCurrentPage}
+            onPageSizeChange={setPageSize}
+          />
+        </>
         )}
       </div>
 
