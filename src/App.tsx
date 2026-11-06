@@ -33,6 +33,7 @@ import { PaginationBar, PageSizeOption, paginateList } from './components/Pagina
 import { LoginModal } from './components/LoginModal';
 import { LoginPage } from './components/LoginPage';
 import { UsuarioModal } from './components/UsuarioModal';
+import { BarragensMinimap } from './components/BarragensMinimap';
 
 // ============================================================================
 // NOTIFICA CSB — AVISO DE TRANSIÇÃO E ARQUITETURA DE DADOS
@@ -1718,6 +1719,17 @@ export default function App() {
                   <div className="notice slate" style={{ marginBottom: '14px', fontSize: '11px' }}>
                     Gestão de usuários da CSB: todos os registros (Ativos, Inativos, Pendentes e Recusados) são listados e protegidos por RLS.
                   </div>
+                )}
+
+                {activeView === 'barragens' && (
+                  <BarragensMinimap
+                    barragens={filteredRecords}
+                    empreendedores={db.empreendedores}
+                    onSelectDam={(dam: any) => {
+                      const idx = records.indexOf(dam);
+                      handleOpenRecordModal('barragens', idx >= 0 ? idx : null);
+                    }}
+                  />
                 )}
 
                 <div className="panel">

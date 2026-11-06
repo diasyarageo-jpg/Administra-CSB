@@ -21,6 +21,7 @@ import {
   AlertCircle,
   FileSpreadsheet
 } from 'lucide-react';
+import { BarragensMinimap } from './BarragensMinimap';
 
 interface DamsViewProps {
   dams: Dam[];
@@ -242,6 +243,13 @@ export const DamsView: React.FC<DamsViewProps> = ({
           </div>
         )}
       </div>
+
+      {/* Minimapa das Barragens */}
+      <BarragensMinimap
+        barragens={filteredDams}
+        empreendedores={entrepreneurs}
+        onSelectDam={onSelectDam}
+      />
 
       {/* Dams Table */}
       <div className="bg-white rounded-xl border border-slate-200 overflow-hidden shadow-xs">
