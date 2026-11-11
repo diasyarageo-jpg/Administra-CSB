@@ -34,6 +34,9 @@ import { LoginModal } from './components/LoginModal';
 import { LoginPage } from './components/LoginPage';
 import { UsuarioModal } from './components/UsuarioModal';
 import { BarragensMinimap } from './components/BarragensMinimap';
+import { GeoportalSyncModal } from './components/GeoportalSyncModal';
+import { EmpreendedorDocumentosSemaModal } from './components/EmpreendedorDocumentosSemaModal';
+import { VisualizacaoModal } from './components/VisualizacaoModal';
 
 // ============================================================================
 // NOTIFICA CSB — AVISO DE TRANSIÇÃO E ARQUITETURA DE DADOS
@@ -358,7 +361,17 @@ export default function App() {
   const [isRejecting, setIsRejecting] = useState(false);
   const [usuarioSituacaoFilter, setUsuarioSituacaoFilter] = useState<string>('Todos');
 
+  // Estados para integração com Geoportal SEMA-MT
+  const [showGeoportalSyncModal, setShowGeoportalSyncModal] = useState<boolean>(false);
+  const [empreendedorSemaModal, setEmpreendedorSemaModal] = useState<any | null>(null);
+
   // Modals state
+  const [viewingRecord, setViewingRecord] = useState<{
+    key: string;
+    record: any;
+    index: number | null;
+  } | null>(null);
+
   const [modalConfig, setModalConfig] = useState<{
     key: string;
     record: any;
@@ -1772,6 +1785,19 @@ export default function App() {
                       </div>
                     )}
 
+                    {(activeView === 'barragens' || activeView === 'documentos' || activeView === 'integracao') && (
+                      <button
+                        type="button"
+                        className="btn light"
+                        onClick={() => setShowGeoportalSyncModal(true)}
+                        style={{ fontSize: '12px', display: 'inline-flex', alignItems: 'center', gap: '5px' }}
+                        title="Atualizar base de consulta do Geoportal SEMA-MT"
+                      >
+                        <span>🔄</span>
+                        <span>Atualizar base do Geoportal</span>
+                      </button>
+                    )}
+
                     <span className="badge gray" style={{ marginLeft: 'auto' }}>{filteredRecords.length} registros</span>
                   </div>
 
@@ -1791,8 +1817,19 @@ export default function App() {
                           return pagedItems.length > 0 ? (
                             pagedItems.map((record, index) => {
                             const originalIndex = records.indexOf(record);
+                            const isInteractiveDb = activeView === 'empreendedores' || activeView === 'barragens' || activeView === 'rts';
+                            const rowClass = `${index % 2 === 0 ? 'row-even' : 'row-odd'} ${isInteractiveDb ? 'row-interactive' : ''}`;
                             return (
-                              <tr key={record.id || index}>
+                              <tr
+                                key={record.id || index}
+                                className={rowClass}
+                                onClick={() => {
+                                  if (isInteractiveDb) {
+                                    setViewingRecord({ key: activeView, record, index: originalIndex });
+                                  }
+                                }}
+                                title={isInteractiveDb ? 'Clique para abrir as informações em modo visualização' : undefined}
+                              >
                                 {config.columns.map(([field], fIdx) => {
                                   let value = record[field];
                                   if (field === 'validade' || field === 'dataPublicacao') {
@@ -1989,39 +2026,59 @@ export default function App() {
                                       </>
                                     )}
 
-                                    {userRole === 'Visualizador' ? (
+                                    {userRole === 'Visualizador' || isInteractiveDb ? (
                                       <button
                                         className="iconbtn"
-                                        title="Visualizar detalhes"
-                                        onClick={() => handleOpenRecordModal(activeView, originalIndex)}
+                                        title="Visualizar informações completas"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          if (isInteractiveDb) {
+                                            setViewingRecord({ key: activeView, record, index: originalIndex });
+                                          } else {
+                                            handleOpenRecordModal(activeView, originalIndex);
+                                          }
+                                        }}
                                       >
-                                        Detalhes
+                                        Visualizar
                                       </button>
-                                    ) : (
+                                    ) : null}
+
+                                    {userRole !== 'Visualizador' && (
                                       <>
+                                        {activeView === 'empreendedores' && record.cpfCnpj && (
+                                          <button
+                                            className="iconbtn"
+                                            style={{ color: '#0369a1' }}
+                                            title="Consultar documentos, licenças e autos no Geoportal SEMA-MT"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              setEmpreendedorSemaModal(record);
+                                            }}
+                                          >
+                                            Doc SEMA
+                                          </button>
+                                        )}
                                         {(userRole === 'Administrador' || !record.createdBy || record.createdBy === currentAuthUser?.id) ? (
                                           <button
                                             className="iconbtn"
-                                            title="Editar"
-                                            onClick={() => handleOpenRecordModal(activeView, originalIndex)}
+                                            title="Editar cadastro"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              handleOpenRecordModal(activeView, originalIndex);
+                                            }}
                                           >
                                             Editar
                                           </button>
-                                        ) : (
-                                          <button
-                                            className="iconbtn"
-                                            title="Registro criado por outro usuário. Somente leitura."
-                                            onClick={() => handleOpenRecordModal(activeView, originalIndex)}
-                                          >
-                                            Visualizar
-                                          </button>
-                                        )}
+                                        ) : null}
 
                                         {(userRole === 'Administrador' || !record.createdBy || record.createdBy === currentAuthUser?.id) && (
                                           <button
                                             className="iconbtn"
                                             title="Inativar registro"
-                                            onClick={() => handleArchiveRecord(activeView, originalIndex)}
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              handleArchiveRecord(activeView, originalIndex);
+                                            }}
                                           >
                                             Inativar
                                           </button>
@@ -2032,7 +2089,10 @@ export default function App() {
                                             className="iconbtn"
                                             style={{ color: '#dc2626' }}
                                             title="Excluir definitivamente"
-                                            onClick={() => handleDeleteRecord(activeView, originalIndex)}
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              handleDeleteRecord(activeView, originalIndex);
+                                            }}
                                           >
                                             Excluir
                                           </button>
@@ -2883,6 +2943,28 @@ export default function App() {
         );
       })()}
 
+      {/* MODAL DE VISUALIZAÇÃO DE REGISTRO (Empreendedores, Barragens, RTs) */}
+      {viewingRecord && (
+        <VisualizacaoModal
+          key={`view-${viewingRecord.key}-${viewingRecord.index ?? 'item'}`}
+          moduleKey={viewingRecord.key}
+          record={viewingRecord.record}
+          index={viewingRecord.index}
+          db={db}
+          canEdit={userRole === 'Administrador' || !viewingRecord.record.createdBy || viewingRecord.record.createdBy === currentAuthUser?.id}
+          onClose={() => setViewingRecord(null)}
+          onEdit={() => {
+            const { key, index } = viewingRecord;
+            setViewingRecord(null);
+            handleOpenRecordModal(key, index);
+          }}
+          onOpenSemaDocs={(emp) => {
+            setViewingRecord(null);
+            setEmpreendedorSemaModal(emp);
+          }}
+        />
+      )}
+
       {/* APPROVAL MODAL (Administrador aprova solicitação e define função) */}
       {userToApprove && (
         <div className="modal-back">
@@ -3082,6 +3164,21 @@ export default function App() {
           </div>
         );
       })()}
+
+      {showGeoportalSyncModal && (
+        <GeoportalSyncModal
+          userRole={userRole}
+          onClose={() => setShowGeoportalSyncModal(false)}
+          onSuccess={(msg) => showToast(msg)}
+        />
+      )}
+
+      {empreendedorSemaModal && (
+        <EmpreendedorDocumentosSemaModal
+          empreendedor={empreendedorSemaModal}
+          onClose={() => setEmpreendedorSemaModal(null)}
+        />
+      )}
     </div>
   );
 }

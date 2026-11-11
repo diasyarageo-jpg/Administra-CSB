@@ -12,6 +12,15 @@ import {
   resolveDamName
 } from '../App';
 import { RtVinculo, cleanCpf, cleanRegistro } from '../services/notificaDataService';
+import {
+  consultarCarPorCoordenada
+} from '../services/carLookupService';
+import { CarLookupResult } from '../types/carLookup';
+import {
+  parseCoordAdvanced,
+  formatGmsInput,
+  decimalToGms
+} from '../services/coordService';
 
 // ============================================================================
 // 1. MODAL DE EMPREENDEDORES E EMPREENDIMENTOS
@@ -511,8 +520,16 @@ export function BarragemModal({
   const [processo, setProcesso] = useState<string>(record.processo || '');
   const [snisb, setSnisb] = useState<string>(record.snisb || '');
   const [cursoAgua, setCursoAgua] = useState<string>(record.cursoAgua || '');
-  const [latitude, setLatitude] = useState<string>(record.latitude || '');
-  const [longitude, setLongitude] = useState<string>(record.longitude || '');
+  const [latitude, setLatitude] = useState<string>(() => {
+    if (!record.latitude) return '';
+    const parsed = parseCoordAdvanced(record.latitude, false);
+    return parsed.gms || String(record.latitude);
+  });
+  const [longitude, setLongitude] = useState<string>(() => {
+    if (!record.longitude) return '';
+    const parsed = parseCoordAdvanced(record.longitude, true);
+    return parsed.gms || String(record.longitude);
+  });
   const [situacao, setSituacao] = useState<string>(record.situacao || 'Aguardando confirmação');
   const [observacoes, setObservacoes] = useState<string>(record.observacoes || '');
 
@@ -559,6 +576,92 @@ export function BarragemModal({
   );
   const isUnmatchedLegacyEmpreendimento =
     !linkedEmpreendimento && Boolean(selectedEmpreendimentoId && String(selectedEmpreendimentoId).trim());
+
+  // Estados da consulta ao Geoportal SEMA-MT (CAR/MT)
+  const [isCarLoading, setIsCarLoading] = useState<boolean>(false);
+  const [carLookupError, setCarLookupError] = useState<string | null>(null);
+  const [carLookupResult, setCarLookupResult] = useState<CarLookupResult | null>(null);
+  const [selectedFeatureIndex, setSelectedFeatureIndex] = useState<number>(0);
+  const [showCarPreview, setShowCarPreview] = useState<boolean>(false);
+
+  // Estados de confirmação para substituição de campos já preenchidos
+  const [overwriteCar, setOverwriteCar] = useState<boolean>(false);
+  const [overwriteMunicipio, setOverwriteMunicipio] = useState<boolean>(false);
+  const [vincularEmpreendedorSugerido, setVincularEmpreendedorSugerido] = useState<boolean>(false);
+
+  // Validação estrita em tempo real no padrão GMS
+  const latParse = parseCoordAdvanced(latitude, false);
+  const lngParse = parseCoordAdvanced(longitude, true);
+  const hasValidCoords = latParse.valido && lngParse.valido && latParse.decimal !== null && lngParse.decimal !== null;
+
+  const currentFeat = carLookupResult?.feicoes?.[selectedFeatureIndex];
+  const probableEmpMatch = currentFeat ? empreendedores.find(e => {
+    if (currentFeat.empreendedor && e.nome) {
+      const n1 = currentFeat.empreendedor.trim().toLowerCase();
+      const n2 = e.nome.trim().toLowerCase();
+      if (n1.length >= 4 && n1.includes(n2)) return true;
+    }
+    return false;
+  }) : null;
+
+  const handleBuscarCar = async () => {
+    if (!hasValidCoords) return;
+    setCarLookupError(null);
+    setIsCarLoading(true);
+    setShowCarPreview(false);
+
+    try {
+      const res = await consultarCarPorCoordenada(latitude, longitude);
+      if (!res.sucesso) {
+        setCarLookupError(res.mensagemErro || 'Erro ao consultar Geoportal SEMA-MT.');
+      } else if (!res.encontrado || res.feicoes.length === 0) {
+        setCarLookupError('Nenhum imóvel do CAR/ATP encontrado para as coordenadas informadas no Geoportal SEMA-MT.');
+      } else {
+        setCarLookupResult(res);
+        setSelectedFeatureIndex(0);
+        setOverwriteCar(false);
+        setOverwriteMunicipio(false);
+        setVincularEmpreendedorSugerido(false);
+        setShowCarPreview(true);
+      }
+    } catch (err: any) {
+      setCarLookupError(err?.message || 'Falha ao consultar o Geoportal SEMA-MT.');
+    } finally {
+      setIsCarLoading(false);
+    }
+  };
+
+  const handleAplicarCar = () => {
+    if (!carLookupResult || !carLookupResult.feicoes[selectedFeatureIndex]) return;
+    const feat = carLookupResult.feicoes[selectedFeatureIndex];
+
+    if (feat.car && (!car.trim() || overwriteCar)) {
+      setCar(feat.car);
+    }
+
+    if (feat.municipio && (!municipio.trim() || overwriteMunicipio)) {
+      setMunicipio(feat.municipio);
+      const found = mtMunicipios.find(m => m.nome.toLowerCase() === feat.municipio.toLowerCase());
+      if (found) {
+        setMunicipioIbge(String(found.id));
+      }
+    }
+
+    if (vincularEmpreendedorSugerido && probableEmpMatch) {
+      setSelectedEmpId(probableEmpMatch.id);
+      setSelectedEmpreendimentoId('');
+    }
+
+    const agora = new Date().toLocaleString('pt-BR');
+    const notaCar = `Dados consultados no Geoportal SEMA-MT (camada CAR/ATP) em ${agora}. Conferir os dados e confirmar em campo.`;
+    const obsAtualizada = observacoes.trim() ? `${observacoes.trim()}\n${notaCar}` : notaCar;
+    setObservacoes(obsAtualizada);
+
+    setSituacao('Aguardando confirmação');
+
+    setShowCarPreview(false);
+    setCarLookupResult(null);
+  };
 
   const handleSubmit = (e: React.FormEvent) => {
     e.preventDefault();
@@ -770,23 +873,316 @@ export function BarragemModal({
             </div>
 
             <div className="form-field">
-              <label>Latitude</label>
+              <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span>Latitude (GMS · DD°MM'SS,SS"S)</span>
+                {latParse.valido ? (
+                  <span style={{ fontSize: '10px', color: '#059669', fontWeight: 600 }}>✓ {latParse.tipo}</span>
+                ) : latitude ? (
+                  <span style={{ fontSize: '10px', color: '#d97706' }}>
+                    {latParse.tipo === 'UTM_SEM_PARAMETROS' ? 'UTM (sem fuso confirmado)' : latParse.tipo}
+                  </span>
+                ) : null}
+              </label>
               <input
                 className="input"
                 value={latitude}
-                onChange={e => setLatitude(e.target.value)}
-                placeholder="-15.5960 ou 15°35'45''S"
+                onChange={e => setLatitude(formatGmsInput(e.target.value, false))}
+                placeholder="Ex: 15°35'45,00&quot;S"
               />
+              {latParse.mensagem && !latParse.valido && (
+                <span style={{ fontSize: '10px', color: '#dc2626', marginTop: '2px' }}>
+                  {latParse.mensagem}
+                </span>
+              )}
             </div>
 
             <div className="form-field">
-              <label>Longitude</label>
+              <label style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+                <span>Longitude (GMS · DDD°MM'SS,SS"W)</span>
+                {lngParse.valido ? (
+                  <span style={{ fontSize: '10px', color: '#059669', fontWeight: 600 }}>✓ {lngParse.tipo}</span>
+                ) : longitude ? (
+                  <span style={{ fontSize: '10px', color: '#d97706' }}>
+                    {lngParse.tipo === 'UTM_SEM_PARAMETROS' ? 'UTM (sem fuso confirmado)' : lngParse.tipo}
+                  </span>
+                ) : null}
+              </label>
               <input
                 className="input"
                 value={longitude}
-                onChange={e => setLongitude(e.target.value)}
-                placeholder="-56.0969 ou 56°05'48''W"
+                onChange={e => setLongitude(formatGmsInput(e.target.value, true))}
+                placeholder="Ex: 056°05'48,00&quot;W"
               />
+              {lngParse.mensagem && !lngParse.valido && (
+                <span style={{ fontSize: '10px', color: '#dc2626', marginTop: '2px' }}>
+                  {lngParse.mensagem}
+                </span>
+              )}
+            </div>
+
+            {/* Ação de consulta ao Geoportal SEMA-MT (CAR/MT) */}
+            <div className="form-field full" style={{ marginTop: '-4px', marginBottom: '8px' }}>
+              <div style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '10px' }}>
+                <button
+                  type="button"
+                  className="btn"
+                  onClick={handleBuscarCar}
+                  disabled={!hasValidCoords || isCarLoading}
+                  style={{
+                    backgroundColor: hasValidCoords ? '#0369a1' : '#cbd5e1',
+                    color: '#ffffff',
+                    border: 'none',
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    cursor: hasValidCoords && !isCarLoading ? 'pointer' : 'not-allowed',
+                    fontWeight: 600,
+                    fontSize: '13px',
+                    padding: '8px 14px'
+                  }}
+                  title={
+                    hasValidCoords
+                      ? 'Consultar camada Geoportal:CAR_ATP na SEMA-MT pelas coordenadas GMS fornecidas'
+                      : 'Preencha latitude e longitude válidas no padrão GMS para buscar no CAR/MT'
+                  }
+                >
+                  <svg width="15" height="15" viewBox="0 0 24 24" fill="none" stroke="currentColor" strokeWidth="2.2" strokeLinecap="round" strokeLinejoin="round">
+                    <circle cx="11" cy="11" r="8"></circle>
+                    <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
+                  </svg>
+                  {isCarLoading ? 'Consultando Geoportal SEMA-MT...' : 'Buscar dados no CAR/MT'}
+                </button>
+
+                {!hasValidCoords && (
+                  <span style={{ fontSize: '11px', color: '#64748b' }}>
+                    {latParse.tipo === 'UTM_SEM_PARAMETROS' || lngParse.tipo === 'UTM_SEM_PARAMETROS'
+                      ? 'Coordenadas em UTM sem fuso confirmado. Informe coordenadas em formato GMS para busca espacial.'
+                      : 'Informe latitude e longitude válidas no padrão GMS (DD°MM\'SS,SS"S e DDD°MM\'SS,SS"W) para consultar o imóvel no CAR/MT.'}
+                  </span>
+                )}
+
+                {hasValidCoords && !isCarLoading && !showCarPreview && (
+                  <span style={{ fontSize: '11px', color: '#0369a1' }}>
+                    Coordenadas GMS válidas ({latParse.gms}, {lngParse.gms}) · Decimal: {latParse.decimal?.toFixed(6)}°, {lngParse.decimal?.toFixed(6)}° (EPSG:4326)
+                  </span>
+                )}
+              </div>
+
+              {/* Mensagem de erro ou sem resultados */}
+              {carLookupError && (
+                <div style={{
+                  marginTop: '10px',
+                  padding: '10px 12px',
+                  backgroundColor: '#fef2f2',
+                  border: '1px solid #fecaca',
+                  borderRadius: '6px',
+                  color: '#991b1b',
+                  fontSize: '12px',
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  justifyContent: 'space-between',
+                  gap: '8px'
+                }}>
+                  <div style={{ display: 'flex', alignItems: 'flex-start', gap: '8px' }}>
+                    <span style={{ fontSize: '14px', lineHeight: 1 }}>⚠️</span>
+                    <div>
+                      <strong>Não foi possível obter dados do CAR:</strong>
+                      <div style={{ marginTop: '2px' }}>{carLookupError}</div>
+                    </div>
+                  </div>
+                  <button
+                    type="button"
+                    onClick={() => setCarLookupError(null)}
+                    style={{ background: 'none', border: 'none', color: '#991b1b', cursor: 'pointer', fontSize: '14px', fontWeight: 'bold' }}
+                    title="Fechar aviso"
+                  >
+                    ×
+                  </button>
+                </div>
+              )}
+
+              {/* Painel de pré-visualização das feições do CAR/MT encontradas */}
+              {showCarPreview && carLookupResult && carLookupResult.feicoes.length > 0 && currentFeat && (
+                <div style={{
+                  marginTop: '12px',
+                  padding: '14px',
+                  backgroundColor: '#f0f9ff',
+                  border: '1px solid #bae6fd',
+                  borderRadius: '8px'
+                }}>
+                  <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '10px' }}>
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                      <span style={{ fontSize: '16px' }}>📍</span>
+                      <strong style={{ color: '#0369a1', fontSize: '14px' }}>
+                        Dados do Imóvel Rural — Geoportal SEMA-MT (Camada CAR_ATP)
+                      </strong>
+                    </div>
+                    <span style={{ fontSize: '11px', color: '#64748b' }}>
+                      Consulta: {new Date(carLookupResult.consultadoEm).toLocaleString('pt-BR')}
+                    </span>
+                  </div>
+
+                  {/* Seletor de feições se houver mais de uma */}
+                  {carLookupResult.feicoes.length > 1 && (
+                    <div style={{ marginBottom: '12px', padding: '8px 10px', backgroundColor: '#e0f2fe', borderRadius: '6px' }}>
+                      <label style={{ fontSize: '12px', fontWeight: 600, color: '#0369a1', display: 'block', marginBottom: '4px' }}>
+                        Foram identificadas {carLookupResult.feicoes.length} feições para esta coordenada. Selecione o imóvel desejado:
+                      </label>
+                      <select
+                        className="select"
+                        value={selectedFeatureIndex}
+                        onChange={e => {
+                          setSelectedFeatureIndex(Number(e.target.value));
+                          setOverwriteCar(false);
+                          setOverwriteMunicipio(false);
+                          setVincularEmpreendedorSugerido(false);
+                        }}
+                        style={{ fontSize: '12px', padding: '6px 8px' }}
+                      >
+                        {carLookupResult.feicoes.map((f, idx) => (
+                          <option key={idx} value={idx}>
+                            Imóvel {idx + 1}: {f.car || 'Sem número de CAR'} — {f.empreendimento || f.empreendedor || 'Sem denominação'} ({f.municipio || f.municipioCodigo || 'MT'})
+                          </option>
+                        ))}
+                      </select>
+                    </div>
+                  )}
+
+                  {/* Detalhes do imóvel mapeado */}
+                  <div style={{
+                    display: 'grid',
+                    gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))',
+                    gap: '10px',
+                    fontSize: '12px',
+                    marginBottom: '12px'
+                  }}>
+                    <div style={{ backgroundColor: '#ffffff', padding: '8px 10px', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
+                      <span style={{ color: '#64748b', display: 'block', fontSize: '11px', fontWeight: 500 }}>Número do CAR/MT</span>
+                      <strong style={{ color: '#0f172a', wordBreak: 'break-all' }}>{currentFeat.car || '—'}</strong>
+                      {currentFeat.carFederal && (
+                        <span style={{ display: 'block', color: '#64748b', fontSize: '10px', marginTop: '2px', wordBreak: 'break-all' }}>
+                          SICAR: {currentFeat.carFederal}
+                        </span>
+                      )}
+                      {Boolean(car.trim()) && currentFeat.car && car.trim() !== currentFeat.car && (
+                        <div style={{ marginTop: '6px', paddingTop: '6px', borderTop: '1px dashed #e2e8f0' }}>
+                          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', color: '#b45309' }}>
+                            <input
+                              type="checkbox"
+                              checked={overwriteCar}
+                              onChange={e => setOverwriteCar(e.target.checked)}
+                            />
+                            <span>Substituir CAR atual ("{car}")</span>
+                          </label>
+                        </div>
+                      )}
+                    </div>
+
+                    <div style={{ backgroundColor: '#ffffff', padding: '8px 10px', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
+                      <span style={{ color: '#64748b', display: 'block', fontSize: '11px', fontWeight: 500 }}>Município / UF</span>
+                      <strong style={{ color: '#0f172a' }}>
+                        {currentFeat.municipio || (currentFeat.municipioCodigo ? `Código IBGE ${currentFeat.municipioCodigo}` : '—')} {currentFeat.uf ? `/ ${currentFeat.uf}` : ''}
+                      </strong>
+                      {Boolean(municipio.trim()) && currentFeat.municipio && municipio.trim().toLowerCase() !== currentFeat.municipio.toLowerCase() && (
+                        <div style={{ marginTop: '6px', paddingTop: '6px', borderTop: '1px dashed #e2e8f0' }}>
+                          <label style={{ display: 'flex', alignItems: 'center', gap: '6px', cursor: 'pointer', color: '#b45309' }}>
+                            <input
+                              type="checkbox"
+                              checked={overwriteMunicipio}
+                              onChange={e => setOverwriteMunicipio(e.target.checked)}
+                            />
+                            <span>Substituir município ("{municipio}")</span>
+                          </label>
+                        </div>
+                      )}
+                    </div>
+
+                    <div style={{ backgroundColor: '#ffffff', padding: '8px 10px', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
+                      <span style={{ color: '#64748b', display: 'block', fontSize: '11px', fontWeight: 500 }}>Nome da Propriedade / Fazenda (CAR)</span>
+                      <strong style={{ color: '#0f172a' }}>{currentFeat.empreendimento || '—'}</strong>
+                      {currentFeat.areaHa && (
+                        <span style={{ display: 'block', color: '#64748b', fontSize: '11px', marginTop: '2px' }}>
+                          Área: {currentFeat.areaHa} ha
+                        </span>
+                      )}
+                    </div>
+
+                    <div style={{ backgroundColor: '#ffffff', padding: '8px 10px', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
+                      <span style={{ color: '#64748b', display: 'block', fontSize: '11px', fontWeight: 500 }}>Titular / Proprietário (CAR)</span>
+                      <strong style={{ color: '#0f172a' }}>{currentFeat.empreendedor || '—'}</strong>
+                      {currentFeat.situacaoCar && (
+                        <span style={{ display: 'block', color: '#64748b', fontSize: '11px', marginTop: '2px' }}>
+                          Situação CAR: {currentFeat.situacaoCar}
+                        </span>
+                      )}
+                    </div>
+                  </div>
+
+                  {/* Comparativo de Empreendedor / Sugestão */}
+                  {probableEmpMatch && (
+                    <div style={{
+                      backgroundColor: '#ecfdf5',
+                      border: '1px solid #a7f3d0',
+                      borderRadius: '6px',
+                      padding: '10px 12px',
+                      marginBottom: '12px',
+                      fontSize: '12px'
+                    }}>
+                      <div style={{ color: '#065f46', fontWeight: 600, marginBottom: '4px' }}>
+                        Correspondência sugerida de Empreendedor no Administra:
+                      </div>
+                      <div style={{ color: '#047857' }}>
+                        <b>{probableEmpMatch.nome}</b> {probableEmpMatch.cpfCnpj ? `(${probableEmpMatch.cpfCnpj})` : ''}
+                      </div>
+                      <label style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '6px', cursor: 'pointer', color: '#065f46' }}>
+                        <input
+                          type="checkbox"
+                          checked={vincularEmpreendedorSugerido}
+                          onChange={e => setVincularEmpreendedorSugerido(e.target.checked)}
+                        />
+                        <span>Vincular barragem a este empreendedor cadastrado</span>
+                      </label>
+                    </div>
+                  )}
+
+                  {/* Aviso fixo obrigatório */}
+                  <div style={{
+                    padding: '8px 10px',
+                    backgroundColor: '#fffbeb',
+                    border: '1px solid #fef3c7',
+                    borderRadius: '6px',
+                    color: '#92400e',
+                    fontSize: '11.5px',
+                    lineHeight: '1.4',
+                    marginBottom: '12px'
+                  }}>
+                    ⚠️ <b>Aviso:</b> A coordenada identifica o imóvel que contém o ponto; não confirma a posição do barramento.
+                  </div>
+
+                  {/* Ações do painel de pré-visualização */}
+                  <div style={{ display: 'flex', justifyContent: 'flex-end', gap: '8px' }}>
+                    <button
+                      type="button"
+                      className="btn light"
+                      onClick={() => {
+                        setShowCarPreview(false);
+                        setCarLookupResult(null);
+                      }}
+                      style={{ fontSize: '12px', padding: '6px 12px' }}
+                    >
+                      Cancelar
+                    </button>
+                    <button
+                      type="button"
+                      className="btn green"
+                      onClick={handleAplicarCar}
+                      style={{ fontSize: '12px', padding: '6px 14px' }}
+                    >
+                      Aplicar dados ao cadastro
+                    </button>
+                  </div>
+                </div>
+              )}
             </div>
 
             <div className="form-field full">

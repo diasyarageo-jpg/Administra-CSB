@@ -633,6 +633,28 @@ td {
   font-size: 11px;
 }
 
+tbody tr.row-even {
+  background-color: #ffffff;
+}
+
+tbody tr.row-odd {
+  background-color: #f8fafc;
+}
+
+tbody tr.row-interactive {
+  cursor: pointer;
+  transition: background-color 0.15s ease, box-shadow 0.15s ease;
+}
+
+tbody tr.row-interactive:hover {
+  background-color: #f0f9ff !important;
+  box-shadow: inset 4px 0 0 #0284c7;
+}
+
+tbody tr.row-interactive:hover td {
+  color: #0f172a;
+}
+
 tbody tr:hover {
   background: #f8fafb;
 }
