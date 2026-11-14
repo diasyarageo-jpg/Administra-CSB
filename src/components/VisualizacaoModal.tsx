@@ -2,7 +2,7 @@
 import React, { useState } from 'react';
 import { parseCoordAdvanced, decimalToGms } from '../services/coordService';
 import { getEmpreendedorVinculos } from '../services/notificaDataService';
-import { formatCpfCnpjReadable } from '../config/carCampos';
+import { findBarragensMatchingCarString, formatCpfCnpjReadable } from '../config/carCampos';
 
 interface VisualizacaoModalProps {
   moduleKey: string;
@@ -375,19 +375,54 @@ export function VisualizacaoModal({
                         <span style={{ fontSize: '12px', color: '#64748b' }}>Nenhum empreendimento cadastrado diretamente.</span>
                       ) : (
                         <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                          {record.empreendimentos.map((emp: any, idx: number) => (
-                            <div key={emp.id || idx} style={{ padding: '8px 10px', background: '#f8fafc', borderRadius: '6px', border: '1px solid #e2e8f0', fontSize: '12px' }}>
-                              <div style={{ display: 'flex', justifyContent: 'space-between', gap: '6px' }}>
-                                <strong style={{ color: '#0f172a' }}>{emp.nome || 'Imóvel'}</strong>
-                                <span style={{ fontSize: '10.5px', color: '#64748b' }}>{emp.tipo || 'Rural'}</span>
+                          {record.empreendimentos.map((emp: any, idx: number) => {
+                            const barragensDoCar = findBarragensMatchingCarString(emp.car, db.barragens);
+                            const hasBarragem = barragensDoCar.length > 0;
+                            return (
+                              <div
+                                key={emp.id || idx}
+                                style={{
+                                  padding: '8px 10px',
+                                  background: hasBarragem ? '#f0fdf4' : '#f8fafc',
+                                  borderRadius: '6px',
+                                  border: hasBarragem ? '1.5px solid #059669' : '1px solid #e2e8f0',
+                                  borderLeft: hasBarragem ? '5px solid #059669' : undefined,
+                                  fontSize: '12px'
+                                }}
+                              >
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '6px' }}>
+                                  <strong style={{ color: '#0f172a' }}>{emp.nome || 'Imóvel'}</strong>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
+                                    {hasBarragem && (
+                                      <span
+                                        style={{
+                                          padding: '1px 6px',
+                                          borderRadius: '4px',
+                                          fontSize: '10px',
+                                          fontWeight: 700,
+                                          backgroundColor: '#059669',
+                                          color: '#ffffff'
+                                        }}
+                                      >
+                                        BARRAGEM NO CADASTRO
+                                      </span>
+                                    )}
+                                    <span style={{ fontSize: '10.5px', color: '#64748b' }}>{emp.tipo || 'Rural'}</span>
+                                  </div>
+                                </div>
+                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', marginTop: '3px', color: '#475569', fontSize: '11.5px' }}>
+                                  {emp.car && <span>CAR/MT: <strong style={{ color: hasBarragem ? '#065f46' : '#0369a1' }}>{emp.car}</strong></span>}
+                                  {emp.escritura && <span>Escritura: <strong>{emp.escritura}</strong></span>}
+                                  {emp.municipio && <span>{emp.municipio}{emp.uf ? `/${emp.uf}` : ''}</span>}
+                                </div>
+                                {hasBarragem && (
+                                  <div style={{ marginTop: '4px', fontSize: '11px', color: '#065f46', fontWeight: 600 }}>
+                                    Barragem(ns): {barragensDoCar.map((b: any) => b.nome || b.nomeBarragem || 'Barragem').join(', ')}
+                                  </div>
+                                )}
                               </div>
-                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', marginTop: '3px', color: '#475569', fontSize: '11.5px' }}>
-                                {emp.car && <span>CAR/MT: <strong style={{ color: '#0369a1' }}>{emp.car}</strong></span>}
-                                {emp.escritura && <span>Escritura: <strong>{emp.escritura}</strong></span>}
-                                {emp.municipio && <span>{emp.municipio}{emp.uf ? `/${emp.uf}` : ''}</span>}
-                              </div>
-                            </div>
-                          ))}
+                            );
+                          })}
                         </div>
                       )}
                     </div>
@@ -455,29 +490,61 @@ export function VisualizacaoModal({
                       </div>
                     ) : (
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                        {record.empreendimentos.map((emp: any, i: number) => (
-                          <div key={emp.id || i} style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '12px 14px' }}>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                              <div>
-                                <strong style={{ fontSize: '13px', color: '#0f172a' }}>{emp.nome}</strong>
-                                <span className="badge gray" style={{ marginLeft: '8px', fontSize: '10px' }}>{emp.tipo || 'Rural'}</span>
+                        {record.empreendimentos.map((emp: any, i: number) => {
+                          const barragensDoCar = findBarragensMatchingCarString(emp.car, db.barragens);
+                          const hasBarragem = barragensDoCar.length > 0;
+                          return (
+                            <div
+                              key={emp.id || i}
+                              style={{
+                                background: hasBarragem ? '#f0fdf4' : '#ffffff',
+                                border: hasBarragem ? '1.5px solid #059669' : '1px solid #e2e8f0',
+                                borderLeft: hasBarragem ? '5px solid #059669' : undefined,
+                                borderRadius: '8px',
+                                padding: '12px 14px'
+                              }}
+                            >
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '6px' }}>
+                                <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '6px' }}>
+                                  {hasBarragem && (
+                                    <span
+                                      style={{
+                                        padding: '2px 7px',
+                                        borderRadius: '4px',
+                                        fontSize: '10px',
+                                        fontWeight: 700,
+                                        backgroundColor: '#059669',
+                                        color: '#ffffff'
+                                      }}
+                                    >
+                                      BARRAGEM NO NOSSO CADASTRO
+                                    </span>
+                                  )}
+                                  <strong style={{ fontSize: '13px', color: '#0f172a' }}>{emp.nome}</strong>
+                                  <span className="badge gray" style={{ fontSize: '10px' }}>{emp.tipo || 'Rural'}</span>
+                                </div>
+                                <span style={{ fontSize: '11px', color: '#64748b' }}>
+                                  {emp.municipio ? `${emp.municipio}${emp.uf ? `/${emp.uf}` : ''}` : '—'}
+                                </span>
                               </div>
-                              <span style={{ fontSize: '11px', color: '#64748b' }}>
-                                {emp.municipio ? `${emp.municipio}${emp.uf ? `/${emp.uf}` : ''}` : '—'}
-                              </span>
+                              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '8px', marginTop: '8px', fontSize: '12px' }}>
+                                <div>
+                                  <span style={{ color: '#64748b' }}>CAR/MT: </span>
+                                  <strong style={{ fontFamily: 'monospace', color: hasBarragem ? '#065f46' : undefined }}>{emp.car || '—'}</strong>
+                                </div>
+                                <div>
+                                  <span style={{ color: '#64748b' }}>Matrícula / Escritura: </span>
+                                  <span>{emp.escritura || '—'}</span>
+                                </div>
+                              </div>
+                              {hasBarragem && (
+                                <div style={{ marginTop: '6px', fontSize: '11.5px', color: '#065f46', fontWeight: 600 }}>
+                                  Barragem(ns) cadastrada(s): {barragensDoCar.map((b: any) => b.nome || b.nomeBarragem || 'Barragem').join(', ')}
+                                </div>
+                              )}
                             </div>
-                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '8px', marginTop: '8px', fontSize: '12px' }}>
-                              <div>
-                                <span style={{ color: '#64748b' }}>CAR/MT: </span>
-                                <strong style={{ fontFamily: 'monospace' }}>{emp.car || '—'}</strong>
-                              </div>
-                              <div>
-                                <span style={{ color: '#64748b' }}>Matrícula / Escritura: </span>
-                                <span>{emp.escritura || '—'}</span>
-                              </div>
-                            </div>
-                          </div>
-                        ))}
+                          );
+                        })}
                       </div>
                     )}
                   </div>

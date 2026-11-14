@@ -486,3 +486,354 @@ export async function baixarDocumentoOriginal(
 
   return adapter.baixarOriginal(doc);
 }
+
+export interface BarragemDocumentoEmitidoItem {
+  id: string;
+  tipo: string;
+  titulo: string;
+  numero?: string;
+  dataEmissao?: string;
+  origemSistema: string;
+  situacao?: string;
+  processo?: string;
+  analistas?: string[];
+  resumo?: string;
+}
+
+function normDocMatchStr(val: unknown): string {
+  return String(val || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase()
+    .replace(/\s+/g, ' ')
+    .trim();
+}
+
+function normCarKeySimple(val: unknown): string {
+  return String(val || '')
+    .toUpperCase()
+    .replace(/^(?:CAR\s*[–—:\-]*\s*)/i, '')
+    .replace(/[^A-Z0-9/]/g, '')
+    .replace(/^MT(?=\d)/, '');
+}
+
+export async function carregarDocumentosEmitidosPorBarragens(
+  barragens: any[] = [],
+  options?: {
+    portarias?: any[];
+  }
+): Promise<Record<string, BarragemDocumentoEmitidoItem[]>> {
+  const result: Record<string, BarragemDocumentoEmitidoItem[]> = {};
+  if (!Array.isArray(barragens) || barragens.length === 0) return result;
+
+  const damEntries = barragens
+    .filter(Boolean)
+    .map((b, idx) => {
+      const key = String(b.id || `barr_${idx}`);
+      result[key] = [];
+      return {
+        key,
+        dam: b,
+        idStr: String(b.id || '').trim(),
+        nomeNorm: normDocMatchStr(b.nome || b.nomeBarragem),
+        carNorm: normCarKeySimple(b.car),
+        procNorm: normDocMatchStr(b.processo || b.processNumber),
+        snisbNorm: normDocMatchStr(b.snisb || b.codigo)
+      };
+    });
+
+  const addDocToDam = (damKey: string, doc: BarragemDocumentoEmitidoItem) => {
+    const list = result[damKey];
+    if (!list) return;
+    const dedupKey = `${normDocMatchStr(doc.tipo)}|${normDocMatchStr(doc.numero)}|${normDocMatchStr(doc.titulo)}|${String(doc.dataEmissao || '').slice(0, 10)}`;
+    const already = list.some(
+      existing =>
+        `${normDocMatchStr(existing.tipo)}|${normDocMatchStr(existing.numero)}|${normDocMatchStr(existing.titulo)}|${String(existing.dataEmissao || '').slice(0, 10)}` ===
+        dedupKey
+    );
+    if (!already) {
+      list.push(doc);
+    }
+  };
+
+  // 1. Documentos registrados diretamente nos objetos das barragens e portarias vinculadas por processo
+  const portarias = Array.isArray(options?.portarias) ? options.portarias : [];
+  for (const entry of damEntries) {
+    const { key, dam, procNorm } = entry;
+
+    if (Array.isArray(dam.documentos)) {
+      for (const d of dam.documentos) {
+        if (!d) continue;
+        addDocToDam(key, {
+          id: String(d.id || `doc_${key}_${Math.random().toString(36).slice(2, 7)}`),
+          tipo: d.tipo || d.tipoNome || 'Documento',
+          titulo: d.titulo || d.tipoNome || d.tipo || 'Documento emitido',
+          numero: d.numero || undefined,
+          dataEmissao: String(d.data || d.dataEmissao || '').slice(0, 10) || undefined,
+          origemSistema: d.origemSistema || d.origem || 'Administra',
+          situacao: d.situacao || 'Emitido',
+          processo: d.processo || dam.processo || undefined,
+          analistas: Array.isArray(d.analistas) ? d.analistas : d.analista ? [String(d.analista)] : undefined,
+          resumo: d.resumo || d.objetivo || undefined
+        });
+      }
+    }
+
+    if (dam.parecerClassificacao || dam.parecer) {
+      const num = dam.parecerNumero || (typeof dam.parecer === 'string' && dam.parecer.length <= 40 ? dam.parecer : undefined);
+      addDocToDam(key, {
+        id: `parecer_${key}`,
+        tipo: 'Parecer de Classificação',
+        titulo: 'Parecer de Classificação (CRI / DPA)',
+        numero: num,
+        dataEmissao: String(dam.dataParecer || '').slice(0, 10) || undefined,
+        origemSistema: 'Classifica',
+        situacao: 'Emitido',
+        processo: dam.processo || undefined
+      });
+    }
+
+    if (dam.notificacao || dam.notificacaoNumero) {
+      const num = dam.notificacaoNumero || (typeof dam.notificacao === 'string' && dam.notificacao.length <= 40 ? dam.notificacao : undefined);
+      addDocToDam(key, {
+        id: `notif_${key}`,
+        tipo: 'Notificação',
+        titulo: 'Notificação Emitida',
+        numero: num,
+        dataEmissao: String(dam.dataNotificacao || '').slice(0, 10) || undefined,
+        origemSistema: 'Notifica',
+        situacao: 'Emitido',
+        processo: dam.processo || undefined
+      });
+    }
+
+    if (dam.oficio || dam.oficioNumero) {
+      const num = dam.oficioNumero || (typeof dam.oficio === 'string' && dam.oficio.length <= 40 ? dam.oficio : undefined);
+      addDocToDam(key, {
+        id: `oficio_${key}`,
+        tipo: 'Ofício',
+        titulo: 'Ofício Emitido',
+        numero: num,
+        dataEmissao: String(dam.dataOficio || '').slice(0, 10) || undefined,
+        origemSistema: 'Fiscaliza',
+        situacao: 'Emitido',
+        processo: dam.processo || undefined
+      });
+    }
+
+    if (procNorm) {
+      for (const p of portarias) {
+        if (!p) continue;
+        if (normDocMatchStr(p.processNumber) === procNorm) {
+          addDocToDam(key, {
+            id: `portaria_${p.id || key}`,
+            tipo: 'Portaria',
+            titulo: p.draft ? 'Minuta de Portaria' : 'Portaria Emitida',
+            numero: p.orderNumber || undefined,
+            dataEmissao: String(p.finalDate || p.sentDate || '').slice(0, 10) || undefined,
+            origemSistema: 'Administra',
+            situacao: p.orderPublished
+              ? 'Publicada'
+              : p.extractPublished
+              ? 'Extrato publicado'
+              : p.secretarySigned
+              ? 'Assinada'
+              : p.draft
+              ? 'Minuta'
+              : 'Em tramitação',
+            processo: p.processNumber || undefined,
+            resumo: p.notes || undefined
+          });
+        }
+      }
+    }
+  }
+
+  // 2. Consultas leves ao Supabase para buscar pareceres, notificações, ofícios e portarias reais
+  if (isSupabaseConfigured() && supabase) {
+    const [catRes, fiscRes, transfRes] = await Promise.allSettled([
+      supabase
+        .from('documentos_catalogo')
+        .select('id,origem_sistema,tipo_codigo,tipo_nome,titulo,numero,data_emissao,criado_em,analistas_elaboradores,processo,barragem_id,barragem_nome,car_mt,situacao')
+        .order('data_emissao', { ascending: false })
+        .limit(500),
+      supabase
+        .from('fiscaliza_notificacoes_importadas')
+        .select('id,processo,municipio,status,tipo_documento,payload,situacao,data,analista,oficio_gerado,barragens,origem_sistema,created_at')
+        .limit(500),
+      supabase
+        .from('historico_transferencias_titularidade')
+        .select('id,barragem_id,snisb,processo,data_protocolo,portaria_anterior,data_portaria_anterior,parecer_tecnico_anterior,portaria_nova,data_portaria_nova,parecer_tecnico_novo,data_parecer_tecnico_novo,status_origem')
+        .limit(300)
+    ]);
+
+    if (catRes.status === 'fulfilled' && !catRes.value.error && Array.isArray(catRes.value.data)) {
+      for (const row of catRes.value.data) {
+        const rBarrId = String(row.barragem_id || '').trim();
+        const rCar = normCarKeySimple(row.car_mt);
+        const rProc = normDocMatchStr(row.processo);
+        const rNome = normDocMatchStr(row.barragem_nome);
+
+        for (const entry of damEntries) {
+          const matched =
+            (rBarrId && entry.idStr && rBarrId === entry.idStr) ||
+            (rCar && entry.carNorm && rCar === entry.carNorm) ||
+            (rProc && entry.procNorm && rProc === entry.procNorm) ||
+            (rNome && entry.nomeNorm && rNome === entry.nomeNorm);
+
+          if (matched) {
+            addDocToDam(entry.key, {
+              id: `cat_${row.id}`,
+              tipo: String(row.tipo_nome || row.tipo_codigo || 'Documento'),
+              titulo: String(row.titulo || row.tipo_nome || 'Documento emitido'),
+              numero: row.numero ? String(row.numero) : undefined,
+              dataEmissao: String(row.data_emissao || row.criado_em || '').slice(0, 10) || undefined,
+              origemSistema: String(row.origem_sistema || 'Administra'),
+              situacao: String(row.situacao || 'Emitido'),
+              processo: row.processo ? String(row.processo) : undefined,
+              analistas: Array.isArray(row.analistas_elaboradores)
+                ? row.analistas_elaboradores
+                : row.analistas_elaboradores
+                ? [String(row.analistas_elaboradores)]
+                : undefined
+            });
+          }
+        }
+      }
+    }
+
+    if (fiscRes.status === 'fulfilled' && !fiscRes.value.error && Array.isArray(fiscRes.value.data)) {
+      for (const row of fiscRes.value.data) {
+        const payload = row.payload && typeof row.payload === 'object' ? row.payload : {};
+        const rProc = normDocMatchStr(row.processo || payload.numProcesso);
+        const rCar = normCarKeySimple(payload.carMt);
+        const rBarragensArr = Array.isArray(row.barragens) ? row.barragens : [];
+        const rBarrRefs = rBarragensArr.map((item: any) =>
+          typeof item === 'string'
+            ? normDocMatchStr(item)
+            : normDocMatchStr(item?.id || item?.nome || item?.barragemId || '')
+        );
+
+        for (const entry of damEntries) {
+          const matched =
+            (rProc && entry.procNorm && rProc === entry.procNorm) ||
+            (rCar && entry.carNorm && rCar === entry.carNorm) ||
+            (entry.idStr && rBarrRefs.includes(normDocMatchStr(entry.idStr))) ||
+            (entry.nomeNorm && rBarrRefs.includes(entry.nomeNorm));
+
+          if (!matched) continue;
+
+          const dataDoc = String(payload.dataNotificacao || row.data || row.created_at || '').slice(0, 10) || undefined;
+          const notifNum = payload.notificacaoGerada ? String(payload.notificacaoGerada) : undefined;
+          const oficioNum = String(row.oficio_gerado || payload.oficioGerado || '').trim() || undefined;
+          const analistaList = row.analista
+            ? [String(row.analista)]
+            : payload.analista
+            ? [String(payload.analista)]
+            : undefined;
+
+          addDocToDam(entry.key, {
+            id: `fisc_doc_${row.id}`,
+            tipo: String(row.tipo_documento || payload.tipo_documento || 'Notificação'),
+            titulo: String(payload.objetivo || row.tipo_documento || 'Notificação emitida'),
+            numero: notifNum,
+            dataEmissao: dataDoc,
+            origemSistema: String(row.origem_sistema || 'Fiscaliza'),
+            situacao: String(row.situacao || row.status || 'Emitido'),
+            processo: row.processo ? String(row.processo) : undefined,
+            analistas: analistaList,
+            resumo: payload.prazoVencimento ? `Prazo: ${payload.prazoVencimento} dias` : undefined
+          });
+
+          if (oficioNum) {
+            addDocToDam(entry.key, {
+              id: `fisc_oficio_${row.id}`,
+              tipo: 'Ofício',
+              titulo: 'Ofício vinculado à notificação',
+              numero: oficioNum,
+              dataEmissao: dataDoc,
+              origemSistema: String(row.origem_sistema || 'Fiscaliza'),
+              situacao: String(row.situacao || row.status || 'Emitido'),
+              processo: row.processo ? String(row.processo) : undefined,
+              analistas: analistaList
+            });
+          }
+        }
+      }
+    }
+
+    if (transfRes.status === 'fulfilled' && !transfRes.value.error && Array.isArray(transfRes.value.data)) {
+      for (const row of transfRes.value.data) {
+        const rBarrId = String(row.barragem_id || '').trim();
+        const rSnisb = normDocMatchStr(row.snisb);
+        const rProc = normDocMatchStr(row.processo);
+
+        for (const entry of damEntries) {
+          const matched =
+            (rBarrId && entry.idStr && rBarrId === entry.idStr) ||
+            (rSnisb && entry.snisbNorm && rSnisb === entry.snisbNorm) ||
+            (rProc && entry.procNorm && rProc === entry.procNorm);
+
+          if (!matched) continue;
+
+          if (row.parecer_tecnico_novo) {
+            addDocToDam(entry.key, {
+              id: `transf_parecer_novo_${row.id}`,
+              tipo: 'Parecer Técnico',
+              titulo: 'Parecer Técnico (Transferência de Titularidade)',
+              numero: String(row.parecer_tecnico_novo),
+              dataEmissao: String(row.data_parecer_tecnico_novo || row.data_protocolo || '').slice(0, 10) || undefined,
+              origemSistema: 'Administra',
+              situacao: row.status_origem ? String(row.status_origem) : 'Emitido',
+              processo: row.processo ? String(row.processo) : undefined
+            });
+          }
+          if (row.portaria_nova) {
+            addDocToDam(entry.key, {
+              id: `transf_portaria_nova_${row.id}`,
+              tipo: 'Portaria',
+              titulo: 'Portaria (Transferência de Titularidade)',
+              numero: String(row.portaria_nova),
+              dataEmissao: String(row.data_portaria_nova || row.data_protocolo || '').slice(0, 10) || undefined,
+              origemSistema: 'Administra',
+              situacao: row.status_origem ? String(row.status_origem) : 'Emitido',
+              processo: row.processo ? String(row.processo) : undefined
+            });
+          }
+          if (row.parecer_tecnico_anterior) {
+            addDocToDam(entry.key, {
+              id: `transf_parecer_ant_${row.id}`,
+              tipo: 'Parecer Técnico',
+              titulo: 'Parecer Técnico Anterior',
+              numero: String(row.parecer_tecnico_anterior),
+              dataEmissao: String(row.data_portaria_anterior || '').slice(0, 10) || undefined,
+              origemSistema: 'Administra',
+              situacao: 'Histórico',
+              processo: row.processo ? String(row.processo) : undefined
+            });
+          }
+          if (row.portaria_anterior) {
+            addDocToDam(entry.key, {
+              id: `transf_portaria_ant_${row.id}`,
+              tipo: 'Portaria',
+              titulo: 'Portaria Anterior',
+              numero: String(row.portaria_anterior),
+              dataEmissao: String(row.data_portaria_anterior || '').slice(0, 10) || undefined,
+              origemSistema: 'Administra',
+              situacao: 'Histórico',
+              processo: row.processo ? String(row.processo) : undefined
+            });
+          }
+        }
+      }
+    }
+  }
+
+  // Ordena documentos de cada barragem do mais recente para o mais antigo
+  for (const key of Object.keys(result)) {
+    result[key].sort((a, b) => String(b.dataEmissao || '').localeCompare(String(a.dataEmissao || '')));
+  }
+
+  return result;
+}
+

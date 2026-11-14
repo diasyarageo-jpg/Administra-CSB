@@ -741,3 +741,318 @@ export function formatSemaPropertiesEntries(
   return entries;
 }
 
+const CAR_PLACEHOLDER_VALUES = new Set([
+  'NAOINFORMADO',
+  'NAOPOSSUI',
+  'NAOAPLICAVEL',
+  'NAOIDENTIFICADO',
+  'SEMCAR',
+  'SEMNUMERO',
+  'PENDENTE',
+  'ISENTO',
+  'NAOCONSTA',
+  'NAN',
+  'NULL',
+  'UNDEFINED',
+  'NA'
+]);
+
+export function extractNormalizedCarMatchKeys(raw: unknown): string[] {
+  if (raw === null || raw === undefined) return [];
+  const cleaned = stripOuterQuotesAndBrackets(String(raw)).trim();
+  if (!cleaned) return [];
+
+  const upperCompact = cleaned
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .toUpperCase()
+    .replace(/[^A-Z0-9]/g, '');
+
+  if (!upperCompact || CAR_PLACEHOLDER_VALUES.has(upperCompact)) {
+    return [];
+  }
+
+  const keys = new Set<string>();
+  const tokens = extractCarSearchTokens(cleaned);
+
+  for (const tok of tokens) {
+    const tUpper = tok.trim().toUpperCase();
+    const compact = tUpper.replace(/[^A-Z0-9]/g, '');
+    if (!compact || CAR_PLACEHOLDER_VALUES.has(compact)) continue;
+
+    const isSicar = /^[A-Z]{2}-\d{6,8}-[A-F0-9]{8,}$/.test(tUpper);
+    const isStateCarSlash = /\d{3,8}\/\d{2,4}$/.test(tUpper);
+    const digitCount = (compact.match(/\d/g) || []).length;
+
+    if (isSicar || isStateCarSlash || (compact.length >= 6 && digitCount >= 3)) {
+      keys.add(tUpper);
+      keys.add(compact);
+    }
+  }
+
+  return Array.from(keys);
+}
+
+export function findBarragensMatchingCarString(
+  carInput: unknown,
+  barragens: any[] = []
+): any[] {
+  if (!Array.isArray(barragens) || barragens.length === 0) return [];
+  const inputKeys = new Set(extractNormalizedCarMatchKeys(carInput));
+  if (inputKeys.size === 0) return [];
+
+  const matched: any[] = [];
+  const seen = new Set<string>();
+
+  for (let i = 0; i < barragens.length; i++) {
+    const b = barragens[i];
+    if (!b || typeof b !== 'object') continue;
+    const barragemKeys = [
+      ...extractNormalizedCarMatchKeys(b.car),
+      ...extractNormalizedCarMatchKeys(b.carFederal),
+      ...extractNormalizedCarMatchKeys(b.car_mt),
+      ...extractNormalizedCarMatchKeys(b.numeroCar)
+    ];
+
+    if (barragemKeys.some(k => inputKeys.has(k))) {
+      const uid = String(b.id ?? `${b.nome || b.nomeBarragem || 'barragem'}-${i}`);
+      if (!seen.has(uid)) {
+        seen.add(uid);
+        matched.push(b);
+      }
+    }
+  }
+
+  return matched;
+}
+
+export function findBarragensMatchingSemaItem(
+  item: {
+    numeroDocumento?: string;
+    carFederal?: string;
+    propriedadesBrutas?: Record<string, any>;
+  } | null | undefined,
+  barragens: any[] = []
+): any[] {
+  if (!item || !Array.isArray(barragens) || barragens.length === 0) return [];
+
+  const candidateValues: unknown[] = [
+    item.numeroDocumento,
+    item.carFederal,
+    item.propriedadesBrutas?.NUMEROESTADUAL,
+    item.propriedadesBrutas?.numeroestadual,
+    item.propriedadesBrutas?.CAR_ESTADUAL,
+    item.propriedadesBrutas?.car_estadual,
+    item.propriedadesBrutas?.CAR_FEDERAL,
+    item.propriedadesBrutas?.car_federal,
+    item.propriedadesBrutas?.CODIGO_CAR_FEDERAL,
+    item.propriedadesBrutas?.codigo_car_federal,
+    item.propriedadesBrutas?.PROTOCOLO,
+    item.propriedadesBrutas?.protocolo,
+    item.propriedadesBrutas?.PROTOCOLO_NUMERO,
+    item.propriedadesBrutas?.protocolo_numero
+  ];
+
+  if (item.propriedadesBrutas && typeof item.propriedadesBrutas === 'object') {
+    for (const [k, v] of Object.entries(item.propriedadesBrutas)) {
+      if (/^(car|numero_?car|cod_?car|sicar|numero_?estadual)/i.test(k)) {
+        candidateValues.push(v);
+      }
+    }
+  }
+
+  const itemKeys = new Set<string>();
+  for (const val of candidateValues) {
+    for (const k of extractNormalizedCarMatchKeys(val)) {
+      itemKeys.add(k);
+    }
+  }
+
+  if (itemKeys.size === 0) return [];
+
+  const matched: any[] = [];
+  const seen = new Set<string>();
+
+  for (let i = 0; i < barragens.length; i++) {
+    const b = barragens[i];
+    if (!b || typeof b !== 'object') continue;
+    const barragemKeys = [
+      ...extractNormalizedCarMatchKeys(b.car),
+      ...extractNormalizedCarMatchKeys(b.carFederal),
+      ...extractNormalizedCarMatchKeys(b.car_mt),
+      ...extractNormalizedCarMatchKeys(b.numeroCar)
+    ];
+
+    if (barragemKeys.some(k => itemKeys.has(k))) {
+      const uid = String(b.id ?? `${b.nome || b.nomeBarragem || 'barragem'}-${i}`);
+      if (!seen.has(uid)) {
+        seen.add(uid);
+        matched.push(b);
+      }
+    }
+  }
+
+  return matched;
+}
+
+export function getCanonicalCarKeyFromSemaItem(item: {
+  id?: string | number | null;
+  numeroDocumento?: string;
+  carFederal?: string;
+  propriedadesBrutas?: Record<string, any>;
+} | null | undefined): string {
+  if (!item) return '';
+
+  const stateCandidates: unknown[] = [
+    item.numeroDocumento,
+    item.propriedadesBrutas?.NUMEROESTADUAL,
+    item.propriedadesBrutas?.numeroestadual,
+    item.propriedadesBrutas?.CAR_ESTADUAL,
+    item.propriedadesBrutas?.car_estadual,
+    item.propriedadesBrutas?.PROTOCOLO,
+    item.propriedadesBrutas?.protocolo,
+    item.propriedadesBrutas?.PROTOCOLO_NUMERO,
+    item.propriedadesBrutas?.protocolo_numero
+  ];
+
+  for (const val of stateCandidates) {
+    const tokens = extractNormalizedCarMatchKeys(val);
+    const slashTok = tokens.find(t => /\d{3,8}\/\d{2,4}$/.test(t) && !t.startsWith('MT'));
+    if (slashTok) return `MTCAR:${slashTok}`;
+    const mtSlashTok = tokens.find(t => /^MT\d{3,8}\/\d{2,4}$/.test(t));
+    if (mtSlashTok) return `MTCAR:${mtSlashTok.slice(2)}`;
+  }
+
+  const federalCandidates: unknown[] = [
+    item.carFederal,
+    item.propriedadesBrutas?.CAR_FEDERAL,
+    item.propriedadesBrutas?.car_federal,
+    item.propriedadesBrutas?.CODIGO_CAR_FEDERAL,
+    item.propriedadesBrutas?.codigo_car_federal
+  ];
+
+  for (const val of federalCandidates) {
+    const tokens = extractNormalizedCarMatchKeys(val);
+    const sicarTok = tokens.find(t => /^[A-Z]{2}-\d{6,8}-[A-F0-9]{8,}$/.test(t));
+    if (sicarTok) return `SICAR:${sicarTok}`;
+  }
+
+  for (const val of [...stateCandidates, ...federalCandidates]) {
+    const tokens = extractNormalizedCarMatchKeys(val);
+    if (tokens.length > 0) return `RAW:${tokens[0]}`;
+  }
+
+  if (item.id !== undefined && item.id !== null && String(item.id).trim() !== '') {
+    return `ID:${String(item.id).trim()}`;
+  }
+
+  return '';
+}
+
+function scoreCarItemCompleteness(item: any): number {
+  let score = 0;
+  const camada = String(item?.camadaOrigem || '').toUpperCase();
+  if (camada.includes('CAR_ATP') && !camada.includes('REQUERIMENTO')) score += 20;
+  if (item?.numeroDocumento) score += 8;
+  if (item?.carFederal) score += 6;
+  if (item?.nomeDocumento) score += 5;
+  if (item?.razaoSocial) score += 5;
+  if (item?.cpfCnpjMascarado) score += 5;
+  if (item?.areaHa) score += 3;
+  if (item?.municipio) score += 3;
+  if (item?.linkDocumento) score += 2;
+  if (item?.propriedadesBrutas && typeof item.propriedadesBrutas === 'object') {
+    for (const v of Object.values(item.propriedadesBrutas)) {
+      if (v !== null && v !== undefined && String(v).trim() !== '') {
+        score += 1;
+      }
+    }
+  }
+  return score;
+}
+
+export function deduplicateCarImoveisByCar<
+  T extends {
+    id?: string | number | null;
+    numeroDocumento?: string;
+    carFederal?: string;
+    nomeDocumento?: string;
+    razaoSocial?: string;
+    cpfCnpjMascarado?: string;
+    municipio?: string;
+    areaHa?: string;
+    status?: string;
+    linkDocumento?: string;
+    camadaOrigem?: string;
+    camadaTitulo?: string;
+    correspondenciaExploratoria?: boolean;
+    propriedadesBrutas?: Record<string, any>;
+  }
+>(items: T[] = []): T[] {
+  if (!Array.isArray(items) || items.length <= 1) return Array.isArray(items) ? items : [];
+
+  const grouped = new Map<string, T>();
+  const order: string[] = [];
+
+  for (let i = 0; i < items.length; i++) {
+    const item = items[i];
+    if (!item) continue;
+    const key = getCanonicalCarKeyFromSemaItem(item) || `IDX:${i}`;
+
+    const existing = grouped.get(key);
+    if (!existing) {
+      grouped.set(key, {
+        ...item,
+        propriedadesBrutas: item.propriedadesBrutas ? { ...item.propriedadesBrutas } : item.propriedadesBrutas
+      });
+      order.push(key);
+      continue;
+    }
+
+    const keepIncoming = scoreCarItemCompleteness(item) > scoreCarItemCompleteness(existing);
+    const primary = keepIncoming ? item : existing;
+    const secondary = keepIncoming ? existing : item;
+
+    const mergedProps: Record<string, any> = {
+      ...(secondary.propriedadesBrutas || {}),
+      ...(primary.propriedadesBrutas || {})
+    };
+    if (secondary.propriedadesBrutas) {
+      for (const [k, v] of Object.entries(secondary.propriedadesBrutas)) {
+        const cur = mergedProps[k];
+        if (
+          (cur === undefined || cur === null || String(cur).trim() === '') &&
+          v !== undefined &&
+          v !== null &&
+          String(v).trim() !== ''
+        ) {
+          mergedProps[k] = v;
+        }
+      }
+    }
+
+    const merged: T = {
+      ...secondary,
+      ...primary,
+      numeroDocumento: primary.numeroDocumento || secondary.numeroDocumento || '',
+      carFederal: primary.carFederal || secondary.carFederal,
+      nomeDocumento: primary.nomeDocumento || secondary.nomeDocumento || '',
+      razaoSocial: primary.razaoSocial || secondary.razaoSocial,
+      cpfCnpjMascarado: primary.cpfCnpjMascarado || secondary.cpfCnpjMascarado,
+      municipio: primary.municipio || secondary.municipio,
+      areaHa: primary.areaHa || secondary.areaHa,
+      status: primary.status || secondary.status,
+      linkDocumento: primary.linkDocumento || secondary.linkDocumento,
+      correspondenciaExploratoria:
+        Boolean(primary.correspondenciaExploratoria) && Boolean(secondary.correspondenciaExploratoria),
+      propriedadesBrutas: Object.keys(mergedProps).length > 0 ? mergedProps : primary.propriedadesBrutas
+    };
+
+    grouped.set(key, merged);
+  }
+
+  return order.map(k => grouped.get(k)!).filter(Boolean);
+}
+
+
+

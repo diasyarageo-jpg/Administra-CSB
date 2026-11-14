@@ -3195,6 +3195,8 @@ export default function App() {
         <EmpreendedorDocumentosSemaModal
           empreendedor={empreendedorSemaModal}
           barragens={db.barragens}
+          rts={db.rts}
+          portarias={db.portarias}
           onClose={() => setEmpreendedorSemaModal(null)}
         />
       )}

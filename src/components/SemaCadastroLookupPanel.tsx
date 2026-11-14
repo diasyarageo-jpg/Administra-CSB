@@ -1,11 +1,18 @@
 // src/components/SemaCadastroLookupPanel.tsx
 import React, { useState, useEffect } from 'react';
 import { consultarDocumentosSema } from '../services/carLookupService';
+import { parseCoordAdvanced } from '../services/coordService';
+import {
+  BarragemDocumentoEmitidoItem,
+  carregarDocumentosEmitidosPorBarragens
+} from '../services/documentosService';
 import {
   SemaDocumentoItem,
   SemaDocumentosGroupedResult
 } from '../types/carLookup';
 import {
+  deduplicateCarImoveisByCar,
+  findBarragensMatchingSemaItem,
   formatCpfCnpjReadable,
   formatSemaPropertiesEntries,
   stripOuterQuotesAndBrackets
@@ -36,6 +43,7 @@ interface SemaCadastroLookupPanelProps {
   allowCar?: boolean;
   defaultMode?: SemaLookupMode;
   defaultQuery?: string;
+  barragensCadastradas?: any[];
   buildComparisons: (
     item: SemaDocumentoItem,
     meta: SemaSearchMeta
@@ -79,6 +87,7 @@ export function SemaCadastroLookupPanel({
   allowCar = false,
   defaultMode = 'cpf',
   defaultQuery = '',
+  barragensCadastradas = [],
   buildComparisons,
   onApplyFields
 }: SemaCadastroLookupPanelProps) {
@@ -109,9 +118,35 @@ export function SemaCadastroLookupPanel({
   const [checkedKeys, setCheckedKeys] = useState<Record<string, boolean>>({});
   const [decisionStatus, setDecisionStatus] = useState<string | null>(null);
   const [panelDismissed, setPanelDismissed] = useState<boolean>(false);
+  const [showFullSemaDetails, setShowFullSemaDetails] = useState<boolean>(false);
   const [showEmptySemaProps, setShowEmptySemaProps] = useState<boolean>(false);
+  const [expandedBarragemKeys, setExpandedBarragemKeys] = useState<Record<string, boolean>>({});
+  const [docsByBarragemId, setDocsByBarragemId] = useState<Record<string, BarragemDocumentoEmitidoItem[]>>({});
+  const [isLoadingDocsBarragem, setIsLoadingDocsBarragem] = useState<boolean>(false);
 
   const selectedItem = allItems[selectedItemIdx] || null;
+
+  useEffect(() => {
+    let active = true;
+    if (!Array.isArray(barragensCadastradas) || barragensCadastradas.length === 0) {
+      setDocsByBarragemId({});
+      return;
+    }
+    setIsLoadingDocsBarragem(true);
+    carregarDocumentosEmitidosPorBarragens(barragensCadastradas)
+      .then(map => {
+        if (active) setDocsByBarragemId(map);
+      })
+      .catch(() => {
+        if (active) setDocsByBarragemId({});
+      })
+      .finally(() => {
+        if (active) setIsLoadingDocsBarragem(false);
+      });
+    return () => {
+      active = false;
+    };
+  }, [barragensCadastradas]);
 
   const computeComparisons = (
     item: SemaDocumentoItem | null,
@@ -144,6 +179,8 @@ export function SemaCadastroLookupPanel({
     setCheckedKeys(nextChecked);
     setDecisionStatus(null);
     setPanelDismissed(false);
+    setShowFullSemaDetails(false);
+    setExpandedBarragemKeys({});
   };
 
   useEffect(() => {
@@ -218,14 +255,21 @@ export function SemaCadastroLookupPanel({
         return;
       }
 
+      const uniqueCarImoveis = deduplicateCarImoveisByCar(res.carImoveis || []);
       const merged: SemaDocumentoItem[] = [
-        ...(res.carImoveis || []),
+        ...uniqueCarImoveis,
         ...(res.licencas || []),
         ...(res.notificacoes || []),
         ...(res.autosInfracao || []),
         ...(res.termosEmbargo || []),
         ...(res.outros || [])
       ];
+
+      merged.sort((a, b) => {
+        const aMatch = findBarragensMatchingSemaItem(a, barragensCadastradas).length > 0 ? 1 : 0;
+        const bMatch = findBarragensMatchingSemaItem(b, barragensCadastradas).length > 0 ? 1 : 0;
+        return bMatch - aMatch;
+      });
 
       setAllItems(merged);
       setSelectedItemIdx(0);
@@ -466,6 +510,8 @@ export function SemaCadastroLookupPanel({
             <div style={{ display: 'flex', flexDirection: 'column', gap: '6px', maxHeight: '210px', overflowY: 'auto' }}>
               {allItems.map((item, idx) => {
                 const isSelected = idx === selectedItemIdx;
+                const matchedBarragens = findBarragensMatchingSemaItem(item, barragensCadastradas);
+                const hasBarragem = matchedBarragens.length > 0;
                 const cleanTitle = stripOuterQuotesAndBrackets(item.razaoSocial || item.nomeDocumento || item.tipo || '');
                 const cleanDocNum = item.numeroDocumento ? stripOuterQuotesAndBrackets(item.numeroDocumento) : '';
                 const cleanCarFed = item.carFederal ? stripOuterQuotesAndBrackets(item.carFederal) : '';
@@ -480,8 +526,21 @@ export function SemaCadastroLookupPanel({
                     style={{
                       padding: '8px 10px',
                       borderRadius: '6px',
-                      border: isSelected ? '2px solid #0284c7' : '1px solid #cbd5e1',
-                      backgroundColor: isSelected ? '#e0f2fe' : '#ffffff',
+                      border: hasBarragem
+                        ? isSelected
+                          ? '2px solid #059669'
+                          : '1.5px solid #34d399'
+                        : isSelected
+                        ? '2px solid #0284c7'
+                        : '1px solid #cbd5e1',
+                      borderLeft: hasBarragem ? '5px solid #059669' : undefined,
+                      backgroundColor: hasBarragem
+                        ? isSelected
+                          ? '#dcfce7'
+                          : '#f0fdf4'
+                        : isSelected
+                        ? '#e0f2fe'
+                        : '#ffffff',
                       cursor: 'pointer',
                       fontSize: '12px',
                       display: 'flex',
@@ -498,7 +557,21 @@ export function SemaCadastroLookupPanel({
                           checked={isSelected}
                           onChange={() => setSelectedItemIdx(idx)}
                         />
-                        <span style={{ fontSize: '10.5px', fontWeight: 600, padding: '1px 6px', borderRadius: '4px', backgroundColor: '#f1f5f9', color: '#334155' }}>
+                        {hasBarragem && (
+                          <span
+                            style={{
+                              fontSize: '10px',
+                              fontWeight: 700,
+                              padding: '1px 7px',
+                              borderRadius: '4px',
+                              backgroundColor: '#059669',
+                              color: '#ffffff'
+                            }}
+                          >
+                            BARRAGEM NO NOSSO CADASTRO ({matchedBarragens.length})
+                          </span>
+                        )}
+                        <span style={{ fontSize: '10.5px', fontWeight: 600, padding: '1px 6px', borderRadius: '4px', backgroundColor: hasBarragem ? '#d1fae5' : '#f1f5f9', color: hasBarragem ? '#065f46' : '#334155' }}>
                           {item.camadaTitulo || item.camadaOrigem.replace('Geoportal:', '')}
                         </span>
                         <strong style={{ color: '#0f172a' }}>
@@ -512,8 +585,13 @@ export function SemaCadastroLookupPanel({
                         {cleanMun && <span>Local: <b>{cleanMun}</b></span>}
                         {cleanStatus && <span>Situação: <b>{cleanStatus}</b></span>}
                       </div>
+                      {hasBarragem && (
+                        <div style={{ fontSize: '11px', color: '#065f46', marginTop: '4px', paddingLeft: '20px', fontWeight: 600 }}>
+                          Barragem(ns) vinculada(s) ao CAR: {matchedBarragens.map(b => b.nome || b.nomeBarragem || 'Barragem').join(', ')}
+                        </div>
+                      )}
                     </div>
-                    <span style={{ fontSize: '11px', fontWeight: 600, color: isSelected ? '#0369a1' : '#64748b' }}>
+                    <span style={{ fontSize: '11px', fontWeight: 600, color: hasBarragem ? '#065f46' : isSelected ? '#0369a1' : '#64748b' }}>
                       {isSelected ? 'Selecionado' : 'Selecionar'}
                     </span>
                   </div>
@@ -532,6 +610,211 @@ export function SemaCadastroLookupPanel({
                 padding: '12px'
               }}
             >
+              {(() => {
+                const selectedMatchedBarragens = findBarragensMatchingSemaItem(
+                  selectedItem,
+                  barragensCadastradas
+                );
+                if (selectedMatchedBarragens.length === 0) return null;
+
+                const formatDateBr = (iso?: string) => {
+                  if (!iso) return '';
+                  const clean = String(iso).slice(0, 10);
+                  const parts = clean.split('-');
+                  if (parts.length === 3) return `${parts[2]}/${parts[1]}/${parts[0]}`;
+                  return clean;
+                };
+
+                const formatCoord = (val: any, isLng: boolean) => {
+                  if (!val) return '';
+                  const parsed = parseCoordAdvanced(val, isLng);
+                  if (parsed.valido && parsed.gms) {
+                    const dec = parsed.decimal !== null ? ` (${parsed.decimal.toFixed(5)}°)` : '';
+                    return `${parsed.gms}${dec}`;
+                  }
+                  return String(val);
+                };
+
+                return (
+                  <div
+                    style={{
+                      marginBottom: '10px',
+                      padding: '10px 12px',
+                      backgroundColor: '#ecfdf5',
+                      border: '1.5px solid #059669',
+                      borderRadius: '8px',
+                      fontSize: '12px',
+                      color: '#065f46'
+                    }}
+                  >
+                    <strong style={{ display: 'block', marginBottom: '6px', fontSize: '12px' }}>
+                      CAR correspondente a barragem(ns) no nosso cadastro ({selectedMatchedBarragens.length}):
+                    </strong>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '7px' }}>
+                      {selectedMatchedBarragens.map((bar: any, bIdx: number) => {
+                        const barrIdKey = String(bar.id || `barr_${bIdx}`);
+                        const expandKey = `${selectedItem.id ?? selectedItemIdx}::${barrIdKey}::${bIdx}`;
+                        const isDamExpanded = Boolean(expandedBarragemKeys[expandKey]);
+                        const docsDaBarragem = docsByBarragemId[barrIdKey] || [];
+                        const latFmt = formatCoord(bar.latitude || bar.lat, false);
+                        const lngFmt = formatCoord(bar.longitude || bar.lng, true);
+                        const criVal = bar.categoriaRisco || bar.cri;
+                        const dpaVal = bar.danoPotencial || bar.dpa;
+
+                        return (
+                          <div
+                            key={expandKey}
+                            style={{
+                              backgroundColor: '#ffffff',
+                              border: isDamExpanded ? '1.5px solid #059669' : '1px solid #a7f3d0',
+                              borderRadius: '6px',
+                              padding: '8px 10px',
+                              color: '#064e3b'
+                            }}
+                          >
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+                              <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                                <strong style={{ fontSize: '12.5px', color: '#064e3b' }}>
+                                  {bar.nome || bar.nomeBarragem || 'Barragem cadastrada'}
+                                </strong>
+                                {bar.situacao && (
+                                  <span style={{ padding: '1px 6px', borderRadius: '4px', fontSize: '10px', fontWeight: 600, backgroundColor: '#f1f5f9', color: '#334155' }}>
+                                    {bar.situacao}
+                                  </span>
+                                )}
+                                {docsDaBarragem.length > 0 && (
+                                  <span style={{ padding: '1px 6px', borderRadius: '4px', fontSize: '10px', fontWeight: 700, backgroundColor: '#e0f2fe', color: '#0369a1' }}>
+                                    {docsDaBarragem.length} doc(s) emitido(s)
+                                  </span>
+                                )}
+                              </div>
+
+                              <button
+                                type="button"
+                                onClick={() =>
+                                  setExpandedBarragemKeys(prev => ({ ...prev, [expandKey]: !prev[expandKey] }))
+                                }
+                                style={{
+                                  display: 'inline-flex',
+                                  alignItems: 'center',
+                                  gap: '5px',
+                                  background: isDamExpanded ? '#d1fae5' : '#f8fafc',
+                                  border: '1px solid #6ee7b7',
+                                  borderRadius: '6px',
+                                  padding: '3px 8px',
+                                  color: '#065f46',
+                                  cursor: 'pointer',
+                                  fontSize: '11px',
+                                  fontWeight: 700
+                                }}
+                              >
+                                <svg
+                                  width="12"
+                                  height="12"
+                                  viewBox="0 0 24 24"
+                                  fill="none"
+                                  stroke="currentColor"
+                                  strokeWidth="2.5"
+                                  strokeLinecap="round"
+                                  strokeLinejoin="round"
+                                  style={{
+                                    transform: isDamExpanded ? 'rotate(90deg)' : 'rotate(0deg)',
+                                    transition: 'transform 0.15s ease'
+                                  }}
+                                >
+                                  <polyline points="9 18 15 12 9 6" />
+                                </svg>
+                                <span>{isDamExpanded ? 'Suprimir resumo' : 'Resumo e documentos'}</span>
+                              </button>
+                            </div>
+
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', marginTop: '4px', fontSize: '11.5px', color: '#334155' }}>
+                              {bar.car && <span>CAR: <b style={{ fontFamily: 'monospace' }}>{bar.car}</b></span>}
+                              {bar.municipio && <span>Município: <b>{bar.municipio}</b></span>}
+                              {bar.processo && <span>Processo: <b>{bar.processo}</b></span>}
+                              {(bar.snisb || bar.codigo) && <span>SNISB: <b style={{ fontFamily: 'monospace' }}>{bar.snisb || bar.codigo}</b></span>}
+                            </div>
+
+                            {isDamExpanded && (
+                              <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px dashed #a7f3d0', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(175px, 1fr))', gap: '6px' }}>
+                                  <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '5px', padding: '5px 8px' }}>
+                                    <span style={{ display: 'block', fontSize: '10px', color: '#64748b' }}>Empreendimento / Fazenda</span>
+                                    <strong style={{ fontSize: '11px', color: '#0f172a' }}>{bar.empreendimento || 'Não informado'}</strong>
+                                  </div>
+                                  <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '5px', padding: '5px 8px' }}>
+                                    <span style={{ display: 'block', fontSize: '10px', color: '#64748b' }}>Curso d’Água / Bacia</span>
+                                    <strong style={{ fontSize: '11px', color: '#0f172a' }}>{bar.cursoAgua || bar.cursoDagua || bar.rio || 'Não informado'}</strong>
+                                  </div>
+                                  <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '5px', padding: '5px 8px' }}>
+                                    <span style={{ display: 'block', fontSize: '10px', color: '#64748b' }}>Classificação (CRI / DPA)</span>
+                                    <strong style={{ fontSize: '11px', color: '#0f172a' }}>
+                                      {criVal || dpaVal ? `CRI: ${criVal || '—'} · DPA: ${dpaVal || '—'}` : 'Não classificada'}
+                                    </strong>
+                                  </div>
+                                  <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '5px', padding: '5px 8px' }}>
+                                    <span style={{ display: 'block', fontSize: '10px', color: '#64748b' }}>Coordenadas</span>
+                                    <strong style={{ fontSize: '10.5px', color: '#0f172a', fontFamily: 'monospace' }}>
+                                      {latFmt || lngFmt ? `${latFmt || '—'} / ${lngFmt || '—'}` : 'Não informadas'}
+                                    </strong>
+                                  </div>
+                                </div>
+
+                                <div>
+                                  <strong style={{ fontSize: '10.5px', color: '#0369a1', textTransform: 'uppercase', display: 'block', marginBottom: '4px' }}>
+                                    Documentos Emitidos (Classificação, Notificação, Ofício, etc.) ({docsDaBarragem.length})
+                                  </strong>
+                                  {isLoadingDocsBarragem && docsDaBarragem.length === 0 ? (
+                                    <div style={{ fontSize: '11px', color: '#64748b' }}>Consultando documentos emitidos...</div>
+                                  ) : docsDaBarragem.length === 0 ? (
+                                    <div style={{ fontSize: '11px', color: '#64748b', backgroundColor: '#f8fafc', padding: '6px 8px', borderRadius: '5px', border: '1px solid #e2e8f0' }}>
+                                      Nenhum documento emitido registrado para esta barragem até o momento.
+                                    </div>
+                                  ) : (
+                                    <div style={{ display: 'flex', flexDirection: 'column', gap: '5px' }}>
+                                      {docsDaBarragem.map((doc, dIdx) => (
+                                        <div
+                                          key={`${doc.id}-${dIdx}`}
+                                          style={{
+                                            backgroundColor: '#f8fafc',
+                                            border: '1px solid #e2e8f0',
+                                            borderRadius: '5px',
+                                            padding: '6px 8px',
+                                            fontSize: '11px'
+                                          }}
+                                        >
+                                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '6px' }}>
+                                            <div>
+                                              <span style={{ fontWeight: 700, color: '#0369a1', marginRight: '6px' }}>[{doc.tipo}]</span>
+                                              <strong style={{ color: '#0f172a' }}>
+                                                {doc.numero ? `${doc.titulo} · Nº ${doc.numero}` : doc.titulo}
+                                              </strong>
+                                            </div>
+                                            <span style={{ color: '#475569' }}>
+                                              {doc.origemSistema}{doc.dataEmissao ? ` · ${formatDateBr(doc.dataEmissao)}` : ''}
+                                            </span>
+                                          </div>
+                                          {(doc.situacao || doc.processo || doc.resumo) && (
+                                            <div style={{ marginTop: '2px', color: '#475569', display: 'flex', flexWrap: 'wrap', gap: '8px' }}>
+                                              {doc.situacao && <span>Situação: <b>{doc.situacao}</b></span>}
+                                              {doc.processo && <span>Processo: <b>{doc.processo}</b></span>}
+                                              {doc.resumo && <span>{doc.resumo}</span>}
+                                            </div>
+                                          )}
+                                        </div>
+                                      ))}
+                                    </div>
+                                  )}
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        );
+                      })}
+                    </div>
+                  </div>
+                );
+              })()}
               {divergentFields.length > 0 ? (
                 <div style={{ marginBottom: '10px', padding: '8px 10px', backgroundColor: '#fffbeb', border: '1px solid #fde68a', borderRadius: '6px', fontSize: '12px', color: '#92400e' }}>
                   <strong style={{ display: 'block', marginBottom: '3px' }}>
@@ -682,7 +965,7 @@ export function SemaCadastroLookupPanel({
                 </div>
               )}
 
-              {/* Ficha organizada completa com todos os dados retornados pela SEMA-MT */}
+              {/* Ficha organizada completa com todos os dados retornados pela SEMA-MT (suprimida inicialmente) */}
               {(() => {
                 const allEntries = formatSemaPropertiesEntries(selectedItem.propriedadesBrutas);
                 if (allEntries.length === 0) return null;
@@ -695,82 +978,128 @@ export function SemaCadastroLookupPanel({
                   <div
                     style={{
                       marginTop: '12px',
-                      paddingTop: '12px',
+                      paddingTop: '10px',
                       borderTop: '1px solid #e2e8f0'
                     }}
                   >
-                    <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '6px', marginBottom: '8px' }}>
-                      <strong style={{ fontSize: '11.5px', color: '#0f172a' }}>
-                        Dados completos retornados pela SEMA-MT ({filledEntries.length} preenchido(s) · {allEntries.length} total)
-                      </strong>
-                      {emptyEntries.length > 0 && filledEntries.length > 0 && (
-                        <button
-                          type="button"
-                          onClick={() => setShowEmptySemaProps(prev => !prev)}
-                          style={{
-                            background: '#ffffff',
-                            border: '1px solid #cbd5e1',
-                            borderRadius: '6px',
-                            padding: '2px 8px',
-                            color: '#0369a1',
-                            cursor: 'pointer',
-                            fontSize: '11px',
-                            fontWeight: 600
-                          }}
-                        >
-                          {showEmptySemaProps
-                            ? `Ocultar ${emptyEntries.length} sem preenchimento`
-                            : `Mostrar também ${emptyEntries.length} sem preenchimento`}
-                        </button>
-                      )}
-                    </div>
-
-                    <div
+                    <button
+                      type="button"
+                      onClick={() => setShowFullSemaDetails(prev => !prev)}
                       style={{
-                        display: 'grid',
-                        gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
-                        gap: '7px'
+                        width: '100%',
+                        display: 'flex',
+                        justifyContent: 'space-between',
+                        alignItems: 'center',
+                        gap: '8px',
+                        background: showFullSemaDetails ? '#e0f2fe' : '#f8fafc',
+                        border: '1px solid #cbd5e1',
+                        borderRadius: '6px',
+                        padding: '7px 10px',
+                        cursor: 'pointer',
+                        color: '#0f172a',
+                        fontSize: '12px',
+                        fontWeight: 600
                       }}
                     >
-                      {visibleEntries.map(entry => (
-                        <div
-                          key={entry.key}
+                      <span style={{ display: 'inline-flex', alignItems: 'center', gap: '7px', color: '#0369a1' }}>
+                        <svg
+                          width="13"
+                          height="13"
+                          viewBox="0 0 24 24"
+                          fill="none"
+                          stroke="currentColor"
+                          strokeWidth="2.5"
+                          strokeLinecap="round"
+                          strokeLinejoin="round"
                           style={{
-                            backgroundColor: '#f8fafc',
-                            border: '1px solid #e2e8f0',
-                            borderRadius: '6px',
-                            padding: '6px 9px',
-                            opacity: entry.isEmpty ? 0.7 : 1
+                            transform: showFullSemaDetails ? 'rotate(90deg)' : 'rotate(0deg)',
+                            transition: 'transform 0.15s ease'
                           }}
                         >
-                          <span style={{ display: 'block', fontSize: '10px', fontWeight: 600, color: '#64748b', marginBottom: '1px' }}>
-                            {entry.label}
-                          </span>
-                          {entry.isLink ? (
-                            <a
-                              href={entry.value}
-                              target="_blank"
-                              rel="noopener noreferrer"
-                              style={{ fontSize: '11.5px', color: '#0369a1', fontWeight: 600, textDecoration: 'underline', wordBreak: 'break-all' }}
-                            >
-                              Acessar documento oficial ↗
-                            </a>
-                          ) : (
-                            <span
+                          <polyline points="9 18 15 12 9 6" />
+                        </svg>
+                        <span>
+                          Dados completos retornados pela SEMA-MT ({filledEntries.length} preenchido(s) · {allEntries.length} total)
+                        </span>
+                      </span>
+                      <span style={{ fontSize: '11px', color: '#64748b', fontWeight: 500 }}>
+                        {showFullSemaDetails ? 'Suprimir' : 'Expandir'}
+                      </span>
+                    </button>
+
+                    {showFullSemaDetails && (
+                      <div style={{ marginTop: '10px' }}>
+                        {emptyEntries.length > 0 && filledEntries.length > 0 && (
+                          <div style={{ display: 'flex', justifyContent: 'flex-end', marginBottom: '8px' }}>
+                            <button
+                              type="button"
+                              onClick={() => setShowEmptySemaProps(prev => !prev)}
                               style={{
-                                fontSize: '12px',
-                                fontWeight: entry.isEmpty ? 400 : 600,
-                                color: entry.isEmpty ? '#94a3b8' : '#0f172a',
-                                wordBreak: 'break-word',
-                                display: 'block'
+                                background: '#ffffff',
+                                border: '1px solid #cbd5e1',
+                                borderRadius: '6px',
+                                padding: '2px 8px',
+                                color: '#0369a1',
+                                cursor: 'pointer',
+                                fontSize: '11px',
+                                fontWeight: 600
                               }}
                             >
-                              {entry.value}
-                            </span>
-                          )}
+                              {showEmptySemaProps
+                                ? `Ocultar ${emptyEntries.length} sem preenchimento`
+                                : `Mostrar também ${emptyEntries.length} sem preenchimento`}
+                            </button>
+                          </div>
+                        )}
+
+                        <div
+                          style={{
+                            display: 'grid',
+                            gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+                            gap: '7px'
+                          }}
+                        >
+                          {visibleEntries.map(entry => (
+                            <div
+                              key={entry.key}
+                              style={{
+                                backgroundColor: '#f8fafc',
+                                border: '1px solid #e2e8f0',
+                                borderRadius: '6px',
+                                padding: '6px 9px',
+                                opacity: entry.isEmpty ? 0.7 : 1
+                              }}
+                            >
+                              <span style={{ display: 'block', fontSize: '10px', fontWeight: 600, color: '#64748b', marginBottom: '1px' }}>
+                                {entry.label}
+                              </span>
+                              {entry.isLink ? (
+                                <a
+                                  href={entry.value}
+                                  target="_blank"
+                                  rel="noopener noreferrer"
+                                  style={{ fontSize: '11.5px', color: '#0369a1', fontWeight: 600, textDecoration: 'underline', wordBreak: 'break-all' }}
+                                >
+                                  Acessar documento oficial ↗
+                                </a>
+                              ) : (
+                                <span
+                                  style={{
+                                    fontSize: '12px',
+                                    fontWeight: entry.isEmpty ? 400 : 600,
+                                    color: entry.isEmpty ? '#94a3b8' : '#0f172a',
+                                    wordBreak: 'break-word',
+                                    display: 'block'
+                                  }}
+                                >
+                                  {entry.value}
+                                </span>
+                              )}
+                            </div>
+                          ))}
                         </div>
-                      ))}
-                    </div>
+                      </div>
+                    )}
                   </div>
                 );
               })()}

@@ -301,6 +301,7 @@ export function EmpreendedorModal({
             entityLabel="Empreendedor"
             isNew={isNew}
             allowCar={true}
+            barragensCadastradas={barragens}
             defaultMode={
               cpfCnpj.replace(/\D/g, '').length === 14
                 ? 'cnpj'
@@ -913,6 +914,7 @@ export function BarragemModal({
   const [carLookupResult, setCarLookupResult] = useState<CarLookupResult | null>(null);
   const [selectedFeatureIndex, setSelectedFeatureIndex] = useState<number>(0);
   const [showCarPreview, setShowCarPreview] = useState<boolean>(false);
+  const [showFullCarDetails, setShowFullCarDetails] = useState<boolean>(false);
 
   // Estados de confirmação para substituição de campos já preenchidos
   const [overwriteCar, setOverwriteCar] = useState<boolean>(false);
@@ -945,6 +947,7 @@ export function BarragemModal({
         setSelectedFeatureIndex(0);
         setOverwriteCar(false);
         setOverwriteMunicipio(false);
+        setShowFullCarDetails(false);
         setShowCarPreview(true);
       }
     } catch (err: any) {
@@ -1461,6 +1464,7 @@ export function BarragemModal({
                           setSelectedFeatureIndex(Number(e.target.value));
                           setOverwriteCar(false);
                           setOverwriteMunicipio(false);
+                          setShowFullCarDetails(false);
                         }}
                         style={{ fontSize: '12px', padding: '6px 8px' }}
                       >
@@ -1545,39 +1549,80 @@ export function BarragemModal({
                     </div>
                   </div>
 
-                  {/* Todos os demais atributos retornados pela SEMA-MT em formato legível */}
+                  {/* Todos os demais atributos retornados pela SEMA-MT em formato legível (suprimido inicialmente) */}
                   {(() => {
                     const allEntries = formatSemaPropertiesEntries(currentFeat.propriedadesBrutas).filter(e => !e.isEmpty);
                     if (allEntries.length === 0) return null;
                     return (
                       <div style={{
                         marginBottom: '12px',
-                        padding: '10px',
                         backgroundColor: '#ffffff',
                         borderRadius: '6px',
-                        border: '1px solid #cbd5e1'
+                        border: '1px solid #cbd5e1',
+                        overflow: 'hidden'
                       }}>
-                        <strong style={{ display: 'block', fontSize: '11.5px', color: '#0369a1', marginBottom: '8px' }}>
-                          Ficha Completa Retornada pela SEMA-MT ({allEntries.length} campo(s)):
-                        </strong>
-                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(195px, 1fr))', gap: '7px' }}>
-                          {allEntries.map(entry => (
-                            <div key={entry.key} style={{ backgroundColor: '#f8fafc', padding: '6px 8px', borderRadius: '5px', border: '1px solid #e2e8f0' }}>
-                              <span style={{ display: 'block', fontSize: '10px', fontWeight: 600, color: '#64748b' }}>
-                                {entry.label}
-                              </span>
-                              {entry.isLink ? (
-                                <a href={entry.value} target="_blank" rel="noopener noreferrer" style={{ fontSize: '11.5px', color: '#0369a1', fontWeight: 600, textDecoration: 'underline' }}>
-                                  Acessar documento ↗
-                                </a>
-                              ) : (
-                                <span style={{ fontSize: '12px', fontWeight: 600, color: '#0f172a', wordBreak: 'break-word', display: 'block' }}>
-                                  {entry.value}
+                        <button
+                          type="button"
+                          onClick={() => setShowFullCarDetails(prev => !prev)}
+                          style={{
+                            width: '100%',
+                            display: 'flex',
+                            justifyContent: 'space-between',
+                            alignItems: 'center',
+                            gap: '8px',
+                            padding: '8px 10px',
+                            background: showFullCarDetails ? '#e0f2fe' : '#f8fafc',
+                            border: 'none',
+                            borderBottom: showFullCarDetails ? '1px solid #cbd5e1' : 'none',
+                            cursor: 'pointer',
+                            color: '#0369a1',
+                            fontSize: '11.5px',
+                            fontWeight: 600
+                          }}
+                        >
+                          <span style={{ display: 'inline-flex', alignItems: 'center', gap: '7px' }}>
+                            <svg
+                              width="13"
+                              height="13"
+                              viewBox="0 0 24 24"
+                              fill="none"
+                              stroke="currentColor"
+                              strokeWidth="2.5"
+                              strokeLinecap="round"
+                              strokeLinejoin="round"
+                              style={{
+                                transform: showFullCarDetails ? 'rotate(90deg)' : 'rotate(0deg)',
+                                transition: 'transform 0.15s ease'
+                              }}
+                            >
+                              <polyline points="9 18 15 12 9 6" />
+                            </svg>
+                            <span>Ficha Completa Retornada pela SEMA-MT ({allEntries.length} campo(s))</span>
+                          </span>
+                          <span style={{ fontSize: '11px', color: '#64748b', fontWeight: 500 }}>
+                            {showFullCarDetails ? 'Suprimir' : 'Expandir'}
+                          </span>
+                        </button>
+                        {showFullCarDetails && (
+                          <div style={{ padding: '10px', display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(195px, 1fr))', gap: '7px' }}>
+                            {allEntries.map(entry => (
+                              <div key={entry.key} style={{ backgroundColor: '#f8fafc', padding: '6px 8px', borderRadius: '5px', border: '1px solid #e2e8f0' }}>
+                                <span style={{ display: 'block', fontSize: '10px', fontWeight: 600, color: '#64748b' }}>
+                                  {entry.label}
                                 </span>
-                              )}
-                            </div>
-                          ))}
-                        </div>
+                                {entry.isLink ? (
+                                  <a href={entry.value} target="_blank" rel="noopener noreferrer" style={{ fontSize: '11.5px', color: '#0369a1', fontWeight: 600, textDecoration: 'underline' }}>
+                                    Acessar documento ↗
+                                  </a>
+                                ) : (
+                                  <span style={{ fontSize: '12px', fontWeight: 600, color: '#0f172a', wordBreak: 'break-word', display: 'block' }}>
+                                    {entry.value}
+                                  </span>
+                                )}
+                              </div>
+                            ))}
+                          </div>
+                        )}
                       </div>
                     );
                   })()}

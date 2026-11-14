@@ -2,12 +2,19 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { consultarDocumentosSema } from '../services/carLookupService';
 import { getEmpreendedorVinculos } from '../services/notificaDataService';
+import { parseCoordAdvanced } from '../services/coordService';
+import {
+  BarragemDocumentoEmitidoItem,
+  carregarDocumentosEmitidosPorBarragens
+} from '../services/documentosService';
 import {
   CamadaConsultaStatus,
   SemaDocumentosGroupedResult,
   SemaDocumentoItem
 } from '../types/carLookup';
 import {
+  deduplicateCarImoveisByCar,
+  findBarragensMatchingSemaItem,
   formatCpfCnpjReadable,
   formatSemaPropertiesEntries,
   stripOuterQuotesAndBrackets
@@ -16,12 +23,16 @@ import {
 interface EmpreendedorDocumentosSemaModalProps {
   empreendedor: any;
   barragens?: any[];
+  rts?: any[];
+  portarias?: any[];
   onClose: () => void;
 }
 
 export function EmpreendedorDocumentosSemaModal({
   empreendedor,
   barragens = [],
+  rts = [],
+  portarias = [],
   onClose
 }: EmpreendedorDocumentosSemaModalProps) {
   const vinculos = useMemo(
@@ -45,8 +56,11 @@ export function EmpreendedorDocumentosSemaModal({
   const [activeTab, setActiveTab] = useState<
     'car' | 'licencas' | 'notificacoes' | 'autos' | 'embargos' | 'diagnostico'
   >('car');
-  const [expandedItemKey, setExpandedItemKey] = useState<string | null>(null);
+  const [expandedByKey, setExpandedByKey] = useState<Record<string, boolean>>({});
+  const [expandedBarragemByKey, setExpandedBarragemByKey] = useState<Record<string, boolean>>({});
   const [showEmptyByKey, setShowEmptyByKey] = useState<Record<string, boolean>>({});
+  const [docsByBarragemId, setDocsByBarragemId] = useState<Record<string, BarragemDocumentoEmitidoItem[]>>({});
+  const [isLoadingDocsBarragem, setIsLoadingDocsBarragem] = useState<boolean>(false);
 
   const [buscaCpfCnpj, setBuscaCpfCnpj] = useState<string>(initialDoc);
   const [buscaCar, setBuscaCar] = useState<string>(initialCarStr);
@@ -86,7 +100,8 @@ export function EmpreendedorDocumentosSemaModal({
       .filter(Boolean);
 
     setIsLoading(true);
-    setExpandedItemKey(null);
+    setExpandedByKey({});
+    setExpandedBarragemByKey({});
 
     consultarDocumentosSema({
       cpfCnpj: doc,
@@ -144,6 +159,40 @@ export function EmpreendedorDocumentosSemaModal({
       setData(null);
     }
   }, [empreendedor, vinculos]);
+
+  useEffect(() => {
+    let cancelled = false;
+    if (!Array.isArray(barragens) || barragens.length === 0) {
+      setDocsByBarragemId({});
+      return;
+    }
+    setIsLoadingDocsBarragem(true);
+    carregarDocumentosEmitidosPorBarragens(barragens, { portarias })
+      .then(map => {
+        if (!cancelled) {
+          setDocsByBarragemId(map);
+        }
+      })
+      .catch(() => {
+        if (!cancelled) {
+          setDocsByBarragemId({});
+        }
+      })
+      .finally(() => {
+        if (!cancelled) {
+          setIsLoadingDocsBarragem(false);
+        }
+      });
+
+    return () => {
+      cancelled = true;
+    };
+  }, [barragens, portarias]);
+
+  const deduplicatedCarImoveis = useMemo(
+    () => deduplicateCarImoveisByCar(data?.carImoveis || []),
+    [data?.carImoveis]
+  );
 
   const getGroupStatuses = (grupos: string[]): CamadaConsultaStatus[] => {
     if (!data?.camadasConsultadas) return [];
@@ -399,21 +448,455 @@ export function EmpreendedorDocumentosSemaModal({
     );
   };
 
+  const formatDateDocBr = (iso?: string) => {
+    if (!iso) return '';
+    const clean = String(iso).slice(0, 10);
+    const parts = clean.split('-');
+    if (parts.length === 3) return `${parts[2]}/${parts[1]}/${parts[0]}`;
+    return clean;
+  };
+
+  const formatCoordResumo = (val: any, isLng: boolean) => {
+    if (!val) return '';
+    const parsed = parseCoordAdvanced(val, isLng);
+    if (parsed.valido && parsed.gms) {
+      const dec = parsed.decimal !== null ? ` (${parsed.decimal.toFixed(5)}°)` : '';
+      return `${parsed.gms}${dec}`;
+    }
+    return String(val);
+  };
+
+  const getRtsDaBarragem = (bar: any): Array<{ nome: string; art?: string }> => {
+    if (!Array.isArray(rts) || rts.length === 0 || !bar) return [];
+    const barId = String(bar.id || '').trim();
+    const barNome = String(bar.nome || bar.nomeBarragem || '').trim().toLowerCase();
+    const found: Array<{ nome: string; art?: string }> = [];
+    const seen = new Set<string>();
+
+    for (const rt of rts) {
+      if (!rt) continue;
+      const vinculosRt = Array.isArray(rt.vinculos) && rt.vinculos.length > 0
+        ? rt.vinculos
+        : [{ barragemId: rt.barragemId || rt.barragemVinculada, nomeBarragem: rt.nomeBarragem, art: rt.art || rt.artRrt }];
+
+      for (const v of vinculosRt) {
+        const matchId = barId && (String(v.barragemId || '') === barId || String(v.barragemVinculada || '') === barId);
+        const matchNome = barNome && (String(v.nomeBarragem || '').trim().toLowerCase() === barNome || String(v.barragemVinculada || '').trim().toLowerCase() === barNome);
+        if (matchId || matchNome) {
+          const nomeRt = String(rt.nome || '').trim();
+          const key = `${nomeRt}|${v.art || ''}`;
+          if (nomeRt && !seen.has(key)) {
+            seen.add(key);
+            found.push({ nome: nomeRt, art: v.art || v.artRrt || rt.art });
+          }
+        }
+      }
+    }
+    return found;
+  };
+
+  const getDocTipoBadgeColors = (tipo: string): { bg: string; fg: string; border: string } => {
+    const t = String(tipo || '').toLowerCase();
+    if (t.includes('classifica') || t.includes('parecer')) {
+      return { bg: '#e0f2fe', fg: '#0369a1', border: '#bae6fd' };
+    }
+    if (t.includes('notifica')) {
+      return { bg: '#fef3c7', fg: '#92400e', border: '#fde68a' };
+    }
+    if (t.includes('ofício') || t.includes('oficio')) {
+      return { bg: '#ede9fe', fg: '#5b21b6', border: '#ddd6fe' };
+    }
+    if (t.includes('portaria')) {
+      return { bg: '#dcfce7', fg: '#166534', border: '#bbf7d0' };
+    }
+    return { bg: '#f1f5f9', fg: '#334155', border: '#cbd5e1' };
+  };
+
+  const renderBarragemMatchBox = (barragensDoCar: any[], contextKey: string) => {
+    if (barragensDoCar.length === 0) return null;
+    const vinculoIds = new Set(vinculos.barragensVinculadas.map((vb: any) => String(vb.id)));
+
+    return (
+      <div
+        style={{
+          marginTop: '10px',
+          padding: '10px 12px',
+          backgroundColor: '#ecfdf5',
+          border: '1.5px solid #10b981',
+          borderRadius: '8px'
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', flexWrap: 'wrap', gap: '6px', marginBottom: '6px' }}>
+          <strong style={{ fontSize: '12px', color: '#065f46', textTransform: 'uppercase', letterSpacing: '0.03em' }}>
+            Barragem(ns) Cadastrada(s) Neste CAR ({barragensDoCar.length})
+          </strong>
+          <span style={{ fontSize: '11px', fontWeight: 600, color: '#047857' }}>
+            Registro localizado no nosso cadastro
+          </span>
+        </div>
+
+        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+          {barragensDoCar.map((bar: any, bIdx: number) => {
+            const vinculadoAqui = vinculoIds.has(String(bar.id));
+            const barrIdKey = String(bar.id || `barr_${bIdx}`);
+            const barrExpandKey = `${contextKey}::${barrIdKey}::${bIdx}`;
+            const isDamExpanded = Boolean(expandedBarragemByKey[barrExpandKey]);
+            const docsDaBarragem = docsByBarragemId[barrIdKey] || [];
+            const rtsDaBarragem = getRtsDaBarragem(bar);
+            const latFmt = formatCoordResumo(bar.latitude || bar.lat, false);
+            const lngFmt = formatCoordResumo(bar.longitude || bar.lng, true);
+            const criVal = bar.categoriaRisco || bar.cri;
+            const dpaVal = bar.danoPotencial || bar.dpa;
+
+            return (
+              <div
+                key={barrExpandKey}
+                style={{
+                  backgroundColor: '#ffffff',
+                  border: isDamExpanded ? '1.5px solid #059669' : '1px solid #a7f3d0',
+                  borderRadius: '6px',
+                  padding: '9px 11px',
+                  fontSize: '12px'
+                }}
+              >
+                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap', flex: '1 1 240px' }}>
+                    <strong style={{ color: '#064e3b', fontSize: '13px' }}>
+                      {bar.nome || bar.nomeBarragem || 'Barragem cadastrada'}
+                    </strong>
+                    <span
+                      style={{
+                        padding: '2px 7px',
+                        borderRadius: '4px',
+                        fontSize: '10.5px',
+                        fontWeight: 700,
+                        backgroundColor: vinculadoAqui ? '#d1fae5' : '#fef3c7',
+                        color: vinculadoAqui ? '#065f46' : '#92400e'
+                      }}
+                    >
+                      {vinculadoAqui ? 'Vinculada a este empreendedor' : 'Cadastrada no sistema'}
+                    </span>
+                    {bar.situacao && (
+                      <span
+                        style={{
+                          padding: '2px 7px',
+                          borderRadius: '4px',
+                          fontSize: '10.5px',
+                          fontWeight: 600,
+                          backgroundColor: '#f1f5f9',
+                          color: '#334155'
+                        }}
+                      >
+                        {bar.situacao}
+                      </span>
+                    )}
+                    {docsDaBarragem.length > 0 && (
+                      <span
+                        style={{
+                          padding: '2px 7px',
+                          borderRadius: '4px',
+                          fontSize: '10.5px',
+                          fontWeight: 700,
+                          backgroundColor: '#e0f2fe',
+                          color: '#0369a1'
+                        }}
+                      >
+                        {docsDaBarragem.length} doc(s) emitido(s)
+                      </span>
+                    )}
+                  </div>
+
+                  <button
+                    type="button"
+                    onClick={() =>
+                      setExpandedBarragemByKey(prev => ({ ...prev, [barrExpandKey]: !prev[barrExpandKey] }))
+                    }
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '5px',
+                      background: isDamExpanded ? '#d1fae5' : '#f8fafc',
+                      border: '1px solid #6ee7b7',
+                      borderRadius: '6px',
+                      padding: '4px 9px',
+                      color: '#065f46',
+                      cursor: 'pointer',
+                      fontSize: '11px',
+                      fontWeight: 700
+                    }}
+                  >
+                    <svg
+                      width="12"
+                      height="12"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2.5"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      style={{
+                        transform: isDamExpanded ? 'rotate(90deg)' : 'rotate(0deg)',
+                        transition: 'transform 0.15s ease'
+                      }}
+                    >
+                      <polyline points="9 18 15 12 9 6" />
+                    </svg>
+                    <span>{isDamExpanded ? 'Suprimir resumo' : 'Resumo e documentos'}</span>
+                  </button>
+                </div>
+
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '12px', marginTop: '4px', fontSize: '11.5px', color: '#334155' }}>
+                  {bar.car && (
+                    <span>
+                      CAR cadastrado: <strong style={{ color: '#047857', fontFamily: 'monospace' }}>{bar.car}</strong>
+                    </span>
+                  )}
+                  {bar.municipio && (
+                    <span>
+                      Município: <strong>{bar.municipio}</strong>
+                    </span>
+                  )}
+                  {bar.processo && (
+                    <span>
+                      Processo: <strong>{bar.processo}</strong>
+                    </span>
+                  )}
+                  {(bar.snisb || bar.codigo) && (
+                    <span>
+                      SNISB: <strong style={{ fontFamily: 'monospace' }}>{bar.snisb || bar.codigo}</strong>
+                    </span>
+                  )}
+                  {!vinculadoAqui && bar.empreendedor && (
+                    <span>
+                      Empreendedor vinculado: <strong>{bar.empreendedor}</strong>
+                    </span>
+                  )}
+                </div>
+
+                {isDamExpanded && (
+                  <div
+                    style={{
+                      marginTop: '10px',
+                      paddingTop: '10px',
+                      borderTop: '1px dashed #a7f3d0',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      gap: '10px'
+                    }}
+                  >
+                    {/* Resumo técnico e cadastral da barragem */}
+                    <div>
+                      <strong style={{ fontSize: '11px', color: '#065f46', textTransform: 'uppercase', letterSpacing: '0.03em', display: 'block', marginBottom: '6px' }}>
+                        Resumo dos Dados da Barragem
+                      </strong>
+                      <div
+                        style={{
+                          display: 'grid',
+                          gridTemplateColumns: 'repeat(auto-fit, minmax(185px, 1fr))',
+                          gap: '6px'
+                        }}
+                      >
+                        <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '5px', padding: '6px 8px' }}>
+                          <span style={{ display: 'block', fontSize: '10px', color: '#64748b' }}>Empreendimento / Fazenda</span>
+                          <strong style={{ fontSize: '11.5px', color: '#0f172a' }}>{bar.empreendimento || 'Não informado'}</strong>
+                        </div>
+                        <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '5px', padding: '6px 8px' }}>
+                          <span style={{ display: 'block', fontSize: '10px', color: '#64748b' }}>Curso d’Água / Bacia</span>
+                          <strong style={{ fontSize: '11.5px', color: '#0f172a' }}>{bar.cursoAgua || bar.cursoDagua || bar.rio || 'Não informado'}</strong>
+                        </div>
+                        <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '5px', padding: '6px 8px' }}>
+                          <span style={{ display: 'block', fontSize: '10px', color: '#64748b' }}>Município / UF</span>
+                          <strong style={{ fontSize: '11.5px', color: '#0f172a' }}>
+                            {bar.municipio ? `${bar.municipio}${bar.uf ? `/${bar.uf}` : ''}` : bar.uf || 'Não informado'}
+                          </strong>
+                        </div>
+                        <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '5px', padding: '6px 8px' }}>
+                          <span style={{ display: 'block', fontSize: '10px', color: '#64748b' }}>Coordenadas</span>
+                          <strong style={{ fontSize: '11px', color: '#0f172a', fontFamily: 'monospace' }}>
+                            {latFmt || lngFmt ? `${latFmt || '—'} / ${lngFmt || '—'}` : 'Não informadas'}
+                          </strong>
+                        </div>
+                        <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '5px', padding: '6px 8px' }}>
+                          <span style={{ display: 'block', fontSize: '10px', color: '#64748b' }}>Classificação (CRI / DPA)</span>
+                          <strong style={{ fontSize: '11.5px', color: '#0f172a' }}>
+                            {criVal || dpaVal ? `CRI: ${criVal || '—'} · DPA: ${dpaVal || '—'}` : 'Não classificada'}
+                          </strong>
+                        </div>
+                        {(bar.altura || bar.volume) && (
+                          <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '5px', padding: '6px 8px' }}>
+                            <span style={{ display: 'block', fontSize: '10px', color: '#64748b' }}>Dimensões (Altura / Volume)</span>
+                            <strong style={{ fontSize: '11.5px', color: '#0f172a' }}>
+                              {bar.altura ? `${bar.altura} m` : '—'} / {bar.volume ? `${bar.volume} m³` : '—'}
+                            </strong>
+                          </div>
+                        )}
+                      </div>
+
+                      {rtsDaBarragem.length > 0 && (
+                        <div style={{ marginTop: '6px', fontSize: '11.5px', color: '#334155', backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '5px', padding: '6px 8px' }}>
+                          <strong style={{ color: '#0f172a' }}>Responsável(is) Técnico(s): </strong>
+                          {rtsDaBarragem.map(r => (r.art ? `${r.nome} (ART: ${r.art})` : r.nome)).join('; ')}
+                        </div>
+                      )}
+
+                      {bar.observacoes && (
+                        <div style={{ marginTop: '6px', fontSize: '11.5px', color: '#475569', backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '5px', padding: '6px 8px' }}>
+                          <strong style={{ color: '#0f172a' }}>Observações: </strong>
+                          <span>{bar.observacoes}</span>
+                        </div>
+                      )}
+                    </div>
+
+                    {/* Documentos emitidos para esta barragem */}
+                    <div>
+                      <strong style={{ fontSize: '11px', color: '#0369a1', textTransform: 'uppercase', letterSpacing: '0.03em', display: 'block', marginBottom: '6px' }}>
+                        Documentos Emitidos (Classificação, Notificação, Ofício, etc.) ({docsDaBarragem.length})
+                      </strong>
+
+                      {isLoadingDocsBarragem && docsDaBarragem.length === 0 ? (
+                        <div style={{ fontSize: '11.5px', color: '#64748b', padding: '6px 8px', backgroundColor: '#f8fafc', borderRadius: '5px' }}>
+                          Consultando documentos emitidos vinculados...
+                        </div>
+                      ) : docsDaBarragem.length === 0 ? (
+                        <div style={{ fontSize: '11.5px', color: '#64748b', padding: '8px 10px', backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '5px' }}>
+                          Nenhum documento emitido (parecer de classificação, notificação, ofício ou portaria) registrado para esta barragem até o momento.
+                        </div>
+                      ) : (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                          {docsDaBarragem.map((doc, dIdx) => {
+                            const colors = getDocTipoBadgeColors(doc.tipo);
+                            return (
+                              <div
+                                key={`${doc.id}-${dIdx}`}
+                                style={{
+                                  backgroundColor: '#f8fafc',
+                                  border: '1px solid #e2e8f0',
+                                  borderRadius: '6px',
+                                  padding: '7px 10px',
+                                  fontSize: '11.5px'
+                                }}
+                              >
+                                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '6px' }}>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+                                    <span
+                                      style={{
+                                        padding: '1px 6px',
+                                        borderRadius: '4px',
+                                        fontSize: '10px',
+                                        fontWeight: 700,
+                                        backgroundColor: colors.bg,
+                                        color: colors.fg,
+                                        border: `1px solid ${colors.border}`
+                                      }}
+                                    >
+                                      {doc.tipo}
+                                    </span>
+                                    <strong style={{ color: '#0f172a' }}>
+                                      {doc.numero ? `${doc.titulo} · Nº ${doc.numero}` : doc.titulo}
+                                    </strong>
+                                  </div>
+                                  <div style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11px', color: '#475569' }}>
+                                    <span style={{ padding: '1px 6px', borderRadius: '4px', backgroundColor: '#ffffff', border: '1px solid #cbd5e1', fontSize: '10px', fontWeight: 600 }}>
+                                      {doc.origemSistema}
+                                    </span>
+                                    {doc.dataEmissao && <strong>{formatDateDocBr(doc.dataEmissao)}</strong>}
+                                  </div>
+                                </div>
+                                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', marginTop: '3px', fontSize: '11px', color: '#475569' }}>
+                                  {doc.situacao && <span>Situação: <b>{doc.situacao}</b></span>}
+                                  {doc.processo && <span>Processo: <b>{doc.processo}</b></span>}
+                                  {doc.analistas && doc.analistas.length > 0 && (
+                                    <span>Analista: <b>{doc.analistas.join(', ')}</b></span>
+                                  )}
+                                  {doc.resumo && <span>{doc.resumo}</span>}
+                                </div>
+                              </div>
+                            );
+                          })}
+                        </div>
+                      )}
+                    </div>
+                  </div>
+                )}
+              </div>
+            );
+          })}
+        </div>
+      </div>
+    );
+  };
+
   const renderCarImoveisList = (items: SemaDocumentoItem[]) => {
+    const uniqueItems = deduplicateCarImoveisByCar(items);
     const alertBlock = renderGroupStateAlert(
-      items,
+      uniqueItems,
       ['carImoveis'],
       'Nenhum imóvel rural ou cadastro ambiental encontrado na base da SEMA-MT para os critérios informados.'
     );
 
-    if (items.length === 0) return alertBlock;
+    if (uniqueItems.length === 0) return alertBlock;
+
+    const annotatedItems = uniqueItems
+      .map((item, idx) => ({
+        item,
+        idx,
+        barragensDoCar: findBarragensMatchingSemaItem(item, barragens)
+      }))
+      .sort((a, b) => {
+        const aHas = a.barragensDoCar.length > 0 ? 1 : 0;
+        const bHas = b.barragensDoCar.length > 0 ? 1 : 0;
+        if (aHas !== bHas) return bHas - aHas;
+        return a.idx - b.idx;
+      });
+
+    const totalComBarragem = annotatedItems.filter(x => x.barragensDoCar.length > 0).length;
 
     return (
       <div style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
         {alertBlock}
-        {items.map((item, idx) => {
+        {totalComBarragem > 0 && (
+          <div
+            style={{
+              padding: '10px 14px',
+              backgroundColor: '#ecfdf5',
+              border: '1.5px solid #059669',
+              borderLeft: '5px solid #059669',
+              borderRadius: '8px',
+              color: '#065f46',
+              fontSize: '12.5px',
+              display: 'flex',
+              justifyContent: 'space-between',
+              alignItems: 'center',
+              flexWrap: 'wrap',
+              gap: '8px'
+            }}
+          >
+            <div>
+              <strong style={{ display: 'block', fontSize: '13px' }}>
+                Destaque para análise: {totalComBarragem} imóvel(is) com CAR vinculado a barragem(ns) cadastrada(s)
+              </strong>
+              <span style={{ fontSize: '11.5px', color: '#047857' }}>
+                Os registros destacados em verde abaixo possuem correspondência direta com barragens do nosso banco de dados.
+              </span>
+            </div>
+            <span
+              style={{
+                padding: '4px 10px',
+                borderRadius: '6px',
+                fontSize: '11px',
+                fontWeight: 700,
+                backgroundColor: '#059669',
+                color: '#ffffff'
+              }}
+            >
+              {totalComBarragem} CAR com barragem
+            </span>
+          </div>
+        )}
+        {annotatedItems.map(({ item, idx, barragensDoCar }) => {
           const itemKey = String(item.id ?? `${item.camadaOrigem}-${idx}`);
-          const isCollapsed = expandedItemKey === `hide:${itemKey}`;
+          const isExpanded = Boolean(expandedByKey[itemKey]);
+          const hasBarragem = barragensDoCar.length > 0;
           const cleanTitulo = stripOuterQuotesAndBrackets(item.nomeDocumento || '') || 'Imóvel Rural / CAR';
           const cleanStatus = item.status ? stripOuterQuotesAndBrackets(item.status) : '';
           const cleanOwners = item.razaoSocial ? stripOuterQuotesAndBrackets(item.razaoSocial) : '';
@@ -424,25 +907,42 @@ export function EmpreendedorDocumentosSemaModal({
             <div
               key={itemKey}
               style={{
-                backgroundColor: '#ffffff',
-                border: '1px solid #cbd5e1',
-                borderLeft: '4px solid #0284c7',
+                backgroundColor: hasBarragem ? '#f0fdf4' : '#ffffff',
+                border: hasBarragem ? '2px solid #059669' : '1px solid #cbd5e1',
+                borderLeft: hasBarragem ? '6px solid #059669' : '4px solid #0284c7',
                 borderRadius: '10px',
                 padding: '15px 16px',
-                boxShadow: '0 2px 6px rgba(15, 23, 42, 0.05)'
+                boxShadow: hasBarragem
+                  ? '0 4px 12px rgba(5, 150, 105, 0.14)'
+                  : '0 2px 6px rgba(15, 23, 42, 0.05)'
               }}
             >
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '10px' }}>
                 <div style={{ flex: '1 1 320px' }}>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                    {hasBarragem && (
+                      <span
+                        style={{
+                          padding: '3px 9px',
+                          borderRadius: '4px',
+                          fontSize: '11px',
+                          fontWeight: 700,
+                          backgroundColor: '#059669',
+                          color: '#ffffff',
+                          letterSpacing: '0.02em'
+                        }}
+                      >
+                        BARRAGEM NO NOSSO CADASTRO{barragensDoCar.length > 1 ? ` (${barragensDoCar.length})` : ''}
+                      </span>
+                    )}
                     <span
                       style={{
                         padding: '2px 8px',
                         borderRadius: '4px',
                         fontSize: '11px',
                         fontWeight: 600,
-                        backgroundColor: '#e0f2fe',
-                        color: '#0369a1'
+                        backgroundColor: hasBarragem ? '#d1fae5' : '#e0f2fe',
+                        color: hasBarragem ? '#065f46' : '#0369a1'
                       }}
                     >
                       {item.camadaTitulo || item.camadaOrigem.replace('Geoportal:', '')}
@@ -485,7 +985,7 @@ export function EmpreendedorDocumentosSemaModal({
                     {cleanDocNumber && (
                       <div>
                         <span style={{ color: '#64748b' }}>CAR Estadual: </span>
-                        <strong style={{ color: '#0369a1' }}>{cleanDocNumber}</strong>
+                        <strong style={{ color: hasBarragem ? '#065f46' : '#0369a1' }}>{cleanDocNumber}</strong>
                       </div>
                     )}
                     {item.carFederal && (
@@ -515,9 +1015,21 @@ export function EmpreendedorDocumentosSemaModal({
                 </div>
               </div>
 
+              {renderBarragemMatchBox(barragensDoCar, `car-${itemKey}`)}
+
               {cleanOwners && (
-                <div style={{ marginTop: '10px', fontSize: '12.5px', color: '#0f172a', backgroundColor: '#f0f9ff', border: '1px solid #bae6fd', padding: '8px 12px', borderRadius: '6px' }}>
-                  <strong style={{ color: '#0369a1' }}>Nome dos Proprietários: </strong>
+                <div
+                  style={{
+                    marginTop: '10px',
+                    fontSize: '12.5px',
+                    color: '#0f172a',
+                    backgroundColor: hasBarragem ? '#ffffff' : '#f0f9ff',
+                    border: hasBarragem ? '1px solid #a7f3d0' : '1px solid #bae6fd',
+                    padding: '8px 12px',
+                    borderRadius: '6px'
+                  }}
+                >
+                  <strong style={{ color: hasBarragem ? '#047857' : '#0369a1' }}>Nome dos Proprietários: </strong>
                   <span>{cleanOwners}</span>
                 </div>
               )}
@@ -539,14 +1051,48 @@ export function EmpreendedorDocumentosSemaModal({
 
                 <button
                   type="button"
-                  onClick={() => setExpandedItemKey(isCollapsed ? null : `hide:${itemKey}`)}
-                  style={{ background: 'none', border: 'none', color: '#0369a1', cursor: 'pointer', fontSize: '11.5px', fontWeight: 600, textDecoration: 'underline' }}
+                  onClick={() =>
+                    setExpandedByKey(prev => ({ ...prev, [itemKey]: !prev[itemKey] }))
+                  }
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    background: isExpanded ? '#e0f2fe' : '#ffffff',
+                    border: '1px solid #cbd5e1',
+                    borderRadius: '6px',
+                    padding: '4px 10px',
+                    color: '#0369a1',
+                    cursor: 'pointer',
+                    fontSize: '11.5px',
+                    fontWeight: 600
+                  }}
                 >
-                  {isCollapsed ? 'Exibir todos os campos retornados' : 'Recolher ficha completa'}
+                  <svg
+                    width="12"
+                    height="12"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    style={{
+                      transform: isExpanded ? 'rotate(90deg)' : 'rotate(0deg)',
+                      transition: 'transform 0.15s ease'
+                    }}
+                  >
+                    <polyline points="9 18 15 12 9 6" />
+                  </svg>
+                  <span>
+                    {isExpanded
+                      ? 'Suprimir dados completos retornados'
+                      : 'Expandir todos os dados retornados'}
+                  </span>
                 </button>
               </div>
 
-              {!isCollapsed && renderSemaStructuredGrid(item.propriedadesBrutas, itemKey)}
+              {isExpanded && renderSemaStructuredGrid(item.propriedadesBrutas, itemKey)}
             </div>
           );
         })}
@@ -567,7 +1113,9 @@ export function EmpreendedorDocumentosSemaModal({
         {alertBlock}
         {items.map((item, idx) => {
           const itemKey = String(item.id ?? `${item.camadaOrigem}-${idx}`);
-          const isCollapsed = expandedItemKey === `hide:${itemKey}`;
+          const isExpanded = Boolean(expandedByKey[itemKey]);
+          const barragensDoCar = findBarragensMatchingSemaItem(item, barragens);
+          const hasBarragem = barragensDoCar.length > 0;
           const cleanTipo = stripOuterQuotesAndBrackets(item.tipo || '');
           const cleanNumero = stripOuterQuotesAndBrackets(item.numeroDocumento || '');
           const cleanNome = stripOuterQuotesAndBrackets(item.nomeDocumento || '');
@@ -579,17 +1127,33 @@ export function EmpreendedorDocumentosSemaModal({
             <div
               key={itemKey}
               style={{
-                backgroundColor: '#ffffff',
-                border: '1px solid #cbd5e1',
-                borderLeft: '4px solid #0f766e',
+                backgroundColor: hasBarragem ? '#f0fdf4' : '#ffffff',
+                border: hasBarragem ? '2px solid #059669' : '1px solid #cbd5e1',
+                borderLeft: hasBarragem ? '6px solid #059669' : '4px solid #0f766e',
                 borderRadius: '10px',
                 padding: '14px 16px',
-                boxShadow: '0 2px 6px rgba(15, 23, 42, 0.04)'
+                boxShadow: hasBarragem
+                  ? '0 4px 12px rgba(5, 150, 105, 0.14)'
+                  : '0 2px 6px rgba(15, 23, 42, 0.04)'
               }}
             >
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', flexWrap: 'wrap', gap: '8px' }}>
                 <div>
                   <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                    {hasBarragem && (
+                      <span
+                        style={{
+                          padding: '2px 8px',
+                          borderRadius: '4px',
+                          fontSize: '10.5px',
+                          fontWeight: 700,
+                          backgroundColor: '#059669',
+                          color: '#ffffff'
+                        }}
+                      >
+                        BARRAGEM NO NOSSO CADASTRO
+                      </span>
+                    )}
                     <span className="badge blue" style={{ fontSize: '10.5px' }}>{cleanTipo}</span>
                     <strong style={{ fontSize: '14px', color: '#0f172a' }}>
                       {cleanNumero ? `Nº ${cleanNumero}` : 'Registro SEMA-MT'}
@@ -660,6 +1224,8 @@ export function EmpreendedorDocumentosSemaModal({
                 )}
               </div>
 
+              {renderBarragemMatchBox(barragensDoCar, `doc-${itemKey}`)}
+
               <div style={{ marginTop: '10px', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
                 <div>
                   {item.linkDocumento && (
@@ -677,14 +1243,48 @@ export function EmpreendedorDocumentosSemaModal({
 
                 <button
                   type="button"
-                  onClick={() => setExpandedItemKey(isCollapsed ? null : `hide:${itemKey}`)}
-                  style={{ background: 'none', border: 'none', color: '#0369a1', cursor: 'pointer', fontSize: '11.5px', fontWeight: 600, textDecoration: 'underline' }}
+                  onClick={() =>
+                    setExpandedByKey(prev => ({ ...prev, [itemKey]: !prev[itemKey] }))
+                  }
+                  style={{
+                    display: 'inline-flex',
+                    alignItems: 'center',
+                    gap: '6px',
+                    background: isExpanded ? '#e0f2fe' : '#f8fafc',
+                    border: '1px solid #cbd5e1',
+                    borderRadius: '6px',
+                    padding: '4px 10px',
+                    color: '#0369a1',
+                    cursor: 'pointer',
+                    fontSize: '11.5px',
+                    fontWeight: 600
+                  }}
                 >
-                  {isCollapsed ? 'Exibir todos os campos retornados' : 'Recolher ficha completa'}
+                  <svg
+                    width="12"
+                    height="12"
+                    viewBox="0 0 24 24"
+                    fill="none"
+                    stroke="currentColor"
+                    strokeWidth="2.5"
+                    strokeLinecap="round"
+                    strokeLinejoin="round"
+                    style={{
+                      transform: isExpanded ? 'rotate(90deg)' : 'rotate(0deg)',
+                      transition: 'transform 0.15s ease'
+                    }}
+                  >
+                    <polyline points="9 18 15 12 9 6" />
+                  </svg>
+                  <span>
+                    {isExpanded
+                      ? 'Suprimir dados completos retornados'
+                      : 'Expandir todos os dados retornados'}
+                  </span>
                 </button>
               </div>
 
-              {!isCollapsed && renderSemaStructuredGrid(item.propriedadesBrutas, itemKey)}
+              {isExpanded && renderSemaStructuredGrid(item.propriedadesBrutas, itemKey)}
             </div>
           );
         })}
@@ -1016,7 +1616,7 @@ export function EmpreendedorDocumentosSemaModal({
                   onClick={() => setActiveTab('car')}
                   style={{ fontSize: '12px', padding: '6px 12px', fontWeight: 600 }}
                 >
-                  CAR / Imóveis ({data.carImoveis.length})
+                  CAR / Imóveis ({deduplicatedCarImoveis.length})
                 </button>
                 <button
                   type="button"
@@ -1060,7 +1660,7 @@ export function EmpreendedorDocumentosSemaModal({
                 </button>
               </div>
 
-              {activeTab === 'car' && renderCarImoveisList(data.carImoveis)}
+              {activeTab === 'car' && renderCarImoveisList(deduplicatedCarImoveis)}
 
               {activeTab === 'licencas' &&
                 renderDocumentList(

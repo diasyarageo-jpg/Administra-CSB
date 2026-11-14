@@ -5,6 +5,7 @@ import {
   resolveConfirmedFields,
   extractConfirmedFieldValue,
   extractCarSearchTokens,
+  deduplicateCarImoveisByCar,
   formatCpfCnpjReadable,
   preserveSemaProperties,
   stripOuterQuotesAndBrackets
@@ -1264,6 +1265,8 @@ export default async function handler(
     else if (r.status.grupo === 'termosEmbargo') resultado.termosEmbargo.push(...r.items);
     else resultado.outros.push(...r.items);
   }
+
+  resultado.carImoveis = deduplicateCarImoveisByCar(resultado.carImoveis);
 
   const totalRegistros =
     resultado.carImoveis.length +
