@@ -5,7 +5,8 @@ import {
   saveNotificaDatabase,
   NotificaDatabase,
   emptyDatabase,
-  MigrationSummary
+  MigrationSummary,
+  getEmpreendedorVinculos
 } from './services/notificaDataService';
 import {
   isSupabaseConfigured,
@@ -383,13 +384,13 @@ export default function App() {
   const [portariaModalIndex, setPortariaModalIndex] = useState<number | null | 'new'>(null);
   const [portariaModalRecord, setPortariaModalRecord] = useState<any>({});
 
-  // Estado e diagnóstico de conexão com o Supabase
+  // Estado e diagnóstico de conexão com a base central
   const [supabaseStatus, setSupabaseStatus] = useState<SupabaseConnectionStatus>({
     configured: isSupabaseConfigured(),
     connected: false,
     message: isSupabaseConfigured()
       ? 'Aguardando autenticação institucional...'
-      : 'Supabase não configurado (.env). Operando exclusivamente no armazenamento local.'
+      : 'Banco de dados central não configurado. Operando exclusivamente no armazenamento local.'
   });
   const [isMigrating, setIsMigrating] = useState(false);
   const [migrationSummary, setMigrationSummary] = useState<{
@@ -501,10 +502,10 @@ export default function App() {
               setDb(res.db);
               saveNotificaDatabase(res.db);
               if (remoteTotal > 0) {
-                showToast(`Sincronizado com o Supabase (${remoteTotal} registros remotos).`);
+                showToast(`Base central sincronizada (${remoteTotal} registros carregados).`);
               }
             } else if (res.error) {
-              showToast(`Aviso Supabase: ${res.error}`);
+              showToast(`Aviso da base central: ${res.error}`);
             }
           });
         }
@@ -593,9 +594,9 @@ export default function App() {
 
     notificaDataService.saveRecord(db, key as any, record, index, currentAuthUser?.id).then(res => {
       if (res.savedRemote) {
-        showToast('Cadastro salvo no Supabase e no cache local.');
+        showToast('Cadastro salvo na base central e no cache local.');
       } else if (res.error) {
-        showToast(`Salvo localmente. Alerta Supabase: ${res.error}`);
+        showToast(`Salvo localmente. Aviso da base central: ${res.error}`);
       } else {
         showToast('Cadastro salvo neste navegador.');
       }
@@ -623,9 +624,9 @@ export default function App() {
 
     notificaDataService.saveRecord(db, key as any, savedRecord, index, currentAuthUser?.id).then(res => {
       if (res.savedRemote) {
-        showToast('Cadastro salvo no Supabase e no cache local.');
+        showToast('Cadastro salvo na base central e no cache local.');
       } else if (res.error) {
-        showToast(`Salvo localmente. Alerta Supabase: ${res.error}`);
+        showToast(`Salvo localmente. Aviso da base central: ${res.error}`);
       } else {
         showToast('Cadastro salvo neste navegador.');
       }
@@ -653,9 +654,9 @@ export default function App() {
 
     notificaDataService.saveRecord(db, key as any, record, index, currentAuthUser?.id).then(res => {
       if (res.savedRemote) {
-        showToast('Registro inativado no Supabase; os dados foram preservados.');
+        showToast('Registro inativado na base central; os dados foram preservados.');
       } else if (res.error) {
-        showToast(`Inativado localmente. Alerta Supabase: ${res.error}`);
+        showToast(`Inativado localmente. Aviso da base central: ${res.error}`);
       } else {
         showToast('Registro inativado; os dados foram preservados.');
       }
@@ -676,9 +677,9 @@ export default function App() {
     notificaDataService.deleteRecord(db, key as any, index).then(res => {
       setDb(res.updatedDb);
       if (res.deletedRemote) {
-        showToast('Registro excluído do Supabase e do cache local.');
+        showToast('Registro excluído da base central e do cache local.');
       } else if (res.error) {
-        showToast(`Removido localmente. Alerta Supabase: ${res.error}`);
+        showToast(`Removido localmente. Aviso da base central: ${res.error}`);
       } else {
         showToast('Registro excluído localmente.');
       }
@@ -792,9 +793,9 @@ export default function App() {
 
     notificaDataService.saveRecord(db, 'produtividades', record, prodModalIndex, currentAuthUser?.id).then(res => {
       if (res.savedRemote) {
-        showToast('Lançamento salvo no Supabase e no cache local.');
+        showToast('Lançamento salvo na base central e no cache local.');
       } else if (res.error) {
-        showToast(`Salvo localmente. Alerta Supabase: ${res.error}`);
+        showToast(`Salvo localmente. Aviso da base central: ${res.error}`);
       } else {
         showToast('Lançamento salvo neste navegador.');
       }
@@ -859,9 +860,9 @@ export default function App() {
 
     notificaDataService.saveRecord(db, 'produtividades', record, index).then(res => {
       if (res.savedRemote) {
-        showToast(approve ? 'Atividade extra validada e sincronizada no Supabase.' : 'Atividade não aprovada e sincronizada.');
+        showToast(approve ? 'Atividade extra validada e sincronizada na base central.' : 'Atividade não aprovada e sincronizada.');
       } else if (res.error) {
-        showToast(`Salvo localmente. Alerta Supabase: ${res.error}`);
+        showToast(`Salvo localmente. Aviso da base central: ${res.error}`);
       } else {
         showToast(approve ? 'Atividade extra validada.' : 'Atividade extra marcada como não aprovada.');
       }
@@ -882,7 +883,7 @@ export default function App() {
 
     notificaDataService.saveRecord(db, 'produtividades', record, index).then(res => {
       if (res.error) {
-        showToast(`Alterado localmente. Alerta Supabase: ${res.error}`);
+        showToast(`Alterado localmente. Aviso da base central: ${res.error}`);
       }
     });
   };
@@ -895,9 +896,9 @@ export default function App() {
 
     notificaDataService.deleteRecord(db, 'produtividades', index).then(res => {
       if (res.deletedRemote) {
-        showToast('Lançamento excluído no Supabase e localmente.');
+        showToast('Lançamento excluído na base central e localmente.');
       } else if (res.error) {
-        showToast(`Excluído localmente. Alerta Supabase: ${res.error}`);
+        showToast(`Excluído localmente. Aviso da base central: ${res.error}`);
       } else {
         showToast('Lançamento excluído.');
       }
@@ -948,9 +949,9 @@ export default function App() {
 
     notificaDataService.saveRecord(db, 'portarias', record, portariaModalIndex, currentAuthUser?.id).then(res => {
       if (res.savedRemote) {
-        showToast('Trâmite de Portaria salvo no Supabase e no cache local.');
+        showToast('Trâmite de Portaria salvo na base central e no cache local.');
       } else if (res.error) {
-        showToast(`Salvo localmente. Alerta Supabase: ${res.error}`);
+        showToast(`Salvo localmente. Aviso da base central: ${res.error}`);
       } else {
         showToast('Trâmite de Portaria salvo neste navegador.');
       }
@@ -965,9 +966,9 @@ export default function App() {
 
     notificaDataService.deleteRecord(db, 'portarias', index).then(res => {
       if (res.deletedRemote) {
-        showToast('Trâmite removido no Supabase e localmente.');
+        showToast('Trâmite removido na base central e localmente.');
       } else if (res.error) {
-        showToast(`Removido localmente. Alerta Supabase: ${res.error}`);
+        showToast(`Removido localmente. Aviso da base central: ${res.error}`);
       } else {
         showToast('Trâmite removido.');
       }
@@ -1258,7 +1259,7 @@ export default function App() {
         <div className="sidefoot">
           Administra como <b>cadastro central</b>
           <br />
-          {supabaseStatus.connected ? 'Conectado ao Supabase' : 'Versão local · dados neste navegador'}
+          {supabaseStatus.connected ? 'Base central conectada' : 'Versão local · dados neste navegador'}
         </div>
       </aside>
 
@@ -1288,7 +1289,7 @@ export default function App() {
                 onClick={() => setActiveView('integracao')}
                 title={supabaseStatus.message}
               >
-                <i style={{ background: '#10b981' }} /> SUPABASE<span className="pill-detail"> CONECTADO ({supabaseStatus.latencyMs}ms)</span>
+                <i style={{ background: '#10b981' }} /> BASE CENTRAL<span className="pill-detail"> CONECTADA ({supabaseStatus.latencyMs}ms)</span>
               </span>
             ) : supabaseStatus.configured ? (
               <span
@@ -1297,16 +1298,16 @@ export default function App() {
                 onClick={() => setActiveView('integracao')}
                 title={supabaseStatus.message}
               >
-                <i style={{ background: '#f59e0b' }} /> SUPABASE<span className="pill-detail"> ERRO / LOCAL</span>
+                <i style={{ background: '#f59e0b' }} /> BASE CENTRAL<span className="pill-detail"> LOCAL / OFFLINE</span>
               </span>
             ) : (
               <span
                 className="local-pill"
                 onClick={() => setActiveView('integracao')}
                 style={{ cursor: 'pointer' }}
-                title="Armazenamento local no navegador. Clique para ver configuração do Supabase."
+                title="Armazenamento local no navegador. Clique para ver detalhes da base central."
               >
-                <i /> DADOS LOCAIS<span className="pill-detail"> · SUPABASE PENDENTE</span>
+                <i /> DADOS LOCAIS<span className="pill-detail"> · MODO OFFLINE</span>
               </span>
             )}
 
@@ -1396,10 +1397,11 @@ export default function App() {
                 </div>
               </div>
 
-              <div className="notice amber" style={{ marginBottom: '16px' }}>
-                <b>Camada local temporária:</b> os registros são mantidos somente neste navegador. O sistema
-                abre diretamente sem exigir login e está desvinculado de banco remoto nesta etapa.
-              </div>
+              {!supabaseStatus.connected && (
+                <div className="notice amber" style={{ marginBottom: '16px' }}>
+                  <b>Modo local ativo:</b> os registros estão sendo mantidos neste navegador até a conexão com a base central.
+                </div>
+              )}
 
               <div className="stats">
                 <div className="stat">
@@ -1603,6 +1605,14 @@ export default function App() {
                 )) {
                   return true;
                 }
+                const empVinc = getEmpreendedorVinculos(rec, db.barragens);
+                if (
+                  empVinc.cars.some(c => c.toLowerCase().includes(term)) ||
+                  empVinc.processos.some(p => p.toLowerCase().includes(term)) ||
+                  empVinc.barragensVinculadas.some(b => String(b.nome || '').toLowerCase().includes(term))
+                ) {
+                  return true;
+                }
               }
               if (activeView === 'rts') {
                 if (rec.nome && String(rec.nome).toLowerCase().includes(term)) return true;
@@ -1673,7 +1683,7 @@ export default function App() {
                         </strong>
                       </div>
                       <span style={{ fontSize: '11px', color: '#b45309' }}>
-                        Defina a função do usuário para criar/ativar a credencial no Supabase Auth
+                        Defina a função do usuário para criar e ativar a credencial de acesso
                       </span>
                     </div>
                     <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
@@ -1730,7 +1740,7 @@ export default function App() {
 
                 {activeView === 'usuarios' && (
                   <div className="notice slate" style={{ marginBottom: '14px', fontSize: '11px' }}>
-                    Gestão de usuários da CSB: todos os registros (Ativos, Inativos, Pendentes e Recusados) são listados e protegidos por RLS.
+                    Gestão de usuários da CSB: todos os registros (Ativos, Inativos, Pendentes e Recusados) seguem as políticas institucionais de controle de acesso.
                   </div>
                 )}
 
@@ -1850,7 +1860,16 @@ export default function App() {
                                   }
                                   if (activeView === 'empreendedores' && field === 'empreendimentos') {
                                     const count = record.empreendimentos?.length || 0;
-                                    value = count > 0 ? `${count} empreendimento(s)` : 'Nenhum';
+                                    const empVinc = getEmpreendedorVinculos(record, db.barragens);
+                                    const parts: string[] = [];
+                                    if (count > 0) parts.push(`${count} emp.`);
+                                    if (empVinc.barragensVinculadas.length > 0) {
+                                      parts.push(`${empVinc.barragensVinculadas.length} barragem(ns)`);
+                                    }
+                                    if (empVinc.cars.length > 0) {
+                                      parts.push(empVinc.cars.length === 1 ? `CAR: ${empVinc.cars[0]}` : `${empVinc.cars.length} CARs`);
+                                    }
+                                    value = parts.length > 0 ? parts.join(' · ') : 'Nenhum';
                                   }
                                   if (activeView === 'rts' && field === 'nome') {
                                     const rtRec = record as any;
@@ -2004,7 +2023,7 @@ export default function App() {
                                         <button
                                           className="iconbtn"
                                           style={{ color: '#047857', fontWeight: 700 }}
-                                          title="Aprovar e ativar usuário no Supabase Auth"
+                                          title="Aprovar e ativar acesso do usuário"
                                           onClick={() => {
                                             setUserToApprove(record);
                                             setApprovalRole('Usuário');
@@ -2045,17 +2064,17 @@ export default function App() {
 
                                     {userRole !== 'Visualizador' && (
                                       <>
-                                        {activeView === 'empreendedores' && record.cpfCnpj && (
+                                        {activeView === 'empreendedores' && (record.cpfCnpj || record.nome) && (
                                           <button
                                             className="iconbtn"
                                             style={{ color: '#0369a1' }}
-                                            title="Consultar documentos, licenças e autos no Geoportal SEMA-MT"
+                                            title="Consultar CAR/MT, imóveis rurais, licenças e autos na base da SEMA-MT"
                                             onClick={(e) => {
                                               e.stopPropagation();
                                               setEmpreendedorSemaModal(record);
                                             }}
                                           >
-                                            Doc SEMA
+                                            CAR / SEMA
                                           </button>
                                         )}
                                         {(userRole === 'Administrador' || !record.createdBy || record.createdBy === currentAuthUser?.id) ? (
@@ -2571,23 +2590,23 @@ export default function App() {
               <div className="pagehead">
                 <div>
                   <div className="eyebrow">Arquitetura e banco de dados</div>
-                  <h2>Estrutura de integração e Supabase</h2>
-                  <p>Configuração do banco de dados relacional Supabase e sincronização com o armazenamento local.</p>
+                  <h2>Estrutura de integração e Base Central</h2>
+                  <p>Configuração do banco de dados central e sincronização com o armazenamento local.</p>
                 </div>
               </div>
 
-              {/* PAINEL SUPABASE */}
+              {/* PAINEL BASE CENTRAL */}
               <div className="panel" style={{ marginBottom: '20px' }}>
                 <div className="panel-head">
                   <div style={{ display: 'flex', alignItems: 'center', gap: '10px' }}>
-                    <span className="badge green">Supabase</span>
-                    <h3>Banco de Dados Central</h3>
+                    <span className="badge green">Base Central</span>
+                    <h3>Banco de Dados Institucional</h3>
                   </div>
                   <button
                     type="button"
                     className="btn light small"
                     onClick={() => {
-                      showToast('Testando conexão com o Supabase...');
+                      showToast('Testando conexão com a base central...');
                       checkSupabaseConnection().then(status => {
                         setSupabaseStatus(status);
                         showToast(status.message);
@@ -2603,7 +2622,7 @@ export default function App() {
                       <span className="muted" style={{ fontSize: '11px', display: 'block', marginBottom: '4px' }}>Status da Conexão</span>
                       <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '6px' }}>
                         <span className={`badge ${supabaseStatus.connected ? 'green' : supabaseStatus.configured ? 'amber' : 'gray'}`}>
-                          {supabaseStatus.connected ? 'Conectado' : supabaseStatus.configured ? 'Erro / Não conectado' : 'Não configurado'}
+                          {supabaseStatus.connected ? 'Conectado' : supabaseStatus.configured ? 'Offline / Local' : 'Não configurado'}
                         </span>
                         {supabaseStatus.latencyMs !== undefined && (
                           <span style={{ fontSize: '11px', color: '#64748b' }}>{supabaseStatus.latencyMs}ms de latência</span>
@@ -2615,45 +2634,43 @@ export default function App() {
                     </div>
 
                     <div style={{ padding: '14px', borderRadius: '10px', background: '#f8fafc', border: '1px solid #e2e8f0' }}>
-                      <span className="muted" style={{ fontSize: '11px', display: 'block', marginBottom: '4px' }}>Variáveis de Ambiente</span>
+                      <span className="muted" style={{ fontSize: '11px', display: 'block', marginBottom: '4px' }}>Credenciais de Integração</span>
                       <div style={{ fontSize: '11px', lineHeight: 1.8 }}>
                         <div>
-                          <b>VITE_SUPABASE_URL:</b>{' '}
+                          <b>Endereço da Base Central:</b>{' '}
                           {import.meta.env.VITE_SUPABASE_URL ? (
-                            <span style={{ color: '#059669' }}>Configurada</span>
+                            <span style={{ color: '#059669' }}>Configurado</span>
                           ) : (
-                            <span style={{ color: '#d97706' }}>Ausente no .env</span>
+                            <span style={{ color: '#d97706' }}>Pendente no ambiente</span>
                           )}
                         </div>
                         <div>
-                          <b>VITE_SUPABASE_ANON_KEY:</b>{' '}
+                          <b>Chave de Acesso:</b>{' '}
                           {import.meta.env.VITE_SUPABASE_ANON_KEY ? (
-                            <span style={{ color: '#059669' }}>Configurada (Chave pública anônima)</span>
+                            <span style={{ color: '#059669' }}>Configurada</span>
                           ) : (
-                            <span style={{ color: '#d97706' }}>Ausente no .env</span>
+                            <span style={{ color: '#d97706' }}>Pendente no ambiente</span>
                           )}
                         </div>
                       </div>
                     </div>
                   </div>
 
-                  {/* AVISO CRÍTICO DE SEGURANÇA SOBRE RLS E LOGIN */}
+                  {/* AVISO DE SEGURANÇA E CONTROLE DE ACESSO */}
                   <div className="notice amber" style={{ marginBottom: '18px' }}>
                     <strong style={{ display: 'block', marginBottom: '4px' }}>
-                      Aviso de Segurança · RLS e Operação sem Login:
+                      Política de Segurança e Controle de Acesso:
                     </strong>
-                    O sistema está atualmente operando com acesso direto (sem tela de login). Ao conectar o cliente frontend diretamente ao Supabase com a chave pública anônima, todas as requisições utilizam a role PostgreSQL <code>anon</code>.
-                    <br />
-                    <strong>Atenção:</strong> Criar políticas de acesso irrestrito para <code>anon</code> deixaria os dados legíveis e modificáveis por qualquer pessoa com acesso à URL do sistema. A alternativa mais segura é manter as permissões restritas e implementar a autenticação de usuários (Supabase Auth) na próxima etapa.
+                    As permissões de leitura e escrita seguem perfis institucionais autenticados (Administrador, Usuário e Visualizador), garantindo rastreabilidade e proteção dos cadastros centrais.
                   </div>
 
                   {/* PAINEL DE MIGRAÇÃO E CONTROLE LOCAL */}
                   <div style={{ borderTop: '1px solid #e2e8f0', paddingTop: '16px' }}>
                     <h4 style={{ fontSize: '13px', fontWeight: 700, margin: '0 0 10px', color: '#0f172a' }}>
-                      Migração Segura de Registros Locais para o Supabase
+                      Migração Segura de Registros Locais para a Base Central
                     </h4>
                     <p style={{ fontSize: '11px', color: '#64748b', margin: '0 0 14px' }}>
-                      Os dados salvos no navegador são preservados na chave <code>notifica_csb_local_v1</code>. A migração envia os registros existentes sem criar duplicidades (atualizando registros com o mesmo ID).
+                      Os dados salvos no navegador ficam armazenados em cache local para contingência. A migração envia os registros existentes sem criar duplicidades (atualizando registros com o mesmo ID).
                     </p>
 
                     <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap', marginBottom: '16px' }}>
@@ -2683,11 +2700,11 @@ export default function App() {
                         disabled={isMigrating || !isSupabaseConfigured()}
                         onClick={async () => {
                           if (!isSupabaseConfigured()) {
-                            showToast('Configure as variáveis VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY primeiro.');
+                            showToast('Configuração da base central ausente no ambiente.');
                             return;
                           }
                           setIsMigrating(true);
-                          showToast('Iniciando migração dos dados locais para o Supabase...');
+                          showToast('Iniciando envio dos dados locais para a base central...');
                           try {
                             const res = await notificaDataService.migrateLocalToSupabase();
                             setMigrationSummary({
@@ -2707,7 +2724,7 @@ export default function App() {
                           }
                         }}
                       >
-                        {isMigrating ? 'Migrando registros...' : 'Migrar registros locais para o Supabase'}
+                        {isMigrating ? 'Migrando registros...' : 'Migrar registros locais para a base central'}
                       </button>
 
                       {migrationSummary && (
@@ -2743,7 +2760,7 @@ export default function App() {
                         Salvaguarda do Armazenamento Local
                       </strong>
                       <p style={{ fontSize: '11px', color: '#78350f', margin: '0 0 10px' }}>
-                        Por segurança, o Administra Barragens nunca apaga o armazenamento local automaticamente. A remoção da cópia local só deve ser realizada após você conferir que todos os registros estão presentes e íntegros no painel do Supabase.
+                        Por segurança, o Administra Barragens nunca apaga o armazenamento local automaticamente. A remoção da cópia local só deve ser realizada após confirmar que todos os registros estão sincronizados na base central.
                       </p>
                       <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '11px', color: '#78350f', cursor: 'pointer', marginBottom: '10px' }}>
                         <input
@@ -2751,7 +2768,7 @@ export default function App() {
                           checked={confirmLocalClear}
                           onChange={e => setConfirmLocalClear(e.target.checked)}
                         />
-                        <span>Confirmo que conferi os registros no Supabase e desejo remover a cópia local deste navegador.</span>
+                        <span>Confirmo que conferi os registros na base central e desejo remover a cópia local deste navegador.</span>
                       </label>
                       <button
                         type="button"
@@ -2760,7 +2777,7 @@ export default function App() {
                         style={{ color: confirmLocalClear ? '#dc2626' : '#94a3b8', borderColor: confirmLocalClear ? '#fca5a5' : '#e2e8f0' }}
                         onClick={() => {
                           if (!confirmLocalClear) return;
-                          if (window.confirm('Tem certeza absoluta de que deseja limpar os dados locais deste navegador? Os dados já migrados para o Supabase NÃO serão afetados.')) {
+                          if (window.confirm('Tem certeza absoluta de que deseja limpar os dados locais deste navegador? Os registros salvos na base central NÃO serão afetados.')) {
                             const ok = notificaDataService.clearLocalDataAfterConfirmation();
                             if (ok) {
                               setConfirmLocalClear(false);
@@ -2877,8 +2894,8 @@ export default function App() {
         </section>
 
         <footer className="footnote">
-          Administra · Coordenadoria de Segurança de Barragens · SURH / SEMA-MT · Protótipo funcional
-          local; integração e acesso institucional ainda não habilitados.
+          Administra · Coordenadoria de Segurança de Barragens · SURH / SEMA-MT ·{' '}
+          {supabaseStatus.connected ? 'Base central integrada e autenticada.' : 'Operando em armazenamento local.'}
         </footer>
       </main>
 
@@ -2890,6 +2907,7 @@ export default function App() {
               key={`emp-${modalConfig.index ?? 'new'}`}
               record={modalConfig.record}
               isNew={modalConfig.index === null}
+              barragens={db.barragens}
               onClose={() => setModalConfig(null)}
               onSave={handleSaveCustomRecord}
             />
@@ -2975,7 +2993,7 @@ export default function App() {
                 <div>
                   <h3 style={{ margin: 0, fontSize: '15px', fontWeight: 700 }}>Aprovar Solicitação de Acesso</h3>
                   <p style={{ margin: 0, fontSize: '11px', color: '#6b7280' }}>
-                    Defina a função para provisionar a credencial no Supabase Auth
+                    Defina a função para provisionar a credencial de acesso institucional
                   </p>
                 </div>
               </div>
@@ -3017,7 +3035,7 @@ export default function App() {
               </div>
 
               <p style={{ fontSize: '11px', color: '#64748b', marginTop: '10px' }}>
-                Ao confirmar, a conta é provisionada no Supabase Auth por fluxo seguro de convite institucional e o status é alterado para <strong>Ativo</strong>.
+                Ao confirmar, a conta é provisionada por fluxo seguro de convite institucional e o status é alterado para <strong>Ativo</strong>.
               </p>
             </div>
             <div className="modal-foot">
@@ -3025,7 +3043,7 @@ export default function App() {
                 Cancelar
               </button>
               <button type="button" className="btn green" onClick={handleConfirmApproval} disabled={isApproving}>
-                {isApproving ? 'Provisionando no Supabase Auth...' : 'Confirmar Aprovação e Ativar'}
+                {isApproving ? 'Provisionando credencial...' : 'Confirmar Aprovação e Ativar'}
               </button>
             </div>
           </div>
@@ -3176,6 +3194,7 @@ export default function App() {
       {empreendedorSemaModal && (
         <EmpreendedorDocumentosSemaModal
           empreendedor={empreendedorSemaModal}
+          barragens={db.barragens}
           onClose={() => setEmpreendedorSemaModal(null)}
         />
       )}

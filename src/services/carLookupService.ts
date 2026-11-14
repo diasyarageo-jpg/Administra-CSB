@@ -1,6 +1,5 @@
+// src/services/carLookupService.ts
 /**
- * src/services/carLookupService.ts
- *
  * Serviço cliente para consulta espacial ao CAR/MT, pesquisa de documentos
  * e sincronização da base do Geoportal SEMA-MT.
  */
@@ -16,29 +15,29 @@ import {
 } from '../types/carLookup';
 import { parseCoordAdvanced, decimalToGms } from './coordService';
 import { getMatoGrossoMunicipios } from './ibgeService';
+import { supabase, isSupabaseConfigured } from './supabaseClient';
 
-// Cache de municípios de MT para resolução de MUNICIPIO_CODIGO
 let mtMunicipiosCache: { id: number; nome: string }[] = [];
-getMatoGrossoMunicipios().then(list => {
-  mtMunicipiosCache = list;
-}).catch(() => {});
+getMatoGrossoMunicipios()
+  .then(list => {
+    mtMunicipiosCache = list;
+  })
+  .catch(() => {});
 
 /**
  * Converte as propriedades de uma feição GeoJSON retornada pelo GeoServer
  * em um objeto mapeado com os campos do Administra-CSB.
- * Regra estrita: lê de feature.properties e preserva properties brutas intactas.
+ * Lê de feature.properties e preserva todas as propriedades brutas intactas.
  */
-export function mapPropertiesToCarFeature(
-  feature: CarGeoJsonFeature
-): CarFeatureMapped {
-  const props = (feature && feature.properties && typeof feature.properties === 'object')
-    ? feature.properties
-    : {};
+export function mapPropertiesToCarFeature(feature: CarGeoJsonFeature): CarFeatureMapped {
+  const props =
+    feature && feature.properties && typeof feature.properties === 'object'
+      ? feature.properties
+      : {};
 
   let municipioNome = extractFirstMatchingField(props, CAR_CAMPOS.municipio);
   const municipioCodigo = extractFirstMatchingField(props, CAR_CAMPOS.municipioCodigo);
 
-  // Se o nome do município não veio explícito, mas veio MUNICIPIO_CODIGO (IBGE MT)
   if (!municipioNome && municipioCodigo && mtMunicipiosCache.length > 0) {
     const codNum = parseInt(municipioCodigo, 10);
     const found = mtMunicipiosCache.find(m => m.id === codNum);
@@ -49,13 +48,14 @@ export function mapPropertiesToCarFeature(
 
   return {
     id: feature?.id ? String(feature.id) : undefined,
+    camadaOrigem: feature?.camadaOrigem,
     car: extractFirstMatchingField(props, CAR_CAMPOS.car),
     carFederal: extractFirstMatchingField(props, CAR_CAMPOS.carFederal),
     empreendedor: extractFirstMatchingField(props, CAR_CAMPOS.empreendedor),
     empreendimento: extractFirstMatchingField(props, CAR_CAMPOS.empreendimento),
     municipio: municipioNome,
     municipioCodigo,
-    uf: extractFirstMatchingField(props, CAR_CAMPOS.uf), // Não preencher com "MT" se não fornecido
+    uf: extractFirstMatchingField(props, CAR_CAMPOS.uf),
     situacaoCar: extractFirstMatchingField(props, CAR_CAMPOS.situacaoCar),
     areaHa: extractFirstMatchingField(props, CAR_CAMPOS.areaHa),
     atividade: extractFirstMatchingField(props, CAR_CAMPOS.atividade),
@@ -67,8 +67,7 @@ export function mapPropertiesToCarFeature(
 }
 
 /**
- * Consulta a camada Geoportal:CAR_ATP da SEMA-MT a partir de coordenadas em formato GMS ou decimal.
- * Converte coordenadas GMS válidas para graus decimais antes de chamar a API.
+ * Consulta camadas CAR/ATP do Geoportal SEMA-MT via WFS a partir de coordenadas GMS ou decimais.
  */
 export async function consultarCarPorCoordenada(
   latInput: string | number | null | undefined,
@@ -84,7 +83,9 @@ export async function consultarCarPorCoordenada(
       feicoes: [],
       feicoesBrutas: [],
       consultadoEm: new Date().toISOString(),
-      mensagemErro: latRes.mensagem || 'Latitude inválida ou incompleta. Informe coordenadas em formato GMS (ex: 15°35\'45,00"S).'
+      mensagemErro:
+        latRes.mensagem ||
+        'Latitude inválida ou incompleta. Informe coordenadas em formato GMS (ex: 15°35\'45,00"S).'
     };
   }
 
@@ -95,7 +96,9 @@ export async function consultarCarPorCoordenada(
       feicoes: [],
       feicoesBrutas: [],
       consultadoEm: new Date().toISOString(),
-      mensagemErro: lngRes.mensagem || 'Longitude inválida ou incompleta. Informe coordenadas em formato GMS (ex: 56°05\'48,00"W).'
+      mensagemErro:
+        lngRes.mensagem ||
+        'Longitude inválida ou incompleta. Informe coordenadas em formato GMS (ex: 56°05\'48,00"W).'
     };
   }
 
@@ -134,6 +137,9 @@ export async function consultarCarPorCoordenada(
           latGms: decimalToGms(decLat, false),
           lngGms: decimalToGms(decLng, true)
         },
+        camadasConsultadas: Array.isArray(data.camadasConsultadas)
+          ? data.camadasConsultadas
+          : undefined,
         consultadoEm: data.consultadoEm || new Date().toISOString(),
         mensagemErro: data.error || `Erro ao consultar Geoportal (HTTP ${res.status}).`
       };
@@ -153,6 +159,10 @@ export async function consultarCarPorCoordenada(
         latGms: decimalToGms(decLat, false),
         lngGms: decimalToGms(decLng, true)
       },
+      camadasConsultadas: Array.isArray(data.camadasConsultadas)
+        ? data.camadasConsultadas
+        : undefined,
+      mensagemStatus: data.mensagemStatus,
       consultadoEm: data.consultadoEm || new Date().toISOString()
     };
   } catch (err: any) {
@@ -162,24 +172,66 @@ export async function consultarCarPorCoordenada(
       feicoes: [],
       feicoesBrutas: [],
       consultadoEm: new Date().toISOString(),
-      mensagemErro: err?.message || 'Falha de conexão com a API de consulta ao Geoportal SEMA-MT.'
+      mensagemErro:
+        err?.message || 'Falha de conexão com a API de consulta ao Geoportal SEMA-MT.'
     };
   }
 }
 
+export interface ConsultarDocumentosSemaParams {
+  cpfCnpj?: string;
+  processo?: string;
+  processos?: string[];
+  nome?: string;
+  car?: string;
+  cars?: string[];
+  coordenadas?: Array<{ lat: number; lng: number; label?: string }>;
+  buscaExploratoria?: boolean;
+}
+
 /**
- * Consulta registros, licenças e notificações no Geoportal da SEMA-MT para um CPF/CNPJ exato.
+ * Consulta registros, licenças, notificações e imóveis CAR na base pública da SEMA-MT.
  */
 export async function consultarDocumentosSema(
-  cpfCnpj: string,
-  processo?: string
+  param: string | ConsultarDocumentosSemaParams,
+  processoArg?: string
 ): Promise<SemaDocumentosGroupedResult> {
-  const cleanDoc = String(cpfCnpj || '').replace(/\D/g, '');
+  let cleanDoc = '';
+  let processo = '';
+  let processos: string[] = [];
+  let nome = '';
+  let car = '';
+  let cars: string[] = [];
+  let coordenadas: Array<{ lat: number; lng: number; label?: string }> = [];
+  let buscaExploratoria = false;
 
-  if (!cleanDoc) {
+  if (typeof param === 'string') {
+    cleanDoc = String(param || '').replace(/\D/g, '');
+    processo = processoArg || '';
+  } else if (param && typeof param === 'object') {
+    cleanDoc = String(param.cpfCnpj || '').replace(/\D/g, '');
+    processo = String(param.processo || '').trim();
+    processos = Array.isArray(param.processos) ? param.processos.filter(Boolean) : [];
+    nome = String(param.nome || '').trim();
+    car = String(param.car || '').trim();
+    cars = Array.isArray(param.cars) ? param.cars.filter(Boolean) : [];
+    coordenadas = Array.isArray(param.coordenadas) ? param.coordenadas : [];
+    buscaExploratoria = Boolean(param.buscaExploratoria);
+  }
+
+  const hasConfirmatory = Boolean(
+    cleanDoc || car || cars.length > 0 || processo || processos.length > 0 || coordenadas.length > 0
+  );
+  const useExploratoryName = Boolean(nome && (buscaExploratoria || !hasConfirmatory));
+
+  if (!hasConfirmatory && !useExploratoryName) {
     return {
       sucesso: false,
-      cpfCnpjConsultado: '',
+      criteriosUtilizados: {
+        temCpfCnpj: false,
+        buscaExploratoria: false
+      },
+      carImoveis: [],
       licencas: [],
       notificacoes: [],
       autosInfracao: [],
@@ -187,24 +239,114 @@ export async function consultarDocumentosSema(
       outros: [],
       totalRegistros: 0,
       consultadoEm: new Date().toISOString(),
-      mensagemStatus: 'Informe um CPF ou CNPJ válido com dígitos numéricos.',
+      mensagemStatus:
+        'Informe ao menos um critério válido (CPF/CNPJ, Nº do CAR/MT, Processo ou busca por Nome).',
       camadasConsultadas: []
     };
   }
 
   try {
-    const params = new URLSearchParams({ cpfCnpj: cleanDoc });
-    if (processo && processo.trim()) {
-      params.set('processo', processo.trim());
+    let res: Response;
+    const usePost = Boolean(
+      cleanDoc || cars.length > 0 || processos.length > 0 || coordenadas.length > 0 || nome
+    );
+
+    if (usePost) {
+      res = await fetch('/api/sema-documentos', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json'
+        },
+        body: JSON.stringify({
+          ...(cleanDoc ? { cpfCnpj: cleanDoc } : {}),
+          ...(car ? { car } : {}),
+          ...(cars.length > 0 ? { cars } : {}),
+          ...(processo ? { processo } : {}),
+          ...(processos.length > 0 ? { processos } : {}),
+          ...(coordenadas.length > 0 ? { coordenadas } : {}),
+          ...(nome ? { nome } : {}),
+          ...(useExploratoryName ? { buscaExploratoria: true } : {})
+        })
+      });
+    } else {
+      const params = new URLSearchParams();
+      if (processo) params.set('processo', processo);
+      if (car) params.set('car', car);
+
+      res = await fetch(`/api/sema-documentos?${params.toString()}`, {
+        method: 'GET',
+        headers: { Accept: 'application/json' }
+      });
     }
 
-    const res = await fetch(`/api/sema-documentos?${params.toString()}`);
-    const data = await res.json();
-    return data;
+    const data = await res.json().catch(() => null);
+    if (!res.ok || !data || data.error) {
+      const errMsg = data?.error || `Falha ao consultar a base pública da SEMA-MT (HTTP ${res.status}).`;
+      return {
+        sucesso: false,
+        criteriosUtilizados: {
+          temCpfCnpj: Boolean(cleanDoc),
+          car: car || undefined,
+          cars: cars.length > 0 ? cars : undefined,
+          processo: processo || undefined,
+          processos: processos.length > 0 ? processos : undefined,
+          coordenadasCount: coordenadas.length,
+          nomeExploratorio: useExploratoryName ? nome : undefined,
+          buscaExploratoria: useExploratoryName
+        },
+        carImoveis: [],
+        licencas: [],
+        notificacoes: [],
+        autosInfracao: [],
+        termosEmbargo: [],
+        outros: [],
+        totalRegistros: 0,
+        consultadoEm: data?.consultadoEm || new Date().toISOString(),
+        mensagemStatus: errMsg,
+        erroGeral: errMsg,
+        camadasConsultadas: []
+      };
+    }
+
+    return {
+      sucesso: Boolean(data.sucesso),
+      criteriosUtilizados: data.criteriosUtilizados || {
+        temCpfCnpj: Boolean(cleanDoc),
+        car: car || undefined,
+        cars: cars.length > 0 ? cars : undefined,
+        processo: processo || undefined,
+        processos: processos.length > 0 ? processos : undefined,
+        coordenadasCount: coordenadas.length,
+        nomeExploratorio: useExploratoryName ? nome : undefined,
+        buscaExploratoria: useExploratoryName
+      },
+      carImoveis: Array.isArray(data.carImoveis) ? data.carImoveis : [],
+      licencas: Array.isArray(data.licencas) ? data.licencas : [],
+      notificacoes: Array.isArray(data.notificacoes) ? data.notificacoes : [],
+      autosInfracao: Array.isArray(data.autosInfracao) ? data.autosInfracao : [],
+      termosEmbargo: Array.isArray(data.termosEmbargo) ? data.termosEmbargo : [],
+      outros: Array.isArray(data.outros) ? data.outros : [],
+      totalRegistros: Number(data.totalRegistros || 0),
+      consultadoEm: data.consultadoEm || new Date().toISOString(),
+      mensagemStatus: String(data.mensagemStatus || ''),
+      camadasConsultadas: Array.isArray(data.camadasConsultadas) ? data.camadasConsultadas : []
+    };
   } catch (err: any) {
+    const errMsg = err?.message || 'Falha de comunicação ao consultar a base pública da SEMA-MT.';
     return {
       sucesso: false,
-      cpfCnpjConsultado: cleanDoc,
+      criteriosUtilizados: {
+        temCpfCnpj: Boolean(cleanDoc),
+        car: car || undefined,
+        cars: cars.length > 0 ? cars : undefined,
+        processo: processo || undefined,
+        processos: processos.length > 0 ? processos : undefined,
+        coordenadasCount: coordenadas.length,
+        nomeExploratorio: useExploratoryName ? nome : undefined,
+        buscaExploratoria: useExploratoryName
+      },
+      carImoveis: [],
       licencas: [],
       notificacoes: [],
       autosInfracao: [],
@@ -212,24 +354,33 @@ export async function consultarDocumentosSema(
       outros: [],
       totalRegistros: 0,
       consultadoEm: new Date().toISOString(),
-      mensagemStatus: err?.message || 'Falha ao consultar documentos no Geoportal SEMA-MT.',
+      mensagemStatus: errMsg,
+      erroGeral: errMsg,
       camadasConsultadas: []
     };
   }
 }
 
 /**
- * Dispara atualização manual da base de consulta do Geoportal SEMA-MT.
+ * Dispara atualização manual da base de cache do Geoportal SEMA-MT.
+ * Envia o token JWT da sessão autenticada do usuário no Supabase para validação no servidor.
  */
 export async function dispararSincronizacaoGeoportal(
   authToken?: string
 ): Promise<GeoportalSyncResult> {
   try {
+    let tokenToUse = authToken?.trim() || '';
+
+    if (!tokenToUse && isSupabaseConfigured() && supabase) {
+      const { data } = await supabase.auth.getSession();
+      tokenToUse = data?.session?.access_token || '';
+    }
+
     const headers: Record<string, string> = {
       'Content-Type': 'application/json'
     };
-    if (authToken) {
-      headers['Authorization'] = `Bearer ${authToken}`;
+    if (tokenToUse) {
+      headers['Authorization'] = `Bearer ${tokenToUse}`;
     }
 
     const res = await fetch('/api/car-sync', {
@@ -237,15 +388,19 @@ export async function dispararSincronizacaoGeoportal(
       headers
     });
 
-    const data = await res.json();
-    if (!res.ok) {
+    const data = await res.json().catch(() => null);
+    if (!res.ok || (!data?.sucesso && data?.status !== 'parcial')) {
       return {
         sucesso: false,
-        sincronizadoEm: new Date().toISOString(),
-        registrosProcessados: 0,
-        camadas: [],
-        status: 'falha',
-        mensagemErro: data?.error || `Falha na sincronização (HTTP ${res.status}).`
+        sincronizadoEm: data?.sincronizadoEm || new Date().toISOString(),
+        registrosProcessados: Number(data?.registrosProcessados || 0),
+        camadas: Array.isArray(data?.camadas) ? data.camadas : [],
+        status: data?.status === 'parcial' ? 'parcial' : 'falha',
+        mensagem: data?.mensagem,
+        mensagemErro:
+          data?.mensagemErro ||
+          data?.error ||
+          `Falha na sincronização (HTTP ${res.status}).`
       };
     }
 
@@ -263,7 +418,7 @@ export async function dispararSincronizacaoGeoportal(
 }
 
 /**
- * Consulta status da última sincronização do Geoportal.
+ * Consulta status da última sincronização do Geoportal (somente leitura via GET).
  */
 export async function obterStatusSincronizacaoGeoportal(): Promise<{
   ultimaSincronizacao?: string;

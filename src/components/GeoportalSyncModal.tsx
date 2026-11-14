@@ -26,6 +26,7 @@ export function GeoportalSyncModal({
     registrosSincronizados: number;
   }>({ status: 'ocioso', registrosSincronizados: 0 });
 
+  // Validação visual apenas; a validação autoritativa é aplicada no servidor (api/car-sync.ts)
   const isAuthorized = userRole === 'Administrador' || userRole === 'Analista';
 
   useEffect(() => {
@@ -57,7 +58,11 @@ export function GeoportalSyncModal({
           registrosSincronizados: res.registrosProcessados
         });
         if (onSuccess) {
-          onSuccess(`Sincronização concluída com sucesso: ${res.registrosProcessados} registros processados.`);
+          onSuccess(
+            res.status === 'parcial'
+              ? `Sincronização parcial concluída: ${res.registrosProcessados} registros processados (retomará na próxima execução).`
+              : `Sincronização concluída com sucesso: ${res.registrosProcessados} registros processados.`
+          );
         }
       }
     } catch (err: any) {
@@ -99,7 +104,7 @@ export function GeoportalSyncModal({
               </div>
               <div>
                 <span style={{ color: '#64748b' }}>Situação: </span>
-                <span className={`badge ${lastSyncInfo.status === 'sucesso' ? 'green' : lastSyncInfo.status === 'em_andamento' ? 'blue' : 'gray'}`}>
+                <span className={`badge ${lastSyncInfo.status === 'sucesso' ? 'green' : lastSyncInfo.status === 'em_andamento' ? 'blue' : lastSyncInfo.status === 'parcial' ? 'amber' : 'gray'}`}>
                   {lastSyncInfo.status.toUpperCase()}
                 </span>
               </div>
@@ -110,7 +115,7 @@ export function GeoportalSyncModal({
           {isConfirming && !isLoading && !syncResult && (
             <div>
               <p style={{ fontSize: '13px', color: '#334155', lineHeight: '1.5', marginBottom: '14px' }}>
-                Esta rotina consulta o serviço WFS do <strong>Geoportal da SEMA-MT</strong> (camadas confirmadas CAR_ATP, Fiscalização e Licenciamento) e atualiza a base local de referência em lotes seguros.
+                Esta rotina consulta a base pública da <strong>SEMA-MT</strong> (CAR/MT, Fiscalização e Licenciamento) e atualiza a base de referência em lotes seguros.
               </p>
 
               <div style={{
@@ -122,7 +127,7 @@ export function GeoportalSyncModal({
                 color: '#166534',
                 marginBottom: '14px'
               }}>
-                ✓ <strong>Operação segura:</strong> Não altera nem exclui registros das tabelas operacionais de empreendedores ou barragens. As credenciais e authkeys permanecem estritamente no servidor.
+                ✓ <strong>Operação segura:</strong> Não altera nem exclui registros das tabelas operacionais de empreendedores ou barragens. As credenciais de acesso permanecem isoladas no servidor.
               </div>
 
               {!isAuthorized && (
@@ -154,26 +159,30 @@ export function GeoportalSyncModal({
             </div>
           )}
 
-          {/* Resultado com Sucesso */}
+          {/* Resultado com Sucesso ou Parcial */}
           {syncResult && (
             <div style={{
               padding: '14px',
-              backgroundColor: '#f0fdf4',
-              border: '1px solid #bbf7d0',
+              backgroundColor: syncResult.status === 'parcial' ? '#fffbeb' : '#f0fdf4',
+              border: syncResult.status === 'parcial' ? '1px solid #fde68a' : '1px solid #bbf7d0',
               borderRadius: '6px',
               marginBottom: '14px'
             }}>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: '#166534', fontWeight: 600, fontSize: '14px', marginBottom: '6px' }}>
-                <span>✓</span>
-                <span>Sincronização concluída com sucesso!</span>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', color: syncResult.status === 'parcial' ? '#92400e' : '#166534', fontWeight: 600, fontSize: '14px', marginBottom: '6px' }}>
+                <span>{syncResult.status === 'parcial' ? '⏳' : '✓'}</span>
+                <span>
+                  {syncResult.status === 'parcial'
+                    ? 'Sincronização parcial salva (pronta para retomada)'
+                    : 'Sincronização concluída com sucesso!'}
+                </span>
               </div>
-              <div style={{ fontSize: '12px', color: '#15803d', lineHeight: '1.5' }}>
+              <div style={{ fontSize: '12px', color: syncResult.status === 'parcial' ? '#78350f' : '#15803d', lineHeight: '1.5' }}>
                 <div><strong>Horário:</strong> {new Date(syncResult.sincronizadoEm).toLocaleString('pt-BR')}</div>
                 <div><strong>Registros consultados/processados:</strong> {syncResult.registrosProcessados}</div>
-                <div><strong>Camadas abrangidas:</strong> {syncResult.camadas?.join(', ') || 'CAR_ATP'}</div>
-                <div style={{ marginTop: '6px', fontSize: '11px', color: '#166534' }}>
-                  A base local de consulta foi atualizada e está pronta para uso pelos analistas.
-                </div>
+                <div><strong>Bases abrangidas:</strong> {syncResult.camadas?.join(', ') || 'CAR / Imóveis'}</div>
+                {syncResult.mensagem && (
+                  <div style={{ marginTop: '4px' }}>{syncResult.mensagem}</div>
+                )}
               </div>
             </div>
           )}

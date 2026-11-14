@@ -629,7 +629,7 @@ export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
                   lineHeight: '1.45'
                 }}
               >
-                <strong>Acesso Institucional:</strong> Sua solicitação será registrada como <em>Pendente</em> e enviada para o <em>Gerenciamento de Usuários</em> para análise da administração. Após a aprovação do seu perfil, você receberá um link oficial do Supabase Auth para definição segura da sua senha.
+                <strong>Acesso Institucional:</strong> Sua solicitação será registrada como <em>Pendente</em> e enviada para o <em>Gerenciamento de Usuários</em> para análise da administração. Após a aprovação do seu perfil, você receberá um link oficial por e-mail para definição segura da sua senha.
               </div>
 
               <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '12px' }}>

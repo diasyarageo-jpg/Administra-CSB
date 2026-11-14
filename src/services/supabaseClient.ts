@@ -38,13 +38,12 @@ export async function checkSupabaseConnection(): Promise<SupabaseConnectionStatu
     return {
       configured: false,
       connected: false,
-      message: 'Variáveis VITE_SUPABASE_URL e/ou VITE_SUPABASE_ANON_KEY não configuradas.'
+      message: 'Conexão com o banco de dados central não configurada.'
     };
   }
 
   const start = performance.now();
   try {
-    // Tenta uma consulta simples de leitura em empreendedores ou municipios
     const { error } = await supabase
       .from('empreendedores')
       .select('id', { count: 'exact', head: true });
@@ -52,12 +51,11 @@ export async function checkSupabaseConnection(): Promise<SupabaseConnectionStatu
     const latencyMs = Math.round(performance.now() - start);
 
     if (error) {
-      // Se der erro de RLS ou tabela inexistente, detalha claramente
       return {
         configured: true,
         connected: false,
         latencyMs,
-        message: `Falha na consulta ao Supabase: ${error.message} (${error.code || 'sem código'})`
+        message: `Falha na consulta à base central: ${error.message}`
       };
     }
 
@@ -65,7 +63,7 @@ export async function checkSupabaseConnection(): Promise<SupabaseConnectionStatu
       configured: true,
       connected: true,
       latencyMs,
-      message: `Conectado com sucesso ao Supabase (${latencyMs}ms).`
+      message: `Conectado com sucesso à base central (${latencyMs}ms).`
     };
   } catch (err: any) {
     const latencyMs = Math.round(performance.now() - start);
@@ -73,7 +71,7 @@ export async function checkSupabaseConnection(): Promise<SupabaseConnectionStatu
       configured: true,
       connected: false,
       latencyMs,
-      message: `Erro de rede ou conexão ao Supabase: ${err?.message || 'Indisponível'}`
+      message: `Erro de rede ou conexão com a base central: ${err?.message || 'Indisponível'}`
     };
   }
 }

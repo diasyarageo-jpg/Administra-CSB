@@ -1,6 +1,8 @@
 // src/components/VisualizacaoModal.tsx
 import React, { useState } from 'react';
 import { parseCoordAdvanced, decimalToGms } from '../services/coordService';
+import { getEmpreendedorVinculos } from '../services/notificaDataService';
+import { formatCpfCnpjReadable } from '../config/carCampos';
 
 interface VisualizacaoModalProps {
   moduleKey: string;
@@ -106,6 +108,7 @@ export function VisualizacaoModal({
   }
 
   const linkedEmpObj = moduleKey === 'barragens' ? resolveEmpreendedorObj(record.empreendedor) : null;
+  const empVinculos = moduleKey === 'empreendedores' ? getEmpreendedorVinculos(record, db.barragens || []) : null;
   const docsBarragem = moduleKey === 'barragens' ? getDocumentosDaBarragem(record.id, record.nome || '') : [];
 
   return (
@@ -113,12 +116,12 @@ export function VisualizacaoModal({
       <div className="modal" style={{ width: 'min(860px, 98vw)', maxHeight: '92vh', display: 'flex', flexDirection: 'column' }}>
         {/* Cabeçalho do Modal de Visualização */}
         <div className="modal-head" style={{ borderBottom: '1px solid #e2e8f0', paddingBottom: '12px' }}>
-          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
-            <span style={{ fontSize: '18px', color: '#0284c7' }}>{moduloIcone}</span>
-            <div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
-                <h3 style={{ margin: 0, fontSize: '16px', color: '#0f172a' }}>
-                  {record.nome || record.nomeBarragem || 'Detalhes do Registro'}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap', flex: 1, minWidth: 0 }}>
+            <span style={{ fontSize: '18px', color: '#0284c7', flexShrink: 0 }}>{moduloIcone}</span>
+            <div style={{ minWidth: 0, flex: 1 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                <h3 style={{ margin: 0, fontSize: '16px', color: '#0f172a', wordBreak: 'break-word' }}>
+                  {record.nome || record.nomeBarragem || record.razaoSocial || record.nomeFantasia || 'Detalhes do Registro'}
                 </h3>
                 <span
                   style={{
@@ -167,7 +170,7 @@ export function VisualizacaoModal({
               onClick={() => setActiveTab('vinculos')}
               style={{ fontSize: '11.5px', borderRadius: '6px 6px 0 0' }}
             >
-              Empreendimentos / Imóveis ({record.empreendimentos?.length || 0})
+              Imóveis e Barragens ({(record.empreendimentos?.length || 0) + (empVinculos?.barragensVinculadas.length || 0)})
             </button>
           )}
           {moduleKey === 'barragens' && (
@@ -199,18 +202,66 @@ export function VisualizacaoModal({
              ===================================================================== */}
           {moduleKey === 'empreendedores' && (
             <>
+              {/* Faixa permanente com identificação principal do empreendedor */}
+              <div
+                style={{
+                  background: 'linear-gradient(135deg, #f8fafc 0%, #f0f9ff 100%)',
+                  border: '1px solid #bae6fd',
+                  borderLeft: '4px solid #0284c7',
+                  borderRadius: '10px',
+                  padding: '14px 16px',
+                  marginBottom: '16px',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'flex-start',
+                  flexWrap: 'wrap',
+                  gap: '12px'
+                }}
+              >
+                <div>
+                  <span style={{ fontSize: '10px', fontWeight: 700, textTransform: 'uppercase', letterSpacing: '0.06em', color: '#0369a1', display: 'block', marginBottom: '2px' }}>
+                    Empreendedor Cadastrado
+                  </span>
+                  <div style={{ fontSize: '18px', fontWeight: 800, color: '#0f172a', lineHeight: 1.25 }}>
+                    {record.nome || record.razaoSocial || record.nomeFantasia || 'Nome não informado'}
+                  </div>
+                  {record.nomeFantasia && (
+                    <div style={{ fontSize: '12.5px', color: '#475569', marginTop: '2px' }}>
+                      Nome Fantasia: <strong style={{ color: '#334155' }}>{record.nomeFantasia}</strong>
+                    </div>
+                  )}
+                </div>
+
+                <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', alignItems: 'center' }}>
+                  <div style={{ background: '#ffffff', border: '1px solid #cbd5e1', borderRadius: '8px', padding: '6px 12px' }}>
+                    <span style={{ fontSize: '10px', color: '#64748b', display: 'block' }}>CPF / CNPJ</span>
+                    <strong style={{ fontSize: '13.5px', color: '#0f172a', fontFamily: 'monospace' }}>
+                      {formatCpfCnpjReadable(record.cpfCnpj) || record.cpfCnpj || '—'}
+                    </strong>
+                  </div>
+                  <div style={{ background: '#ffffff', border: '1px solid #cbd5e1', borderRadius: '8px', padding: '6px 12px' }}>
+                    <span style={{ fontSize: '10px', color: '#64748b', display: 'block' }}>Tipo</span>
+                    <strong style={{ fontSize: '12.5px', color: '#0f172a' }}>{record.tipoPessoa || 'Pessoa jurídica'}</strong>
+                  </div>
+                </div>
+              </div>
+
               {activeTab === 'geral' && (
                 <div style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
                   {/* Grid de Identificação */}
                   <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(220px, 1fr))', gap: '12px' }}>
                     <div style={{ background: '#f8fafc', padding: '10px 14px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
                       <span style={{ fontSize: '11px', color: '#64748b', display: 'block' }}>Nome / Razão Social</span>
-                      <strong style={{ fontSize: '13px', color: '#0f172a' }}>{record.nome || '—'}</strong>
+                      <strong style={{ fontSize: '13.5px', color: '#0f172a' }}>
+                        {record.nome || record.razaoSocial || record.nomeFantasia || '—'}
+                      </strong>
                     </div>
 
                     <div style={{ background: '#f8fafc', padding: '10px 14px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
                       <span style={{ fontSize: '11px', color: '#64748b', display: 'block' }}>CPF / CNPJ</span>
-                      <strong style={{ fontSize: '13px', color: '#0f172a', fontFamily: 'monospace' }}>{record.cpfCnpj || '—'}</strong>
+                      <strong style={{ fontSize: '13.5px', color: '#0f172a', fontFamily: 'monospace' }}>
+                        {formatCpfCnpjReadable(record.cpfCnpj) || record.cpfCnpj || '—'}
+                      </strong>
                     </div>
 
                     <div style={{ background: '#f8fafc', padding: '10px 14px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
@@ -220,26 +271,26 @@ export function VisualizacaoModal({
 
                     <div style={{ background: '#f8fafc', padding: '10px 14px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
                       <span style={{ fontSize: '11px', color: '#64748b', display: 'block' }}>Nome Fantasia</span>
-                      <span style={{ fontSize: '13px', color: '#334155' }}>{record.nomeFantasia || '—'}</span>
+                      <strong style={{ fontSize: '13px', color: '#334155' }}>{record.nomeFantasia || '—'}</strong>
                     </div>
 
                     <div style={{ background: '#f8fafc', padding: '10px 14px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
                       <span style={{ fontSize: '11px', color: '#64748b', display: 'block' }}>E-mail Institucional</span>
-                      <span style={{ fontSize: '13px', color: '#334155' }}>{record.email || '—'}</span>
+                      <strong style={{ fontSize: '13px', color: '#334155', wordBreak: 'break-word' }}>{record.email || '—'}</strong>
                     </div>
 
                     <div style={{ background: '#f8fafc', padding: '10px 14px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
                       <span style={{ fontSize: '11px', color: '#64748b', display: 'block' }}>Telefone de Contato</span>
-                      <span style={{ fontSize: '13px', color: '#334155' }}>{record.telefone || '—'}</span>
+                      <strong style={{ fontSize: '13px', color: '#334155' }}>{record.telefone || '—'}</strong>
                     </div>
 
                     <div style={{ background: '#f8fafc', padding: '10px 14px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
                       <span style={{ fontSize: '11px', color: '#64748b', display: 'block' }}>Município / UF</span>
                       <strong style={{ fontSize: '13px', color: '#0f172a' }}>
-                        {record.municipio ? `${record.municipio}${record.uf ? `/${record.uf}` : ''}` : '—'}
+                        {record.municipio ? `${record.municipio}${record.uf ? `/${record.uf}` : ''}` : (record.uf || '—')}
                       </strong>
                       {record.municipioIbge && (
-                        <span style={{ fontSize: '10px', color: '#64748b', display: 'block' }}>
+                        <span style={{ fontSize: '10.5px', color: '#64748b', display: 'block' }}>
                           Código IBGE: {record.municipioIbge}
                         </span>
                       )}
@@ -253,8 +304,8 @@ export function VisualizacaoModal({
                     </div>
                   </div>
 
-                  {/* Atalho para Consulta Geoportal SEMA se houver CPF/CNPJ */}
-                  {record.cpfCnpj && onOpenSemaDocs && (
+                  {/* Atalho para Consulta Geoportal SEMA (CAR/Imóveis, Licenças e Autos) */}
+                  {(record.cpfCnpj || record.nome || (empVinculos && (empVinculos.cars.length > 0 || empVinculos.coordenadas.length > 0))) && onOpenSemaDocs && (
                     <div style={{
                       backgroundColor: '#f0f9ff',
                       border: '1px solid #bae6fd',
@@ -268,10 +319,10 @@ export function VisualizacaoModal({
                     }}>
                       <div>
                         <strong style={{ fontSize: '12px', color: '#0369a1', display: 'block' }}>
-                          Integração com Geoportal SEMA-MT:
+                          Consulta Pública na Base da SEMA-MT:
                         </strong>
                         <span style={{ fontSize: '11px', color: '#475569' }}>
-                          Consulte licenças ambientais, notificações de fiscalização e autos cadastrados na SEMA.
+                          Consulte imóveis rurais no CAR/MT, licenças ambientais, notificações e autos de infração da SEMA-MT.
                         </span>
                       </div>
                       <button
@@ -280,17 +331,74 @@ export function VisualizacaoModal({
                         style={{ backgroundColor: '#0284c7', color: '#ffffff' }}
                         onClick={() => onOpenSemaDocs(record)}
                       >
-                        🔍 Ver Documentos SEMA
+                        🔍 Consultar CAR / Imóveis e Documentos SEMA
                       </button>
                     </div>
                   )}
+
+                  {/* Resumo direto de Barragens Vinculadas e Imóveis na visão geral */}
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(300px, 1fr))', gap: '12px' }}>
+                    <div style={{ background: '#ffffff', padding: '12px 14px', borderRadius: '8px', border: '1px solid #cbd5e1' }}>
+                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+                        <strong style={{ fontSize: '12.5px', color: '#0f172a' }}>
+                          Barragens Vinculadas ({empVinculos?.barragensVinculadas.length || 0})
+                        </strong>
+                        {empVinculos && empVinculos.cars.length > 0 && (
+                          <span style={{ fontSize: '10.5px', color: '#0369a1', fontWeight: 600 }}>
+                            {empVinculos.cars.length} CAR(s)
+                          </span>
+                        )}
+                      </div>
+                      {!empVinculos || empVinculos.barragensVinculadas.length === 0 ? (
+                        <span style={{ fontSize: '12px', color: '#64748b' }}>Nenhuma barragem vinculada.</span>
+                      ) : (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                          {empVinculos.barragensVinculadas.map((bar: any, idx: number) => (
+                            <div key={bar.id || idx} style={{ padding: '8px 10px', background: '#f8fafc', borderRadius: '6px', border: '1px solid #e2e8f0', fontSize: '12px' }}>
+                              <strong style={{ color: '#0f172a', display: 'block' }}>{bar.nome || bar.nomeBarragem || 'Barragem'}</strong>
+                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', marginTop: '3px', color: '#475569', fontSize: '11.5px' }}>
+                                <span>CAR/MT: <strong style={{ color: '#0369a1' }}>{bar.car || 'Não informado'}</strong></span>
+                                {bar.processo && <span>Processo: <strong>{bar.processo}</strong></span>}
+                                {bar.municipio && <span>Município: {bar.municipio}</span>}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+
+                    <div style={{ background: '#ffffff', padding: '12px 14px', borderRadius: '8px', border: '1px solid #cbd5e1' }}>
+                      <strong style={{ fontSize: '12.5px', color: '#0f172a', display: 'block', marginBottom: '8px' }}>
+                        Empreendimentos e Imóveis ({record.empreendimentos?.length || 0})
+                      </strong>
+                      {!record.empreendimentos || record.empreendimentos.length === 0 ? (
+                        <span style={{ fontSize: '12px', color: '#64748b' }}>Nenhum empreendimento cadastrado diretamente.</span>
+                      ) : (
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                          {record.empreendimentos.map((emp: any, idx: number) => (
+                            <div key={emp.id || idx} style={{ padding: '8px 10px', background: '#f8fafc', borderRadius: '6px', border: '1px solid #e2e8f0', fontSize: '12px' }}>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', gap: '6px' }}>
+                                <strong style={{ color: '#0f172a' }}>{emp.nome || 'Imóvel'}</strong>
+                                <span style={{ fontSize: '10.5px', color: '#64748b' }}>{emp.tipo || 'Rural'}</span>
+                              </div>
+                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', marginTop: '3px', color: '#475569', fontSize: '11.5px' }}>
+                                {emp.car && <span>CAR/MT: <strong style={{ color: '#0369a1' }}>{emp.car}</strong></span>}
+                                {emp.escritura && <span>Escritura: <strong>{emp.escritura}</strong></span>}
+                                {emp.municipio && <span>{emp.municipio}{emp.uf ? `/${emp.uf}` : ''}</span>}
+                              </div>
+                            </div>
+                          ))}
+                        </div>
+                      )}
+                    </div>
+                  </div>
 
                   {/* Observações */}
                   <div style={{ background: '#f8fafc', padding: '12px 14px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
                     <span style={{ fontSize: '11px', color: '#64748b', display: 'block', fontWeight: 600, marginBottom: '4px' }}>
                       Observações e Informações Complementares
                     </span>
-                    <p style={{ margin: 0, fontSize: '12px', color: '#334155', whiteSpace: 'pre-wrap' }}>
+                    <p style={{ margin: 0, fontSize: '12.5px', color: '#334155', whiteSpace: 'pre-wrap' }}>
                       {record.observacoes || 'Nenhuma observação informada.'}
                     </p>
                   </div>
@@ -298,41 +406,81 @@ export function VisualizacaoModal({
               )}
 
               {activeTab === 'vinculos' && (
-                <div>
-                  <h4 style={{ fontSize: '13px', margin: '0 0 10px', color: '#334155' }}>
-                    Empreendimentos e Imóveis Rurais Cadastrados ({record.empreendimentos?.length || 0})
-                  </h4>
-                  {(!record.empreendimentos || record.empreendimentos.length === 0) ? (
-                    <div style={{ textAlign: 'center', padding: '24px', color: '#64748b', fontSize: '12px' }}>
-                      Nenhum empreendimento ou imóvel rural vinculado a este empreendedor.
-                    </div>
-                  ) : (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
-                      {record.empreendimentos.map((emp: any, i: number) => (
-                        <div key={emp.id || i} style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '12px 14px' }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
-                            <div>
-                              <strong style={{ fontSize: '13px', color: '#0f172a' }}>{emp.nome}</strong>
-                              <span className="badge gray" style={{ marginLeft: '8px', fontSize: '10px' }}>{emp.tipo || 'Rural'}</span>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '18px' }}>
+                  <div>
+                    <h4 style={{ fontSize: '13px', margin: '0 0 10px', color: '#334155' }}>
+                      Barragens Vinculadas ({empVinculos?.barragensVinculadas.length || 0})
+                    </h4>
+                    {!empVinculos || empVinculos.barragensVinculadas.length === 0 ? (
+                      <div style={{ textAlign: 'center', padding: '16px', color: '#64748b', fontSize: '12px', background: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+                        Nenhuma barragem vinculada a este empreendedor.
+                      </div>
+                    ) : (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                        {empVinculos.barragensVinculadas.map((bar: any, i: number) => (
+                          <div key={bar.id || i} style={{ background: '#f8fafc', border: '1px solid #cbd5e1', borderRadius: '8px', padding: '10px 14px' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '6px' }}>
+                              <strong style={{ fontSize: '13px', color: '#0f172a' }}>{bar.nome || bar.nomeBarragem || 'Barragem'}</strong>
+                              <span style={{ fontSize: '11px', color: '#64748b' }}>{bar.municipio || 'MT'}</span>
                             </div>
-                            <span style={{ fontSize: '11px', color: '#64748b' }}>
-                              {emp.municipio ? `${emp.municipio}${emp.uf ? `/${emp.uf}` : ''}` : '—'}
-                            </span>
+                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '14px', marginTop: '6px', fontSize: '12px', color: '#334155' }}>
+                              <div>
+                                <span style={{ color: '#64748b' }}>CAR/MT: </span>
+                                <strong style={{ fontFamily: 'monospace', color: '#0284c7' }}>{bar.car || '—'}</strong>
+                              </div>
+                              <div>
+                                <span style={{ color: '#64748b' }}>Processo SEMA: </span>
+                                <span>{bar.processo || '—'}</span>
+                              </div>
+                              {(bar.latitude || bar.longitude) && (
+                                <div>
+                                  <span style={{ color: '#64748b' }}>Coordenadas: </span>
+                                  <span style={{ fontFamily: 'monospace' }}>{bar.latitude || '—'} / {bar.longitude || '—'}</span>
+                                </div>
+                              )}
+                            </div>
                           </div>
-                          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '8px', marginTop: '8px', fontSize: '12px' }}>
-                            <div>
-                              <span style={{ color: '#64748b' }}>CAR/MT: </span>
-                              <strong style={{ fontFamily: 'monospace' }}>{emp.car || '—'}</strong>
+                        ))}
+                      </div>
+                    )}
+                  </div>
+
+                  <div>
+                    <h4 style={{ fontSize: '13px', margin: '0 0 10px', color: '#334155' }}>
+                      Empreendimentos e Imóveis Rurais Cadastrados ({record.empreendimentos?.length || 0})
+                    </h4>
+                    {(!record.empreendimentos || record.empreendimentos.length === 0) ? (
+                      <div style={{ textAlign: 'center', padding: '20px', color: '#64748b', fontSize: '12px', background: '#f8fafc', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+                        Nenhum empreendimento ou imóvel rural vinculado diretamente a este empreendedor.
+                      </div>
+                    ) : (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '10px' }}>
+                        {record.empreendimentos.map((emp: any, i: number) => (
+                          <div key={emp.id || i} style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '12px 14px' }}>
+                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start' }}>
+                              <div>
+                                <strong style={{ fontSize: '13px', color: '#0f172a' }}>{emp.nome}</strong>
+                                <span className="badge gray" style={{ marginLeft: '8px', fontSize: '10px' }}>{emp.tipo || 'Rural'}</span>
+                              </div>
+                              <span style={{ fontSize: '11px', color: '#64748b' }}>
+                                {emp.municipio ? `${emp.municipio}${emp.uf ? `/${emp.uf}` : ''}` : '—'}
+                              </span>
                             </div>
-                            <div>
-                              <span style={{ color: '#64748b' }}>Matrícula / Escritura: </span>
-                              <span>{emp.escritura || '—'}</span>
+                            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))', gap: '8px', marginTop: '8px', fontSize: '12px' }}>
+                              <div>
+                                <span style={{ color: '#64748b' }}>CAR/MT: </span>
+                                <strong style={{ fontFamily: 'monospace' }}>{emp.car || '—'}</strong>
+                              </div>
+                              <div>
+                                <span style={{ color: '#64748b' }}>Matrícula / Escritura: </span>
+                                <span>{emp.escritura || '—'}</span>
+                              </div>
                             </div>
                           </div>
-                        </div>
-                      ))}
-                    </div>
-                  )}
+                        ))}
+                      </div>
+                    )}
+                  </div>
                 </div>
               )}
             </>

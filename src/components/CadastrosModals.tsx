@@ -11,7 +11,7 @@ import {
   resolveDamEmpreendimento,
   resolveDamName
 } from '../App';
-import { RtVinculo, cleanCpf, cleanRegistro } from '../services/notificaDataService';
+import { RtVinculo, cleanCpf, cleanRegistro, getEmpreendedorVinculos } from '../services/notificaDataService';
 import {
   consultarCarPorCoordenada
 } from '../services/carLookupService';
@@ -21,6 +21,120 @@ import {
   formatGmsInput,
   decimalToGms
 } from '../services/coordService';
+import {
+  SemaCadastroLookupPanel,
+  SemaCampoComparacao,
+  SemaSearchMeta,
+  normalizeTextCompare
+} from './SemaCadastroLookupPanel';
+import { SemaDocumentoItem } from '../types/carLookup';
+import {
+  SEMA_FIELD_CANDIDATES,
+  formatCpfCnpjReadable,
+  formatSemaPropertiesEntries,
+  stripOuterQuotesAndBrackets
+} from '../config/carCampos';
+
+function cleanSemaRawText(val: any): string {
+  if (val === undefined || val === null) return '';
+  const s = stripOuterQuotesAndBrackets(String(val)).replace(/"/g, '').trim();
+  if (!s || ['nan', 'null', 'undefined'].includes(s.toLowerCase())) return '';
+  return s;
+}
+
+function extractCleanSemaOwnerName(raw: any): string {
+  const base = cleanSemaRawText(raw);
+  if (!base) return '';
+  return base
+    .replace(/^\[+|\]+$/g, '')
+    .replace(/\s*\((?:[\d*xX]{2,3}\.[\d*xX]{3}\.[\d*xX]{3}(?:\/[\d*xX]{4})?-[\d*xX]{2}|[xX*]{11,14})\)/g, '')
+    .replace(/\s+/g, ' ')
+    .replace(/^,\s*|,\s*$/g, '')
+    .trim();
+}
+
+function formatCpfCnpjDigits(digits: string): string {
+  return formatCpfCnpjReadable(digits) || '';
+}
+
+function extractValidCpfCnpjFromSema(
+  item: SemaDocumentoItem,
+  meta: SemaSearchMeta
+): string {
+  const props = item.propriedadesBrutas || {};
+  for (const cand of SEMA_FIELD_CANDIDATES.documento) {
+    const matchedKey = Object.keys(props).find(k => k.toLowerCase() === cand.toLowerCase());
+    const rawProp = matchedKey ? cleanSemaRawText(props[matchedKey]) : '';
+    if (rawProp && !/[x*]/i.test(rawProp)) {
+      const d = rawProp.replace(/\D/g, '');
+      if (d.length === 11 || d.length === 14) {
+        return formatCpfCnpjDigits(d);
+      }
+    }
+  }
+
+  if (item.cpfCnpjMascarado && !/[x*]/i.test(item.cpfCnpjMascarado)) {
+    const d = item.cpfCnpjMascarado.replace(/\D/g, '');
+    if (d.length === 11 || d.length === 14) {
+      return formatCpfCnpjDigits(d);
+    }
+  }
+
+  const ownerText = [
+    item.razaoSocial,
+    props.NOMESPROPRIETARIOS,
+    props.PROPRIETARIOS,
+    props.RAZAO_SOCIAL
+  ]
+    .map(v => cleanSemaRawText(v))
+    .filter(Boolean)
+    .join(' ');
+  if (ownerText) {
+    const match =
+      ownerText.match(/\b\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}\b/) ||
+      ownerText.match(/\b\d{3}\.\d{3}\.\d{3}-\d{2}\b/) ||
+      ownerText.match(/(?<![\d/.\-])(\d{14}|\d{11})(?![\d/.\-])/);
+    if (match?.[0]) {
+      return formatCpfCnpjDigits(match[0]);
+    }
+  }
+
+  if ((meta.mode === 'cpf' || meta.mode === 'cnpj') && (meta.queryDigits.length === 11 || meta.queryDigits.length === 14)) {
+    return formatCpfCnpjDigits(meta.queryDigits);
+  }
+  return '';
+}
+
+function resolveMtLocalidadeFromSema(
+  item: SemaDocumentoItem,
+  mtMunList: IbgeMunicipio[]
+): { uf: string; municipio: string; municipioIbge: string } {
+  const cod = cleanSemaRawText(item.municipioCodigo || item.propriedadesBrutas?.MUNICIPIO_CODIGO || item.propriedadesBrutas?.COD_IBGE);
+  if (cod && mtMunList.length > 0) {
+    const foundById = mtMunList.find(m => String(m.id) === cod);
+    if (foundById) {
+      return { uf: 'MT', municipio: foundById.nome, municipioIbge: String(foundById.id) };
+    }
+  }
+
+  const rawMun = cleanSemaRawText(item.municipio || item.propriedadesBrutas?.MUNICIPIO);
+  const munText = rawMun && !/^código ibge/i.test(rawMun) ? rawMun : '';
+  if (munText && mtMunList.length > 0) {
+    const norm = normalizeTextCompare(munText);
+    const foundByName = mtMunList.find(m => normalizeTextCompare(m.nome) === norm);
+    if (foundByName) {
+      return { uf: 'MT', municipio: foundByName.nome, municipioIbge: String(foundByName.id) };
+    }
+  }
+
+  const propUf = cleanSemaRawText(item.propriedadesBrutas?.UF);
+  return {
+    uf: propUf || (cod.startsWith('51') ? 'MT' : ''),
+    municipio: munText,
+    municipioIbge: cod
+  };
+}
+
 
 // ============================================================================
 // 1. MODAL DE EMPREENDEDORES E EMPREENDIMENTOS
@@ -28,14 +142,20 @@ import {
 export function EmpreendedorModal({
   record,
   isNew,
+  barragens = [],
   onClose,
   onSave
 }: {
   record: any;
   isNew: boolean;
+  barragens?: any[];
   onClose: () => void;
   onSave: (savedRecord: any) => void;
 }) {
+  const empVinculos = React.useMemo(
+    () => getEmpreendedorVinculos(record, barragens),
+    [record, barragens]
+  );
   // Informações pessoais do empreendedor
   const [tipoPessoa, setTipoPessoa] = useState<string>(record.tipoPessoa || 'Pessoa jurídica');
   const [nome, setNome] = useState<string>(record.nome || '');
@@ -67,11 +187,13 @@ export function EmpreendedorModal({
   const [ufs, setUfs] = useState<IbgeUf[]>([]);
   const [municipios, setMunicipios] = useState<IbgeMunicipio[]>([]);
   const [novoMunicipios, setNovoMunicipios] = useState<IbgeMunicipio[]>([]);
+  const [mtMunicipiosRef, setMtMunicipiosRef] = useState<IbgeMunicipio[]>([]);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
 
-  // Carrega UFs do IBGE
+  // Carrega UFs e municípios de MT do IBGE
   useEffect(() => {
     getUfs().then(list => setUfs(list)).catch(() => {});
+    getMatoGrossoMunicipios().then(list => setMtMunicipiosRef(list)).catch(() => {});
   }, []);
 
   // Carrega municípios da UF do empreendedor
@@ -167,11 +289,219 @@ export function EmpreendedorModal({
     <div className="modal-back" onClick={e => e.target === e.currentTarget && onClose()}>
       <form className="modal" onSubmit={handleSubmit} style={{ width: 'min(780px, 100%)' }}>
         <div className="modal-head">
-          <h3>{isNew ? 'Novo cadastro' : 'Editar cadastro'} · Empreendedor</h3>
+          <h3 style={{ wordBreak: 'break-word' }}>
+            {isNew ? 'Novo cadastro' : 'Editar cadastro'} · Empreendedor
+            {!isNew && (record?.nome || record?.nomeFantasia) ? ` — ${record.nome || record.nomeFantasia}` : ''}
+          </h3>
           <button type="button" className="modal-close" onClick={onClose}>×</button>
         </div>
 
         <div className="modal-body" style={{ maxHeight: '78vh', overflowY: 'auto' }}>
+          <SemaCadastroLookupPanel
+            entityLabel="Empreendedor"
+            isNew={isNew}
+            allowCar={true}
+            defaultMode={
+              cpfCnpj.replace(/\D/g, '').length === 14
+                ? 'cnpj'
+                : cpfCnpj.replace(/\D/g, '').length === 11
+                ? 'cpf'
+                : empreendimentos.some(e => e.car) || empVinculos.cars.length > 0
+                ? 'car'
+                : 'cpf'
+            }
+            defaultQuery={
+              cpfCnpj.trim() || empreendimentos.find(e => e.car)?.car || empVinculos.cars[0] || ''
+            }
+            buildComparisons={(item, meta) => {
+              const comps: SemaCampoComparacao[] = [];
+              const semaNome = extractCleanSemaOwnerName(
+                item.razaoSocial ||
+                  item.propriedadesBrutas?.RAZAO_SOCIAL ||
+                  item.propriedadesBrutas?.NOMESPROPRIETARIOS ||
+                  item.propriedadesBrutas?.PROPRIETARIOS
+              );
+              const semaCpfCnpj = extractValidCpfCnpjFromSema(item, meta);
+              const semaDocDigits = semaCpfCnpj.replace(/\D/g, '');
+              let semaTipoPessoa = '';
+              if (semaDocDigits.length === 11) semaTipoPessoa = 'Pessoa física';
+              else if (semaDocDigits.length === 14) semaTipoPessoa = 'Pessoa jurídica';
+              else if (meta.mode === 'cpf') semaTipoPessoa = 'Pessoa física';
+              else if (meta.mode === 'cnpj') semaTipoPessoa = 'Pessoa jurídica';
+
+              const loc = resolveMtLocalidadeFromSema(item, mtMunicipiosRef);
+
+              if (semaTipoPessoa) {
+                comps.push({
+                  key: 'tipoPessoa',
+                  label: 'Tipo de pessoa',
+                  currentValue: tipoPessoa,
+                  semaValue: semaTipoPessoa
+                });
+              }
+
+              if (semaNome) {
+                comps.push({
+                  key: 'nome',
+                  label: 'Nome / Razão social',
+                  currentValue: nome,
+                  semaValue: semaNome
+                });
+              }
+
+              if (semaCpfCnpj) {
+                const curDigits = cpfCnpj.replace(/\D/g, '');
+                comps.push({
+                  key: 'cpfCnpj',
+                  label: 'CPF/CNPJ',
+                  currentValue: cpfCnpj,
+                  semaValue: semaCpfCnpj,
+                  isEqual: Boolean(curDigits) && curDigits === semaDocDigits
+                });
+              }
+
+              if (loc.uf) {
+                comps.push({
+                  key: 'uf',
+                  label: 'UF',
+                  currentValue: uf,
+                  semaValue: loc.uf
+                });
+              }
+
+              if (loc.municipio) {
+                comps.push({
+                  key: 'municipio',
+                  label: 'Município',
+                  currentValue: municipio,
+                  semaValue: loc.municipio,
+                  payload: { municipioIbge: loc.municipioIbge, uf: loc.uf }
+                });
+              }
+
+              const propNome = cleanSemaRawText(item.propriedadesBrutas?.NOMEPROPRIEDADE) ||
+                (item.nomeDocumento && item.nomeDocumento !== 'Imóvel sem denominação informada' ? cleanSemaRawText(item.nomeDocumento) : '');
+              const propCar =
+                cleanSemaRawText(item.propriedadesBrutas?.NUMEROESTADUAL) ||
+                cleanSemaRawText(item.carFederal) ||
+                cleanSemaRawText(item.propriedadesBrutas?.CAR_FEDERAL) ||
+                cleanSemaRawText(item.propriedadesBrutas?.CODIGO_CAR_FEDERAL);
+
+              if (propCar || (item.camadaOrigem.includes('CAR') && propNome)) {
+                const normCar = (v: string) => v.replace(/[^a-zA-Z0-9]/g, '').toLowerCase();
+                const existingMatch = empreendimentos.find(
+                  em =>
+                    (propCar && em.car && normCar(em.car) === normCar(propCar)) ||
+                    (propNome && em.nome && normalizeTextCompare(em.nome) === normalizeTextCompare(propNome))
+                );
+                const semaEmpDisplay = `${propNome || 'Imóvel Rural'}${propCar ? ` (CAR: ${propCar})` : ''}`;
+
+                if (existingMatch) {
+                  const curEmpDisplay = `${existingMatch.nome || ''}${existingMatch.car ? ` (CAR: ${existingMatch.car})` : ''}`;
+                  const sameNome = !propNome || normalizeTextCompare(existingMatch.nome) === normalizeTextCompare(propNome);
+                  const sameCar = !propCar || normCar(existingMatch.car || '') === normCar(propCar);
+                  const sameMun = !loc.municipio || !existingMatch.municipio || normalizeTextCompare(existingMatch.municipio) === normalizeTextCompare(loc.municipio);
+                  comps.push({
+                    key: 'empreendimentoRural',
+                    label: 'Empreendimento rural vinculado (CAR)',
+                    currentValue: curEmpDisplay,
+                    semaValue: semaEmpDisplay,
+                    isEqual: sameNome && sameCar && sameMun,
+                    payload: {
+                      existingId: existingMatch.id,
+                      nome: propNome || existingMatch.nome || 'Imóvel Rural',
+                      car: propCar || existingMatch.car || '',
+                      uf: loc.uf || existingMatch.uf || 'MT',
+                      municipio: loc.municipio || existingMatch.municipio || '',
+                      municipioIbge: loc.municipioIbge || existingMatch.municipioIbge || ''
+                    }
+                  });
+                } else {
+                  comps.push({
+                    key: 'empreendimentoRural',
+                    label: 'Adicionar empreendimento rural (CAR SEMA-MT)',
+                    currentValue: '',
+                    semaValue: semaEmpDisplay,
+                    payload: {
+                      nome: propNome || 'Imóvel Rural CAR/MT',
+                      car: propCar,
+                      uf: loc.uf || 'MT',
+                      municipio: loc.municipio,
+                      municipioIbge: loc.municipioIbge
+                    }
+                  });
+                }
+              }
+
+              return comps;
+            }}
+            onApplyFields={selected => {
+              if (selected.tipoPessoa) setTipoPessoa(selected.tipoPessoa.semaValue);
+              if (selected.nome) setNome(selected.nome.semaValue);
+              if (selected.cpfCnpj) setCpfCnpj(selected.cpfCnpj.semaValue);
+              if (selected.uf) setUf(selected.uf.semaValue);
+              if (selected.municipio) {
+                if (selected.municipio.payload?.uf && !uf) {
+                  setUf(selected.municipio.payload.uf);
+                }
+                setMunicipio(selected.municipio.semaValue);
+                if (selected.municipio.payload?.municipioIbge) {
+                  setMunicipioIbge(selected.municipio.payload.municipioIbge);
+                }
+              }
+              if (selected.empreendimentoRural?.payload) {
+                const ep = selected.empreendimentoRural.payload;
+                if (ep.existingId) {
+                  setEmpreendimentos(prev =>
+                    prev.map(em =>
+                      em.id === ep.existingId
+                        ? {
+                            ...em,
+                            nome: ep.nome,
+                            tipo: 'Rural',
+                            car: ep.car,
+                            uf: ep.uf,
+                            municipio: ep.municipio,
+                            municipioIbge: ep.municipioIbge
+                          }
+                        : em
+                    )
+                  );
+                } else {
+                  setEmpreendimentos(prev => [
+                    ...prev,
+                    {
+                      id: crypto.randomUUID
+                        ? crypto.randomUUID()
+                        : `emp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+                      nome: ep.nome,
+                      tipo: 'Rural',
+                      car: ep.car,
+                      escritura: '',
+                      uf: ep.uf || 'MT',
+                      municipio: ep.municipio || '',
+                      municipioIbge: ep.municipioIbge || '',
+                      createdAt: new Date().toISOString()
+                    }
+                  ]);
+                }
+              }
+            }}
+          />
+
+          {empVinculos.barragensVinculadas.length > 0 && (
+            <div style={{ marginBottom: '16px', padding: '10px 12px', borderRadius: '8px', background: '#f8fafc', border: '1px solid #cbd5e1', fontSize: '11.5px', color: '#334155' }}>
+              <strong style={{ color: '#0f172a', display: 'block', marginBottom: '3px' }}>
+                Barragens vinculadas a este empreendedor ({empVinculos.barragensVinculadas.length}):
+              </strong>
+              <span>
+                {empVinculos.cars.length > 0
+                  ? `CAR/MT cruzado das barragens: ${empVinculos.cars.join(', ')}`
+                  : 'Barragens vinculadas ainda sem número de CAR/MT informado.'}
+              </span>
+            </div>
+          )}
+
           {/* SEÇÃO 1: INFORMAÇÕES PESSOAIS DO EMPREENDEDOR */}
           <div style={{ marginBottom: '22px' }}>
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '14px', borderBottom: '1px solid #e2e8f0', paddingBottom: '8px' }}>
@@ -587,7 +917,6 @@ export function BarragemModal({
   // Estados de confirmação para substituição de campos já preenchidos
   const [overwriteCar, setOverwriteCar] = useState<boolean>(false);
   const [overwriteMunicipio, setOverwriteMunicipio] = useState<boolean>(false);
-  const [vincularEmpreendedorSugerido, setVincularEmpreendedorSugerido] = useState<boolean>(false);
 
   // Validação estrita em tempo real no padrão GMS
   const latParse = parseCoordAdvanced(latitude, false);
@@ -595,14 +924,6 @@ export function BarragemModal({
   const hasValidCoords = latParse.valido && lngParse.valido && latParse.decimal !== null && lngParse.decimal !== null;
 
   const currentFeat = carLookupResult?.feicoes?.[selectedFeatureIndex];
-  const probableEmpMatch = currentFeat ? empreendedores.find(e => {
-    if (currentFeat.empreendedor && e.nome) {
-      const n1 = currentFeat.empreendedor.trim().toLowerCase();
-      const n2 = e.nome.trim().toLowerCase();
-      if (n1.length >= 4 && n1.includes(n2)) return true;
-    }
-    return false;
-  }) : null;
 
   const handleBuscarCar = async () => {
     if (!hasValidCoords) return;
@@ -615,13 +936,15 @@ export function BarragemModal({
       if (!res.sucesso) {
         setCarLookupError(res.mensagemErro || 'Erro ao consultar Geoportal SEMA-MT.');
       } else if (!res.encontrado || res.feicoes.length === 0) {
-        setCarLookupError('Nenhum imóvel do CAR/ATP encontrado para as coordenadas informadas no Geoportal SEMA-MT.');
+        setCarLookupError(
+          res.mensagemStatus ||
+            'Consulta concluída sem resultados: nenhum imóvel encontrado na base do CAR/MT para as coordenadas informadas.'
+        );
       } else {
         setCarLookupResult(res);
         setSelectedFeatureIndex(0);
         setOverwriteCar(false);
         setOverwriteMunicipio(false);
-        setVincularEmpreendedorSugerido(false);
         setShowCarPreview(true);
       }
     } catch (err: any) {
@@ -647,13 +970,8 @@ export function BarragemModal({
       }
     }
 
-    if (vincularEmpreendedorSugerido && probableEmpMatch) {
-      setSelectedEmpId(probableEmpMatch.id);
-      setSelectedEmpreendimentoId('');
-    }
-
     const agora = new Date().toLocaleString('pt-BR');
-    const notaCar = `Dados consultados no Geoportal SEMA-MT (camada CAR/ATP) em ${agora}. Conferir os dados e confirmar em campo.`;
+    const notaCar = `Dados consultados na base pública da SEMA-MT (CAR/MT) em ${agora}. Conferir os dados e confirmar em campo.`;
     const obsAtualizada = observacoes.trim() ? `${observacoes.trim()}\n${notaCar}` : notaCar;
     setObservacoes(obsAtualizada);
 
@@ -678,6 +996,7 @@ export function BarragemModal({
       municipio: municipio.trim(),
       municipioIbge: String(municipioIbge || '').trim(),
       empreendedor: selectedEmpId.trim(),
+      empreendedorId: linkedEmp ? String(linkedEmp.id) : (record.empreendedorId || ''),
       empreendimento: selectedEmpreendimentoId.trim(),
       processo: processo.trim(),
       snisb: snisb.trim(),
@@ -698,6 +1017,113 @@ export function BarragemModal({
         </div>
 
         <div className="modal-body" style={{ maxHeight: '78vh', overflowY: 'auto' }}>
+          <SemaCadastroLookupPanel
+            entityLabel="Barragem"
+            isNew={isNew}
+            allowCar={true}
+            defaultMode={
+              linkedEmp?.cpfCnpj
+                ? linkedEmp.cpfCnpj.replace(/\D/g, '').length === 14
+                  ? 'cnpj'
+                  : 'cpf'
+                : 'car'
+            }
+            defaultQuery={car.trim() || linkedEmp?.cpfCnpj || ''}
+            buildComparisons={(item, meta) => {
+              const comps: SemaCampoComparacao[] = [];
+              const semaNomeProp =
+                cleanSemaRawText(item.propriedadesBrutas?.NOMEPROPRIEDADE) ||
+                (item.nomeDocumento && item.nomeDocumento !== 'Imóvel sem denominação informada'
+                  ? cleanSemaRawText(item.nomeDocumento)
+                  : '');
+              const semaCar =
+                cleanSemaRawText(item.propriedadesBrutas?.NUMEROESTADUAL) ||
+                cleanSemaRawText(item.carFederal) ||
+                cleanSemaRawText(item.propriedadesBrutas?.CAR_FEDERAL) ||
+                cleanSemaRawText(item.propriedadesBrutas?.CODIGO_CAR_FEDERAL);
+              const semaProc =
+                cleanSemaRawText(item.numeroProcesso) ||
+                cleanSemaRawText(item.propriedadesBrutas?.PROTOCOLO) ||
+                cleanSemaRawText(item.propriedadesBrutas?.PROTOCOLO_NUMERO);
+              const loc = resolveMtLocalidadeFromSema(item, mtMunicipios);
+
+              if (semaCar) {
+                comps.push({
+                  key: 'car',
+                  label: 'CAR/MT',
+                  currentValue: car,
+                  semaValue: semaCar
+                });
+              }
+
+              if (loc.municipio) {
+                comps.push({
+                  key: 'municipio',
+                  label: 'Município (MT)',
+                  currentValue: municipio,
+                  semaValue: loc.municipio,
+                  payload: { municipioIbge: loc.municipioIbge }
+                });
+              }
+
+              if (semaNomeProp) {
+                comps.push({
+                  key: 'nome',
+                  label: 'Identificação / Nome da propriedade (SEMA)',
+                  currentValue: nome,
+                  semaValue: semaNomeProp
+                });
+              }
+
+              if (semaProc) {
+                comps.push({
+                  key: 'processo',
+                  label: 'Número do processo / protocolo',
+                  currentValue: processo,
+                  semaValue: semaProc
+                });
+              }
+
+              // Corresponde empreendedor cadastrado apenas por igualdade exata de CPF/CNPJ normalizado
+              const semaDocDigits = extractValidCpfCnpjFromSema(item, meta).replace(/\D/g, '');
+              const matchedEmp = semaDocDigits
+                ? empreendedores.find(e => {
+                    const eDigits = String(e.cpfCnpj || '').replace(/\D/g, '');
+                    return Boolean(eDigits) && semaDocDigits === eDigits;
+                  })
+                : undefined;
+
+              if (matchedEmp) {
+                comps.push({
+                  key: 'empreendedorId',
+                  label: 'Empreendedor vinculado',
+                  currentValue: selectedEmpId,
+                  currentDisplay: linkedEmp ? linkedEmp.nome : selectedEmpId || '',
+                  semaValue: String(matchedEmp.id),
+                  semaDisplay: `${matchedEmp.nome}${matchedEmp.cpfCnpj ? ` (${matchedEmp.cpfCnpj})` : ''}`,
+                  isEqual: String(selectedEmpId) === String(matchedEmp.id)
+                });
+              }
+
+              return comps;
+            }}
+            onApplyFields={selected => {
+              if (selected.car) setCar(selected.car.semaValue);
+              if (selected.municipio) {
+                setMunicipio(selected.municipio.semaValue);
+                if (selected.municipio.payload?.municipioIbge) {
+                  setMunicipioIbge(selected.municipio.payload.municipioIbge);
+                }
+              }
+              if (selected.nome) setNome(selected.nome.semaValue);
+              if (selected.processo) setProcesso(selected.processo.semaValue);
+              if (selected.empreendedorId) {
+                setSelectedEmpId(selected.empreendedorId.semaValue);
+                setSelectedEmpreendimentoId('');
+              }
+            }}
+          />
+
           <div className="form-grid">
             <div className="form-field full">
               <label>Identificação / nome da barragem · obrigatório</label>
@@ -942,7 +1368,7 @@ export function BarragemModal({
                   }}
                   title={
                     hasValidCoords
-                      ? 'Consultar camada Geoportal:CAR_ATP na SEMA-MT pelas coordenadas GMS fornecidas'
+                      ? 'Consultar imóvel rural no CAR/MT pelas coordenadas GMS fornecidas'
                       : 'Preencha latitude e longitude válidas no padrão GMS para buscar no CAR/MT'
                   }
                 >
@@ -1014,7 +1440,7 @@ export function BarragemModal({
                     <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
                       <span style={{ fontSize: '16px' }}>📍</span>
                       <strong style={{ color: '#0369a1', fontSize: '14px' }}>
-                        Dados do Imóvel Rural — Geoportal SEMA-MT (Camada CAR_ATP)
+                        Dados do Imóvel Rural — Base Pública SEMA-MT (CAR/MT)
                       </strong>
                     </div>
                     <span style={{ fontSize: '11px', color: '#64748b' }}>
@@ -1035,13 +1461,12 @@ export function BarragemModal({
                           setSelectedFeatureIndex(Number(e.target.value));
                           setOverwriteCar(false);
                           setOverwriteMunicipio(false);
-                          setVincularEmpreendedorSugerido(false);
                         }}
                         style={{ fontSize: '12px', padding: '6px 8px' }}
                       >
                         {carLookupResult.feicoes.map((f, idx) => (
-                          <option key={idx} value={idx}>
-                            Imóvel {idx + 1}: {f.car || 'Sem número de CAR'} — {f.empreendimento || f.empreendedor || 'Sem denominação'} ({f.municipio || f.municipioCodigo || 'MT'})
+                          <option key={f.id || idx} value={idx}>
+                            Imóvel {idx + 1}: {f.car || 'Sem número de CAR'} — {f.empreendimento || f.empreendedor || 'Sem denominação'} ({f.municipio || f.municipioCodigo || 'Município não informado'})
                           </option>
                         ))}
                       </select>
@@ -1058,10 +1483,10 @@ export function BarragemModal({
                   }}>
                     <div style={{ backgroundColor: '#ffffff', padding: '8px 10px', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
                       <span style={{ color: '#64748b', display: 'block', fontSize: '11px', fontWeight: 500 }}>Número do CAR/MT</span>
-                      <strong style={{ color: '#0f172a', wordBreak: 'break-all' }}>{currentFeat.car || '—'}</strong>
+                      <strong style={{ color: '#0f172a', wordBreak: 'break-all' }}>{cleanSemaRawText(currentFeat.car) || '—'}</strong>
                       {currentFeat.carFederal && (
                         <span style={{ display: 'block', color: '#64748b', fontSize: '10px', marginTop: '2px', wordBreak: 'break-all' }}>
-                          SICAR: {currentFeat.carFederal}
+                          SICAR: {cleanSemaRawText(currentFeat.carFederal)}
                         </span>
                       )}
                       {Boolean(car.trim()) && currentFeat.car && car.trim() !== currentFeat.car && (
@@ -1081,7 +1506,7 @@ export function BarragemModal({
                     <div style={{ backgroundColor: '#ffffff', padding: '8px 10px', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
                       <span style={{ color: '#64748b', display: 'block', fontSize: '11px', fontWeight: 500 }}>Município / UF</span>
                       <strong style={{ color: '#0f172a' }}>
-                        {currentFeat.municipio || (currentFeat.municipioCodigo ? `Código IBGE ${currentFeat.municipioCodigo}` : '—')} {currentFeat.uf ? `/ ${currentFeat.uf}` : ''}
+                        {cleanSemaRawText(currentFeat.municipio) || (currentFeat.municipioCodigo ? `Código IBGE ${currentFeat.municipioCodigo}` : '—')} {currentFeat.uf ? `/ ${cleanSemaRawText(currentFeat.uf)}` : ''}
                       </strong>
                       {Boolean(municipio.trim()) && currentFeat.municipio && municipio.trim().toLowerCase() !== currentFeat.municipio.toLowerCase() && (
                         <div style={{ marginTop: '6px', paddingTop: '6px', borderTop: '1px dashed #e2e8f0' }}>
@@ -1098,8 +1523,8 @@ export function BarragemModal({
                     </div>
 
                     <div style={{ backgroundColor: '#ffffff', padding: '8px 10px', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
-                      <span style={{ color: '#64748b', display: 'block', fontSize: '11px', fontWeight: 500 }}>Nome da Propriedade / Fazenda (CAR)</span>
-                      <strong style={{ color: '#0f172a' }}>{currentFeat.empreendimento || '—'}</strong>
+                      <span style={{ color: '#64748b', display: 'block', fontSize: '11px', fontWeight: 500 }}>Nome da Propriedade / Imóvel</span>
+                      <strong style={{ color: '#0f172a' }}>{cleanSemaRawText(currentFeat.empreendimento) || '—'}</strong>
                       {currentFeat.areaHa && (
                         <span style={{ display: 'block', color: '#64748b', fontSize: '11px', marginTop: '2px' }}>
                           Área: {currentFeat.areaHa} ha
@@ -1108,42 +1533,54 @@ export function BarragemModal({
                     </div>
 
                     <div style={{ backgroundColor: '#ffffff', padding: '8px 10px', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
-                      <span style={{ color: '#64748b', display: 'block', fontSize: '11px', fontWeight: 500 }}>Titular / Proprietário (CAR)</span>
-                      <strong style={{ color: '#0f172a' }}>{currentFeat.empreendedor || '—'}</strong>
+                      <span style={{ color: '#64748b', display: 'block', fontSize: '11px', fontWeight: 500 }}>Nome dos Proprietários</span>
+                      <strong style={{ color: '#0f172a' }}>
+                        {cleanSemaRawText(currentFeat.empreendedor) || 'Não informado pela base'}
+                      </strong>
                       {currentFeat.situacaoCar && (
                         <span style={{ display: 'block', color: '#64748b', fontSize: '11px', marginTop: '2px' }}>
-                          Situação CAR: {currentFeat.situacaoCar}
+                          Situação na base: {cleanSemaRawText(currentFeat.situacaoCar)}
                         </span>
                       )}
                     </div>
                   </div>
 
-                  {/* Comparativo de Empreendedor / Sugestão */}
-                  {probableEmpMatch && (
-                    <div style={{
-                      backgroundColor: '#ecfdf5',
-                      border: '1px solid #a7f3d0',
-                      borderRadius: '6px',
-                      padding: '10px 12px',
-                      marginBottom: '12px',
-                      fontSize: '12px'
-                    }}>
-                      <div style={{ color: '#065f46', fontWeight: 600, marginBottom: '4px' }}>
-                        Correspondência sugerida de Empreendedor no Administra:
+                  {/* Todos os demais atributos retornados pela SEMA-MT em formato legível */}
+                  {(() => {
+                    const allEntries = formatSemaPropertiesEntries(currentFeat.propriedadesBrutas).filter(e => !e.isEmpty);
+                    if (allEntries.length === 0) return null;
+                    return (
+                      <div style={{
+                        marginBottom: '12px',
+                        padding: '10px',
+                        backgroundColor: '#ffffff',
+                        borderRadius: '6px',
+                        border: '1px solid #cbd5e1'
+                      }}>
+                        <strong style={{ display: 'block', fontSize: '11.5px', color: '#0369a1', marginBottom: '8px' }}>
+                          Ficha Completa Retornada pela SEMA-MT ({allEntries.length} campo(s)):
+                        </strong>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(195px, 1fr))', gap: '7px' }}>
+                          {allEntries.map(entry => (
+                            <div key={entry.key} style={{ backgroundColor: '#f8fafc', padding: '6px 8px', borderRadius: '5px', border: '1px solid #e2e8f0' }}>
+                              <span style={{ display: 'block', fontSize: '10px', fontWeight: 600, color: '#64748b' }}>
+                                {entry.label}
+                              </span>
+                              {entry.isLink ? (
+                                <a href={entry.value} target="_blank" rel="noopener noreferrer" style={{ fontSize: '11.5px', color: '#0369a1', fontWeight: 600, textDecoration: 'underline' }}>
+                                  Acessar documento ↗
+                                </a>
+                              ) : (
+                                <span style={{ fontSize: '12px', fontWeight: 600, color: '#0f172a', wordBreak: 'break-word', display: 'block' }}>
+                                  {entry.value}
+                                </span>
+                              )}
+                            </div>
+                          ))}
+                        </div>
                       </div>
-                      <div style={{ color: '#047857' }}>
-                        <b>{probableEmpMatch.nome}</b> {probableEmpMatch.cpfCnpj ? `(${probableEmpMatch.cpfCnpj})` : ''}
-                      </div>
-                      <label style={{ display: 'flex', alignItems: 'center', gap: '6px', marginTop: '6px', cursor: 'pointer', color: '#065f46' }}>
-                        <input
-                          type="checkbox"
-                          checked={vincularEmpreendedorSugerido}
-                          onChange={e => setVincularEmpreendedorSugerido(e.target.checked)}
-                        />
-                        <span>Vincular barragem a este empreendedor cadastrado</span>
-                      </label>
-                    </div>
-                  )}
+                    );
+                  })()}
 
                   {/* Aviso fixo obrigatório */}
                   <div style={{
@@ -1430,6 +1867,63 @@ export function RtModal({
         </div>
 
         <div className="modal-body" style={{ maxHeight: '78vh', overflowY: 'auto' }}>
+          <SemaCadastroLookupPanel
+            entityLabel="Responsável Técnico"
+            isNew={isNew}
+            allowCar={false}
+            defaultMode={cpf.replace(/\D/g, '').length === 14 ? 'cnpj' : 'cpf'}
+            defaultQuery={cpf.trim()}
+            buildComparisons={(item, meta) => {
+              const comps: SemaCampoComparacao[] = [];
+              const semaNome = extractCleanSemaOwnerName(
+                item.razaoSocial ||
+                  item.propriedadesBrutas?.RAZAO_SOCIAL ||
+                  item.propriedadesBrutas?.PROPRIETARIOS ||
+                  item.propriedadesBrutas?.NOMESPROPRIETARIOS
+              );
+              const rawCpf = extractValidCpfCnpjFromSema(item, meta);
+              const rawCpfDigits = rawCpf.replace(/\D/g, '');
+              const semaCpf = rawCpfDigits.length === 11 ? rawCpf : '';
+              const semaArt = cleanSemaRawText(item.propriedadesBrutas?.NUMERO_ART);
+
+              if (semaNome) {
+                comps.push({
+                  key: 'nome',
+                  label: 'Nome completo / Razão social',
+                  currentValue: nome,
+                  semaValue: semaNome
+                });
+              }
+
+              if (semaCpf) {
+                const curCpfDigits = cpf.replace(/\D/g, '');
+                comps.push({
+                  key: 'cpf',
+                  label: 'CPF',
+                  currentValue: cpf,
+                  semaValue: semaCpf,
+                  isEqual: Boolean(curCpfDigits) && curCpfDigits === rawCpfDigits
+                });
+              }
+
+              if (semaArt) {
+                comps.push({
+                  key: 'vincArt',
+                  label: 'Número da ART/RRT (vínculo)',
+                  currentValue: vincArt,
+                  semaValue: semaArt
+                });
+              }
+
+              return comps;
+            }}
+            onApplyFields={selected => {
+              if (selected.nome) setNome(selected.nome.semaValue);
+              if (selected.cpf) setCpf(selected.cpf.semaValue);
+              if (selected.vincArt) setVincArt(selected.vincArt.semaValue);
+            }}
+          />
+
           {/* Alerta de Duplicidade Institucional */}
           {duplicateMatch && (
             <div

@@ -16,6 +16,7 @@
  */
 
 import { supabase, isSupabaseConfigured } from './supabaseClient';
+import { parseCoordAdvanced } from './coordService';
 
 export const NOTIFICA_STORAGE_KEY = 'notifica_csb_local_v1';
 export const LEGACY_STORAGE_KEY = 'administra_csb_local_v1';
@@ -61,6 +62,7 @@ export interface BarragemRecord {
   uf?: string;
   municipio?: string;
   municipioIbge?: string;
+  empreendedorId?: string;
   empreendedor?: string;
   empreendimento?: string;
   processo?: string;
@@ -74,6 +76,107 @@ export interface BarragemRecord {
   updatedBy?: string;
   createdAt: string;
   updatedAt: string;
+}
+
+export interface EmpreendedorVinculosResumo {
+  barragensVinculadas: BarragemRecord[];
+  cars: string[];
+  processos: string[];
+  coordenadas: Array<{ lat: number; lng: number; label: string }>;
+}
+
+function normTextMatch(val: any): string {
+  return String(val || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
+/**
+ * Cruza o empreendedor com suas barragens e empreendimentos cadastrados,
+ * consolidando CAR/MT, números de processo e coordenadas válidas para consulta SEMA-MT.
+ */
+export function getEmpreendedorVinculos(
+  empreendedor: any,
+  barragens: any[] = []
+): EmpreendedorVinculosResumo {
+  if (!empreendedor) {
+    return { barragensVinculadas: [], cars: [], processos: [], coordenadas: [] };
+  }
+
+  const empId = String(empreendedor.id || '').trim();
+  const empNomeNorm = normTextMatch(empreendedor.nome);
+  const empFantasiaNorm = normTextMatch(empreendedor.nomeFantasia);
+
+  const barragensVinculadas: BarragemRecord[] = (Array.isArray(barragens) ? barragens : []).filter(b => {
+    if (!b) return false;
+    const bEmpId = String(b.empreendedorId || b.empreendedor_id || '').trim();
+    if (empId && bEmpId && bEmpId === empId) return true;
+
+    const bEmpRef = String(b.empreendedor || '').trim();
+    if (empId && bEmpRef && bEmpRef === empId) return true;
+
+    const bEmpNorm = normTextMatch(bEmpRef);
+    if (bEmpNorm && ((empNomeNorm && bEmpNorm === empNomeNorm) || (empFantasiaNorm && bEmpNorm === empFantasiaNorm))) {
+      return true;
+    }
+    return false;
+  });
+
+  const cars: string[] = [];
+  const carSeen = new Set<string>();
+  const addCar = (raw: any) => {
+    const val = String(raw || '').trim();
+    if (!val || ['nan', 'null', 'undefined'].includes(val.toLowerCase())) return;
+    const key = val.toUpperCase().replace(/[^A-Z0-9/]/g, '');
+    if (key && !carSeen.has(key)) {
+      carSeen.add(key);
+      cars.push(val);
+    }
+  };
+
+  if (Array.isArray(empreendedor.empreendimentos)) {
+    for (const em of empreendedor.empreendimentos) {
+      addCar(em?.car);
+    }
+  }
+  for (const b of barragensVinculadas) {
+    addCar(b.car);
+  }
+
+  const processos: string[] = [];
+  const procSeen = new Set<string>();
+  for (const b of barragensVinculadas) {
+    const p = String(b.processo || '').trim();
+    if (!p || ['nan', 'null', 'undefined'].includes(p.toLowerCase())) continue;
+    const key = p.toUpperCase();
+    if (!procSeen.has(key)) {
+      procSeen.add(key);
+      processos.push(p);
+    }
+  }
+
+  const coordenadas: Array<{ lat: number; lng: number; label: string }> = [];
+  const coordSeen = new Set<string>();
+  for (const b of barragensVinculadas) {
+    const latRes = parseCoordAdvanced(b.latitude, false);
+    const lngRes = parseCoordAdvanced(b.longitude, true);
+    if (latRes.valido && lngRes.valido && latRes.decimal !== null && lngRes.decimal !== null) {
+      const key = `${latRes.decimal.toFixed(6)},${lngRes.decimal.toFixed(6)}`;
+      if (!coordSeen.has(key)) {
+        coordSeen.add(key);
+        coordenadas.push({
+          lat: latRes.decimal,
+          lng: lngRes.decimal,
+          label: String(b.nome || b.car || 'Barragem vinculada')
+        });
+      }
+    }
+  }
+
+  return { barragensVinculadas, cars, processos, coordenadas };
 }
 
 export interface RtVinculo {
@@ -278,6 +381,12 @@ export function fromDbEmpreendedor(row: any): EmpreendedorRecord {
 }
 
 export function toDbBarragem(r: any) {
+  const empRef = String(r.empreendedor || '').trim();
+  const inferredEmpId =
+    r.empreendedorId ??
+    r.empreendedor_id ??
+    (/^(emp_|[0-9a-f]{8}-[0-9a-f]{4}-)/i.test(empRef) ? empRef : null);
+
   return {
     id: String(r.id),
     nome: String(r.nome || ''),
@@ -285,6 +394,7 @@ export function toDbBarragem(r: any) {
     uf: r.uf ?? 'MT',
     municipio: r.municipio ?? null,
     municipio_ibge: r.municipioIbge ?? r.municipio_ibge ?? null,
+    empreendedor_id: inferredEmpId || null,
     empreendedor: r.empreendedor ?? null,
     empreendimento: r.empreendimento ?? null,
     processo: r.processo ?? null,
@@ -309,6 +419,7 @@ export function fromDbBarragem(row: any): BarragemRecord {
     uf: row.uf ?? 'MT',
     municipio: row.municipio ?? '',
     municipioIbge: row.municipio_ibge ?? row.municipioIbge ?? '',
+    empreendedorId: row.empreendedor_id ?? row.empreendedorId ?? '',
     empreendedor: row.empreendedor ?? '',
     empreendimento: row.empreendimento ?? '',
     processo: row.processo ?? '',
@@ -1004,7 +1115,7 @@ export const notificaDataService = {
     if (!isSupabaseConfigured() || !supabase) {
       return {
         success: false,
-        error: 'Supabase não está configurado (variáveis VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY ausentes).'
+        error: 'Banco de dados central não configurado.'
       };
     }
 
@@ -1069,7 +1180,7 @@ export const notificaDataService = {
     } catch (err: any) {
       return {
         success: false,
-        error: err?.message || 'Falha ao sincronizar com o Supabase'
+        error: err?.message || 'Falha ao sincronizar com o banco de dados central'
       };
     }
   },
@@ -1231,16 +1342,23 @@ export const notificaDataService = {
       const conf = collectionConverters[collectionKey];
       const payload = conf.toDb(recordWithTimestamps);
 
-      const { error } = await supabase
+      let { error } = await supabase
         .from(conf.table)
         .upsert(payload, { onConflict: 'id' });
+
+      if (error && error.code === '42703' && 'empreendedor_id' in payload) {
+        const fallbackPayload = { ...payload };
+        delete fallbackPayload.empreendedor_id;
+        const retry = await supabase.from(conf.table).upsert(fallbackPayload, { onConflict: 'id' });
+        error = retry.error;
+      }
 
       if (error) {
         return {
           updatedDb,
           savedLocal: true,
           savedRemote: false,
-          error: `Erro ao gravar no Supabase: ${error.message} (${error.code || 'RLS/Permission'})`
+          error: `Erro ao gravar na base central: ${error.message}`
         };
       }
 
@@ -1254,7 +1372,7 @@ export const notificaDataService = {
         updatedDb,
         savedLocal: true,
         savedRemote: false,
-        error: `Falha de rede ao gravar no Supabase: ${err?.message || 'Indisponível'}`
+        error: `Falha de rede ao gravar na base central: ${err?.message || 'Indisponível'}`
       };
     }
   },
@@ -1309,7 +1427,7 @@ export const notificaDataService = {
           updatedDb,
           deletedLocal: true,
           deletedRemote: false,
-          error: `Falha ao excluir profissional no Supabase: ${err?.message}`
+          error: `Falha ao excluir profissional na base central: ${err?.message}`
         };
       }
     }
@@ -1326,7 +1444,7 @@ export const notificaDataService = {
           updatedDb,
           deletedLocal: true,
           deletedRemote: false,
-          error: `Erro ao excluir no Supabase: ${error.message}`
+          error: `Erro ao excluir na base central: ${error.message}`
         };
       }
 
@@ -1340,17 +1458,13 @@ export const notificaDataService = {
         updatedDb,
         deletedLocal: true,
         deletedRemote: false,
-        error: `Falha ao conectar com o Supabase: ${err?.message}`
+        error: `Falha ao conectar com a base central: ${err?.message}`
       };
     }
   },
 
   /**
-   * Migração segura dos dados locais para o Supabase:
-   * - Executa upsert de todos os registros locais existentes por chave primária (id),
-   *   evitando duplicidade;
-   * - NÃO apaga o armazenamento local automaticamente;
-   * - Retorna relatório por coleção com total, migrados e erros.
+   * Migração segura dos dados locais para a base central:
    */
   async migrateLocalToSupabase(): Promise<{
     success: boolean;
@@ -1359,7 +1473,7 @@ export const notificaDataService = {
     errorCount: number;
   }> {
     if (!isSupabaseConfigured() || !supabase) {
-      throw new Error('Supabase não configurado. Verifique VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY.');
+      throw new Error('Banco de dados central não configurado.');
     }
 
     const localDb = loadNotificaDatabase();
@@ -1391,7 +1505,13 @@ export const notificaDataService = {
       for (const item of items) {
         try {
           const payload = conf.toDb(item);
-          const { error } = await supabase.from(conf.table).upsert(payload, { onConflict: 'id' });
+          let { error } = await supabase.from(conf.table).upsert(payload, { onConflict: 'id' });
+          if (error && error.code === '42703' && 'empreendedor_id' in payload) {
+            const fallbackPayload = { ...payload };
+            delete fallbackPayload.empreendedor_id;
+            const retry = await supabase.from(conf.table).upsert(fallbackPayload, { onConflict: 'id' });
+            error = retry.error;
+          }
           if (error) {
             summary.errors.push(`ID ${item.id}: ${error.message}`);
             errorCount++;

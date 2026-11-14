@@ -1,20 +1,40 @@
+// src/types/carLookup.ts
 /**
- * src/types/carLookup.ts
- *
- * Definições de tipos TypeScript para consulta ao Geoportal SEMA-MT (CAR/ATP),
+ * Definições de tipos TypeScript para consulta ao Geoportal SEMA-MT (WFS/WMS),
  * documentos/licenças/fiscalização e sincronização da base local.
  */
+
+export type CamadaConsultaStatusCode =
+  | 'consultada'
+  | 'sem_resultados'
+  | 'nao_suportado'
+  | 'indisponivel'
+  | 'filtro_incompativel'
+  | 'erro_comunicacao';
+
+export interface CamadaConsultaStatus {
+  camada: string;
+  titulo?: string;
+  grupo?: string;
+  status: CamadaConsultaStatusCode;
+  suportado: boolean;
+  registrosEncontrados: number;
+  camposPesquisados?: string[];
+  mensagem: string;
+}
 
 export interface CarGeoJsonFeature {
   type: string;
   id?: string;
   geometry?: any;
   geometry_name?: string;
+  camadaOrigem?: string;
   properties: Record<string, any>;
 }
 
 export interface CarFeatureMapped {
   id?: string;
+  camadaOrigem?: string;
   car: string;
   carFederal: string;
   empreendedor: string;
@@ -35,6 +55,8 @@ export interface CarLookupApiResponse {
   encontrado: boolean;
   feicoes: CarGeoJsonFeature[];
   consultadoEm: string;
+  camadasConsultadas?: CamadaConsultaStatus[];
+  mensagemStatus?: string;
   error?: string;
 }
 
@@ -49,30 +71,49 @@ export interface CarLookupResult {
     latGms?: string;
     lngGms?: string;
   };
+  camadasConsultadas?: CamadaConsultaStatus[];
+  mensagemStatus?: string;
   consultadoEm: string;
   mensagemErro?: string;
 }
 
 export interface SemaDocumentoItem {
-  id: string;
+  id: string | null;
   tipo: string;
   numeroDocumento: string;
   nomeDocumento: string;
   dataDocumento: string;
   dataValidade?: string;
   numeroProcesso?: string;
-  status: string;
+  status?: string;
   razaoSocial?: string;
-  cpfCnpj?: string;
+  cpfCnpjMascarado?: string;
   municipio?: string;
+  municipioCodigo?: string;
   linkDocumento?: string;
   camadaOrigem: string;
+  camadaTitulo?: string;
+  carFederal?: string;
+  areaHa?: string;
+  atividade?: string;
+  correspondenciaExploratoria?: boolean;
   propriedadesBrutas: Record<string, any>;
 }
 
 export interface SemaDocumentosGroupedResult {
   sucesso: boolean;
-  cpfCnpjConsultado: string;
+  criteriosUtilizados: {
+    temCpfCnpj: boolean;
+    car?: string;
+    cars?: string[];
+    processo?: string;
+    processos?: string[];
+    coordenadasCount?: number;
+    nomeExploratorio?: string;
+    buscaExploratoria: boolean;
+  };
+  wmsCapabilitiesUrlInfo?: string;
+  carImoveis: SemaDocumentoItem[];
   licencas: SemaDocumentoItem[];
   notificacoes: SemaDocumentoItem[];
   autosInfracao: SemaDocumentoItem[];
@@ -81,7 +122,8 @@ export interface SemaDocumentosGroupedResult {
   totalRegistros: number;
   consultadoEm: string;
   mensagemStatus: string;
-  camadasConsultadas: string[];
+  camadasConsultadas: CamadaConsultaStatus[];
+  erroGeral?: string;
 }
 
 export interface GeoportalSyncStatus {
@@ -98,5 +140,6 @@ export interface GeoportalSyncResult {
   registrosProcessados: number;
   camadas: string[];
   status: 'sucesso' | 'falha' | 'parcial';
+  mensagem?: string;
   mensagemErro?: string;
 }

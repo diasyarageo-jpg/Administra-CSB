@@ -29,7 +29,7 @@ export function UsuarioModal({ record, isNew, onClose, onSave }: UsuarioModalPro
   const [situacao, setSituacao] = useState(record.situacao || 'Ativo');
   const [observacoes, setObservacoes] = useState(record.observacoes || '');
 
-  // Ações de criação no Supabase Auth
+  // Ações de criação no serviço de autenticação
   const [authAction, setAuthAction] = useState<'invite' | 'password' | 'db_only'>('invite');
   const [temporaryPassword, setTemporaryPassword] = useState('');
   const [loading, setLoading] = useState(false);
@@ -59,9 +59,9 @@ export function UsuarioModal({ record, isNew, onClose, onSave }: UsuarioModalPro
     try {
       let authUserId = record.authUserId;
 
-      // Se for novo cadastro e selecionou convite ou senha temporária via Supabase Auth
+      // Se for novo cadastro e selecionou convite ou senha temporária
       if (isNew && authAction !== 'db_only') {
-        setStatusMessage({ type: 'info', text: 'Comunicando com Supabase Auth...' });
+        setStatusMessage({ type: 'info', text: 'Comunicando com o sistema de autenticação...' });
         const res = await authService.adminCreateUser({
           nome: nome.trim(),
           matricula: matricula.trim(),
@@ -79,7 +79,7 @@ export function UsuarioModal({ record, isNew, onClose, onSave }: UsuarioModalPro
         if (!res.success) {
           setStatusMessage({
             type: 'error',
-            text: `Atenção: Não foi possível provisionar no Supabase Auth (${res.error}). O registro será salvo apenas no cadastro interno.`
+            text: `Atenção: Não foi possível provisionar o acesso automático (${res.error}). O registro será salvo apenas no cadastro interno.`
           });
         } else if (res.authUserId) {
           authUserId = res.authUserId;
@@ -250,7 +250,7 @@ export function UsuarioModal({ record, isNew, onClose, onSave }: UsuarioModalPro
               </select>
             </div>
 
-            {/* Status do vínculo com o Supabase Auth */}
+            {/* Status do vínculo de acesso */}
             <div className="form-field full">
               <div
                 style={{
@@ -262,7 +262,7 @@ export function UsuarioModal({ record, isNew, onClose, onSave }: UsuarioModalPro
               >
                 <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between' }}>
                   <span style={{ fontSize: '12px', fontWeight: 600, color: '#374151' }}>
-                    Vínculo com Supabase Auth:
+                    Vínculo de Autenticação:
                   </span>
                   <span
                     style={{
@@ -292,7 +292,7 @@ export function UsuarioModal({ record, isNew, onClose, onSave }: UsuarioModalPro
                           onChange={() => setAuthAction('invite')}
                           disabled={loading}
                         />
-                        <span>Enviar convite automático por e-mail (Supabase Auth invite)</span>
+                        <span>Enviar convite automático por e-mail</span>
                       </label>
 
                       <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', cursor: 'pointer' }}>

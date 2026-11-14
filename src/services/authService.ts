@@ -148,7 +148,7 @@ export const authService = {
     if (!isSupabaseConfigured() || !supabase) {
       return {
         success: false,
-        error: 'Supabase não está configurado. Configure as variáveis VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY.'
+        error: 'Sistema de autenticação não está configurado.'
       };
     }
 
@@ -163,7 +163,7 @@ export const authService = {
         if (msg.includes('Invalid login credentials')) {
           msg = 'Credenciais incorretas. Verifique seu e-mail e sua senha.';
         } else if (msg.includes('Email not confirmed')) {
-          msg = 'E-mail institucional ainda não confirmado no Supabase.';
+          msg = 'E-mail institucional ainda não confirmado.';
         }
         return { success: false, error: msg };
       }
@@ -206,7 +206,7 @@ export const authService = {
    */
   async sendPasswordReset(email: string): Promise<ResetPasswordResult> {
     if (!isSupabaseConfigured() || !supabase) {
-      return { success: false, error: 'Supabase não configurado.' };
+      return { success: false, error: 'Sistema de autenticação não configurado.' };
     }
 
     try {
@@ -230,7 +230,7 @@ export const authService = {
    */
   async updatePassword(newPassword: string): Promise<{ success: boolean; error?: string }> {
     if (!isSupabaseConfigured() || !supabase) {
-      return { success: false, error: 'Supabase não configurado.' };
+      return { success: false, error: 'Sistema de autenticação não configurado.' };
     }
 
     try {
@@ -270,7 +270,7 @@ export const authService = {
     if (!isSupabaseConfigured() || !supabase) {
       return {
         success: false,
-        error: 'Supabase não está configurado. Não é possível enviar solicitações no momento.'
+        error: 'Sistema de autenticação não está configurado no momento.'
       };
     }
 
@@ -368,15 +368,13 @@ export const authService = {
    */
   async approveUser(usuarioId: string, papel: UserRole): Promise<{ success: boolean; authUserId?: string; error?: string; message?: string }> {
     if (!isSupabaseConfigured() || !supabase) {
-      return { success: false, error: 'Supabase não está configurado.' };
+      return { success: false, error: 'Sistema de autenticação não configurado.' };
     }
 
-    // Validação de função permitida
     const allowedRoles: UserRole[] = ['Administrador', 'Usuário', 'Visualizador'];
     const selectedPapel: UserRole = allowedRoles.includes(papel) ? papel : 'Usuário';
 
     try {
-      // Invocação da Edge Function com token do administrador logado
       const { data, error } = await supabase.functions.invoke('admin-manage-user', {
         body: {
           action: 'approve-user',
@@ -388,7 +386,7 @@ export const authService = {
       if (error) {
         return {
           success: false,
-          error: `Falha na Edge Function de aprovação: ${error.message}. Certifique-se de implantar a função 'admin-manage-user' no Supabase.`
+          error: `Falha no serviço de aprovação: ${error.message}.`
         };
       }
 
@@ -418,7 +416,7 @@ export const authService = {
    */
   async rejectUser(usuarioId: string, motivo?: string): Promise<{ success: boolean; error?: string; message?: string }> {
     if (!isSupabaseConfigured() || !supabase) {
-      return { success: false, error: 'Supabase não está configurado.' };
+      return { success: false, error: 'Sistema de autenticação não configurado.' };
     }
 
     try {
@@ -472,7 +470,7 @@ export const authService = {
    */
   async adminCreateUser(payload: AdminCreateUserPayload): Promise<AdminCreateUserResult> {
     if (!isSupabaseConfigured() || !supabase) {
-      return { success: false, error: 'Supabase não está configurado.' };
+      return { success: false, error: 'Sistema de autenticação não configurado.' };
     }
 
     try {
