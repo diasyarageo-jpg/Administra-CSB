@@ -70,6 +70,11 @@ export interface BarragemRecord {
   cursoAgua?: string;
   latitude?: string;
   longitude?: string;
+  altura?: number | string;
+  volume?: number | string;
+  danoPotencial?: string;
+  categoriaRisco?: string;
+  classificadaEm?: string;
   situacao?: string;
   observacoes?: string;
   createdBy?: string;
@@ -380,12 +385,28 @@ export function fromDbEmpreendedor(row: any): EmpreendedorRecord {
   };
 }
 
+function parseOptionalDecimal(val: any): number | null {
+  if (val === undefined || val === null) return null;
+  const s = String(val).trim();
+  if (!s) return null;
+  const normalized = s.includes(',') && !s.includes('.')
+    ? s.replace(',', '.')
+    : s.includes(',') && s.includes('.')
+    ? s.replace(/\./g, '').replace(',', '.')
+    : s;
+  const n = Number(normalized);
+  return Number.isFinite(n) ? n : null;
+}
+
 export function toDbBarragem(r: any) {
   const empRef = String(r.empreendedor || '').trim();
   const inferredEmpId =
     r.empreendedorId ??
     r.empreendedor_id ??
     (/^(emp_|[0-9a-f]{8}-[0-9a-f]{4}-)/i.test(empRef) ? empRef : null);
+  const dpaVal = String(r.danoPotencial ?? r.dano_potencial ?? r.dpa ?? '').trim();
+  const criVal = String(r.categoriaRisco ?? r.categoria_risco ?? r.cri ?? '').trim();
+  const isDpaClassified = Boolean(dpaVal && dpaVal !== 'Não classificada');
 
   return {
     id: String(r.id),
@@ -402,6 +423,13 @@ export function toDbBarragem(r: any) {
     curso_agua: r.cursoAgua ?? r.curso_agua ?? null,
     latitude: r.latitude ?? null,
     longitude: r.longitude ?? null,
+    altura: parseOptionalDecimal(r.altura),
+    volume: parseOptionalDecimal(r.volume),
+    dano_potencial: dpaVal || null,
+    categoria_risco: criVal || null,
+    classificada_em: isDpaClassified
+      ? (r.classificadaEm ?? r.classificada_em ?? new Date().toISOString())
+      : (r.classificadaEm ?? r.classificada_em ?? null),
     situacao: r.situacao ?? 'Aguardando confirmação',
     observacoes: r.observacoes ?? null,
     created_by: r.createdBy ?? r.created_by ?? null,
@@ -412,6 +440,8 @@ export function toDbBarragem(r: any) {
 }
 
 export function fromDbBarragem(row: any): BarragemRecord {
+  const alturaRaw = row.altura ?? row.height;
+  const volumeRaw = row.volume ?? row.reservoir_volume;
   return {
     id: String(row.id),
     nome: row.nome ?? '',
@@ -427,6 +457,11 @@ export function fromDbBarragem(row: any): BarragemRecord {
     cursoAgua: row.curso_agua ?? row.cursoAgua ?? '',
     latitude: row.latitude ?? '',
     longitude: row.longitude ?? '',
+    altura: alturaRaw !== null && alturaRaw !== undefined && String(alturaRaw).trim() !== '' ? alturaRaw : '',
+    volume: volumeRaw !== null && volumeRaw !== undefined && String(volumeRaw).trim() !== '' ? volumeRaw : '',
+    danoPotencial: row.dano_potencial ?? row.danoPotencial ?? row.dpa ?? '',
+    categoriaRisco: row.categoria_risco ?? row.categoriaRisco ?? row.cri ?? '',
+    classificadaEm: row.classificada_em ?? row.classificadaEm ?? '',
     situacao: row.situacao ?? 'Aguardando confirmação',
     observacoes: row.observacoes ?? '',
     createdBy: row.created_by ?? row.createdBy ?? '',
@@ -1346,9 +1381,14 @@ export const notificaDataService = {
         .from(conf.table)
         .upsert(payload, { onConflict: 'id' });
 
-      if (error && error.code === '42703' && 'empreendedor_id' in payload) {
+      if (error && error.code === '42703') {
         const fallbackPayload = { ...payload };
         delete fallbackPayload.empreendedor_id;
+        delete fallbackPayload.altura;
+        delete fallbackPayload.volume;
+        delete fallbackPayload.dano_potencial;
+        delete fallbackPayload.categoria_risco;
+        delete fallbackPayload.classificada_em;
         const retry = await supabase.from(conf.table).upsert(fallbackPayload, { onConflict: 'id' });
         error = retry.error;
       }
@@ -1506,9 +1546,14 @@ export const notificaDataService = {
         try {
           const payload = conf.toDb(item);
           let { error } = await supabase.from(conf.table).upsert(payload, { onConflict: 'id' });
-          if (error && error.code === '42703' && 'empreendedor_id' in payload) {
+          if (error && error.code === '42703') {
             const fallbackPayload = { ...payload };
             delete fallbackPayload.empreendedor_id;
+            delete fallbackPayload.altura;
+            delete fallbackPayload.volume;
+            delete fallbackPayload.dano_potencial;
+            delete fallbackPayload.categoria_risco;
+            delete fallbackPayload.classificada_em;
             const retry = await supabase.from(conf.table).upsert(fallbackPayload, { onConflict: 'id' });
             error = retry.error;
           }

@@ -735,9 +735,45 @@ export function SemaCadastroLookupPanel({
                               {(bar.snisb || bar.codigo) && <span>SNISB: <b style={{ fontFamily: 'monospace' }}>{bar.snisb || bar.codigo}</b></span>}
                             </div>
 
-                            {isDamExpanded && (
+                            {isDamExpanded && (() => {
+                              const alturaVal = bar.altura !== undefined && bar.altura !== null && String(bar.altura).trim() !== '' ? `${bar.altura} m` : 'Não informada';
+                              const volumeVal = bar.volume !== undefined && bar.volume !== null && String(bar.volume).trim() !== '' ? `${bar.volume} m³` : 'Não informado';
+                              const hasDpaClassificada = Boolean(dpaVal && String(dpaVal).trim() !== '' && String(dpaVal).trim() !== 'Não classificada');
+
+                              return (
                               <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px dashed #a7f3d0', display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(175px, 1fr))', gap: '6px' }}>
+                                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(150px, 1fr))', gap: '6px' }}>
+                                  <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '5px', padding: '5px 8px' }}>
+                                    <span style={{ display: 'block', fontSize: '10px', color: '#64748b' }}>Altura do Maciço</span>
+                                    <strong style={{ fontSize: '11.5px', color: '#0f172a' }}>{alturaVal}</strong>
+                                  </div>
+                                  <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '5px', padding: '5px 8px' }}>
+                                    <span style={{ display: 'block', fontSize: '10px', color: '#64748b' }}>Volume do Reservatório</span>
+                                    <strong style={{ fontSize: '11.5px', color: '#0f172a' }}>{volumeVal}</strong>
+                                  </div>
+                                  <div
+                                    style={{
+                                      backgroundColor: hasDpaClassificada
+                                        ? String(dpaVal).toLowerCase() === 'alto'
+                                          ? '#fef2f2'
+                                          : String(dpaVal).toLowerCase() === 'médio'
+                                          ? '#fffbeb'
+                                          : '#f0fdf4'
+                                        : '#f8fafc',
+                                      border: hasDpaClassificada ? '1px solid #94a3b8' : '1px solid #e2e8f0',
+                                      borderRadius: '5px',
+                                      padding: '5px 8px'
+                                    }}
+                                  >
+                                    <span style={{ display: 'block', fontSize: '10px', color: '#64748b' }}>Dano Potencial (DPA)</span>
+                                    <strong style={{ fontSize: '11.5px', color: '#0f172a' }}>
+                                      {hasDpaClassificada ? `${dpaVal} (Classificada)` : 'Não classificada'}
+                                    </strong>
+                                  </div>
+                                  <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '5px', padding: '5px 8px' }}>
+                                    <span style={{ display: 'block', fontSize: '10px', color: '#64748b' }}>Categoria de Risco (CRI)</span>
+                                    <strong style={{ fontSize: '11.5px', color: '#0f172a' }}>{criVal || 'Não classificada'}</strong>
+                                  </div>
                                   <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '5px', padding: '5px 8px' }}>
                                     <span style={{ display: 'block', fontSize: '10px', color: '#64748b' }}>Empreendimento / Fazenda</span>
                                     <strong style={{ fontSize: '11px', color: '#0f172a' }}>{bar.empreendimento || 'Não informado'}</strong>
@@ -745,12 +781,6 @@ export function SemaCadastroLookupPanel({
                                   <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '5px', padding: '5px 8px' }}>
                                     <span style={{ display: 'block', fontSize: '10px', color: '#64748b' }}>Curso d’Água / Bacia</span>
                                     <strong style={{ fontSize: '11px', color: '#0f172a' }}>{bar.cursoAgua || bar.cursoDagua || bar.rio || 'Não informado'}</strong>
-                                  </div>
-                                  <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '5px', padding: '5px 8px' }}>
-                                    <span style={{ display: 'block', fontSize: '10px', color: '#64748b' }}>Classificação (CRI / DPA)</span>
-                                    <strong style={{ fontSize: '11px', color: '#0f172a' }}>
-                                      {criVal || dpaVal ? `CRI: ${criVal || '—'} · DPA: ${dpaVal || '—'}` : 'Não classificada'}
-                                    </strong>
                                   </div>
                                   <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '5px', padding: '5px 8px' }}>
                                     <span style={{ display: 'block', fontSize: '10px', color: '#64748b' }}>Coordenadas</span>
@@ -807,7 +837,8 @@ export function SemaCadastroLookupPanel({
                                   )}
                                 </div>
                               </div>
-                            )}
+                              );
+                            })()}
                           </div>
                         );
                       })}

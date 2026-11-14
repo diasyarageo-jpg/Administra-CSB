@@ -58,6 +58,7 @@ export function EmpreendedorDocumentosSemaModal({
   >('car');
   const [expandedByKey, setExpandedByKey] = useState<Record<string, boolean>>({});
   const [expandedBarragemByKey, setExpandedBarragemByKey] = useState<Record<string, boolean>>({});
+  const [showVinculosCadastro, setShowVinculosCadastro] = useState<boolean>(false);
   const [showEmptyByKey, setShowEmptyByKey] = useState<Record<string, boolean>>({});
   const [docsByBarragemId, setDocsByBarragemId] = useState<Record<string, BarragemDocumentoEmitidoItem[]>>({});
   const [isLoadingDocsBarragem, setIsLoadingDocsBarragem] = useState<boolean>(false);
@@ -547,6 +548,17 @@ export function EmpreendedorDocumentosSemaModal({
             const lngFmt = formatCoordResumo(bar.longitude || bar.lng, true);
             const criVal = bar.categoriaRisco || bar.cri;
             const dpaVal = bar.danoPotencial || bar.dpa;
+            const hasDpaClassificada = Boolean(
+              dpaVal && String(dpaVal).trim() !== '' && String(dpaVal).trim() !== 'Não classificada'
+            );
+            const alturaDisplay =
+              bar.altura !== undefined && bar.altura !== null && String(bar.altura).trim() !== ''
+                ? `${bar.altura} m`
+                : 'Não informada';
+            const volumeDisplay =
+              bar.volume !== undefined && bar.volume !== null && String(bar.volume).trim() !== ''
+                ? `${bar.volume} m³`
+                : 'Não informado';
 
             return (
               <div
@@ -576,6 +588,30 @@ export function EmpreendedorDocumentosSemaModal({
                     >
                       {vinculadoAqui ? 'Vinculada a este empreendedor' : 'Cadastrada no sistema'}
                     </span>
+                    {hasDpaClassificada && (
+                      <span
+                        style={{
+                          padding: '2px 7px',
+                          borderRadius: '4px',
+                          fontSize: '10.5px',
+                          fontWeight: 700,
+                          backgroundColor:
+                            String(dpaVal).toLowerCase() === 'alto'
+                              ? '#fee2e2'
+                              : String(dpaVal).toLowerCase() === 'médio'
+                              ? '#fef3c7'
+                              : '#dcfce7',
+                          color:
+                            String(dpaVal).toLowerCase() === 'alto'
+                              ? '#991b1b'
+                              : String(dpaVal).toLowerCase() === 'médio'
+                              ? '#92400e'
+                              : '#166534'
+                        }}
+                      >
+                        DPA: {dpaVal}
+                      </span>
+                    )}
                     {bar.situacao && (
                       <span
                         style={{
@@ -692,10 +728,41 @@ export function EmpreendedorDocumentosSemaModal({
                       <div
                         style={{
                           display: 'grid',
-                          gridTemplateColumns: 'repeat(auto-fit, minmax(185px, 1fr))',
+                          gridTemplateColumns: 'repeat(auto-fit, minmax(165px, 1fr))',
                           gap: '6px'
                         }}
                       >
+                        <div style={{ backgroundColor: '#f8fafc', border: '1px solid #cbd5e1', borderRadius: '5px', padding: '6px 8px' }}>
+                          <span style={{ display: 'block', fontSize: '10px', color: '#64748b' }}>Altura do Maciço</span>
+                          <strong style={{ fontSize: '12px', color: '#0f172a' }}>{alturaDisplay}</strong>
+                        </div>
+                        <div style={{ backgroundColor: '#f8fafc', border: '1px solid #cbd5e1', borderRadius: '5px', padding: '6px 8px' }}>
+                          <span style={{ display: 'block', fontSize: '10px', color: '#64748b' }}>Volume do Reservatório</span>
+                          <strong style={{ fontSize: '12px', color: '#0f172a' }}>{volumeDisplay}</strong>
+                        </div>
+                        <div
+                          style={{
+                            backgroundColor: hasDpaClassificada
+                              ? String(dpaVal).toLowerCase() === 'alto'
+                                ? '#fef2f2'
+                                : String(dpaVal).toLowerCase() === 'médio'
+                                ? '#fffbeb'
+                                : '#f0fdf4'
+                              : '#f8fafc',
+                            border: hasDpaClassificada ? '1px solid #94a3b8' : '1px solid #cbd5e1',
+                            borderRadius: '5px',
+                            padding: '6px 8px'
+                          }}
+                        >
+                          <span style={{ display: 'block', fontSize: '10px', color: '#64748b' }}>Dano Potencial Associado (DPA)</span>
+                          <strong style={{ fontSize: '12px', color: '#0f172a' }}>
+                            {hasDpaClassificada ? `${dpaVal} (Classificada)` : 'Não classificada'}
+                          </strong>
+                        </div>
+                        <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '5px', padding: '6px 8px' }}>
+                          <span style={{ display: 'block', fontSize: '10px', color: '#64748b' }}>Categoria de Risco (CRI)</span>
+                          <strong style={{ fontSize: '11.5px', color: '#0f172a' }}>{criVal || 'Não classificada'}</strong>
+                        </div>
                         <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '5px', padding: '6px 8px' }}>
                           <span style={{ display: 'block', fontSize: '10px', color: '#64748b' }}>Empreendimento / Fazenda</span>
                           <strong style={{ fontSize: '11.5px', color: '#0f172a' }}>{bar.empreendimento || 'Não informado'}</strong>
@@ -716,20 +783,6 @@ export function EmpreendedorDocumentosSemaModal({
                             {latFmt || lngFmt ? `${latFmt || '—'} / ${lngFmt || '—'}` : 'Não informadas'}
                           </strong>
                         </div>
-                        <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '5px', padding: '6px 8px' }}>
-                          <span style={{ display: 'block', fontSize: '10px', color: '#64748b' }}>Classificação (CRI / DPA)</span>
-                          <strong style={{ fontSize: '11.5px', color: '#0f172a' }}>
-                            {criVal || dpaVal ? `CRI: ${criVal || '—'} · DPA: ${dpaVal || '—'}` : 'Não classificada'}
-                          </strong>
-                        </div>
-                        {(bar.altura || bar.volume) && (
-                          <div style={{ backgroundColor: '#f8fafc', border: '1px solid #e2e8f0', borderRadius: '5px', padding: '6px 8px' }}>
-                            <span style={{ display: 'block', fontSize: '10px', color: '#64748b' }}>Dimensões (Altura / Volume)</span>
-                            <strong style={{ fontSize: '11.5px', color: '#0f172a' }}>
-                              {bar.altura ? `${bar.altura} m` : '—'} / {bar.volume ? `${bar.volume} m³` : '—'}
-                            </strong>
-                          </div>
-                        )}
                       </div>
 
                       {rtsDaBarragem.length > 0 && (
@@ -1401,7 +1454,7 @@ export function EmpreendedorDocumentosSemaModal({
               )}
             </div>
           </div>
-          {/* Resumo automático dos vínculos entre empreendedor e barragens */}
+          {/* Resumo integrado dos vínculos no cadastro do sistema (suprimido inicialmente) */}
           {vinculos.barragensVinculadas.length > 0 && (
             <div
               style={{
@@ -1413,13 +1466,51 @@ export function EmpreendedorDocumentosSemaModal({
                 fontSize: '12px',
                 display: 'flex',
                 flexDirection: 'column',
-                gap: '6px'
+                gap: '8px'
               }}
             >
               <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
-                <strong style={{ color: '#0369a1' }}>
-                  Dados cruzados de {vinculos.barragensVinculadas.length} barragem(ns) vinculada(s) a este empreendedor:
-                </strong>
+                <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+                  <strong style={{ color: '#0369a1' }}>
+                    Vínculos integrados no sistema: {vinculos.barragensVinculadas.length} barragem(ns) · {vinculos.cars.length} CAR(s)
+                  </strong>
+                  <button
+                    type="button"
+                    onClick={() => setShowVinculosCadastro(prev => !prev)}
+                    style={{
+                      display: 'inline-flex',
+                      alignItems: 'center',
+                      gap: '5px',
+                      background: showVinculosCadastro ? '#e0f2fe' : '#ffffff',
+                      border: '1px solid #7dd3fc',
+                      borderRadius: '6px',
+                      padding: '3px 9px',
+                      color: '#0369a1',
+                      cursor: 'pointer',
+                      fontSize: '11px',
+                      fontWeight: 700
+                    }}
+                  >
+                    <svg
+                      width="12"
+                      height="12"
+                      viewBox="0 0 24 24"
+                      fill="none"
+                      stroke="currentColor"
+                      strokeWidth="2.5"
+                      strokeLinecap="round"
+                      strokeLinejoin="round"
+                      style={{
+                        transform: showVinculosCadastro ? 'rotate(90deg)' : 'rotate(0deg)',
+                        transition: 'transform 0.15s ease'
+                      }}
+                    >
+                      <polyline points="9 18 15 12 9 6" />
+                    </svg>
+                    <span>{showVinculosCadastro ? 'Suprimir barragens vinculadas' : 'Ver barragens vinculadas'}</span>
+                  </button>
+                </div>
+
                 {vinculos.coordenadas.length > 0 && (
                   <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '11.5px', color: '#0369a1', cursor: 'pointer', fontWeight: 600 }}>
                     <input
@@ -1431,6 +1522,7 @@ export function EmpreendedorDocumentosSemaModal({
                   </label>
                 )}
               </div>
+
               <div style={{ display: 'flex', flexWrap: 'wrap', gap: '8px', fontSize: '11.5px', color: '#334155' }}>
                 <span>
                   <strong>CAR/MT localizados:</strong>{' '}
@@ -1442,6 +1534,12 @@ export function EmpreendedorDocumentosSemaModal({
                   </span>
                 )}
               </div>
+
+              {showVinculosCadastro && (
+                <div style={{ marginTop: '4px' }}>
+                  {renderBarragemMatchBox(vinculos.barragensVinculadas, 'header-vinculos')}
+                </div>
+              )}
             </div>
           )}
 

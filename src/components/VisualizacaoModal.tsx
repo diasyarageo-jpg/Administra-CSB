@@ -1,8 +1,12 @@
 // src/components/VisualizacaoModal.tsx
-import React, { useState } from 'react';
-import { parseCoordAdvanced, decimalToGms } from '../services/coordService';
+import React, { useState, useEffect } from 'react';
+import { parseCoordAdvanced } from '../services/coordService';
 import { getEmpreendedorVinculos } from '../services/notificaDataService';
 import { findBarragensMatchingCarString, formatCpfCnpjReadable } from '../config/carCampos';
+import {
+  BarragemDocumentoEmitidoItem,
+  carregarDocumentosEmitidosPorBarragens
+} from '../services/documentosService';
 
 interface VisualizacaoModalProps {
   moduleKey: string;
@@ -13,6 +17,7 @@ interface VisualizacaoModalProps {
     barragens: any[];
     rts: any[];
     documentos?: any[];
+    portarias?: any[];
   };
   canEdit?: boolean;
   onClose: () => void;
@@ -30,6 +35,37 @@ export function VisualizacaoModal({
   onOpenSemaDocs
 }: VisualizacaoModalProps) {
   const [activeTab, setActiveTab] = useState<'geral' | 'vinculos' | 'documentos'>('geral');
+  const [expandedCards, setExpandedCards] = useState<Record<string, boolean>>({});
+  const [docsByBarragemId, setDocsByBarragemId] = useState<Record<string, BarragemDocumentoEmitidoItem[]>>({});
+
+  useEffect(() => {
+    setExpandedCards({});
+    setActiveTab('geral');
+  }, [moduleKey, record?.id]);
+
+  useEffect(() => {
+    let active = true;
+    const targetDams =
+      moduleKey === 'barragens' && record
+        ? [record]
+        : (moduleKey === 'empreendedores' || moduleKey === 'rts') && record
+        ? db.barragens || []
+        : [];
+    if (targetDams.length === 0) {
+      setDocsByBarragemId({});
+      return;
+    }
+    carregarDocumentosEmitidosPorBarragens(targetDams, { portarias: db.portarias || [] })
+      .then(map => {
+        if (active) setDocsByBarragemId(map);
+      })
+      .catch(() => {
+        if (active) setDocsByBarragemId({});
+      });
+    return () => {
+      active = false;
+    };
+  }, [moduleKey, record, db.barragens, db.portarias]);
 
   if (!record) return null;
 
@@ -109,7 +145,191 @@ export function VisualizacaoModal({
 
   const linkedEmpObj = moduleKey === 'barragens' ? resolveEmpreendedorObj(record.empreendedor) : null;
   const empVinculos = moduleKey === 'empreendedores' ? getEmpreendedorVinculos(record, db.barragens || []) : null;
-  const docsBarragem = moduleKey === 'barragens' ? getDocumentosDaBarragem(record.id, record.nome || '') : [];
+  const docsBarragem =
+    moduleKey === 'barragens'
+      ? docsByBarragemId[String(record.id || 'barr_0')] || getDocumentosDaBarragem(record.id, record.nome || '')
+      : [];
+
+  const getRtsForDam = (bar: any) => {
+    const barId = String(bar?.id || '').trim();
+    const barNome = String(bar?.nome || bar?.nomeBarragem || '').trim().toLowerCase();
+    const out: Array<{ nome: string; art?: string; validade?: string }> = [];
+    for (const rt of db.rts || []) {
+      const vinculosRt =
+        Array.isArray(rt?.vinculos) && rt.vinculos.length > 0
+          ? rt.vinculos
+          : [{ barragemId: rt?.barragemId || rt?.barragemVinculada, nomeBarragem: rt?.nomeBarragem, art: rt?.art || rt?.artRrt, validade: rt?.validade }];
+      for (const v of vinculosRt) {
+        const matchId = barId && (String(v.barragemId || '') === barId || String(v.barragemVinculada || '') === barId);
+        const matchNome = barNome && (String(v.nomeBarragem || '').trim().toLowerCase() === barNome || String(v.barragemVinculada || '').trim().toLowerCase() === barNome);
+        if (matchId || matchNome) {
+          out.push({ nome: rt.nome || 'RT', art: v.art || v.artRrt || rt.art, validade: v.validade });
+        }
+      }
+    }
+    return out;
+  };
+
+  const renderExpandArrowButton = (expandKey: string, closedLabel = 'Expandir', openLabel = 'Suprimir') => {
+    const isOpen = Boolean(expandedCards[expandKey]);
+    return (
+      <button
+        type="button"
+        onClick={() => setExpandedCards(prev => ({ ...prev, [expandKey]: !prev[expandKey] }))}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: '5px',
+          background: isOpen ? '#e0f2fe' : '#f8fafc',
+          border: '1px solid #cbd5e1',
+          borderRadius: '6px',
+          padding: '3px 8px',
+          color: '#0369a1',
+          cursor: 'pointer',
+          fontSize: '11px',
+          fontWeight: 700
+        }}
+      >
+        <svg
+          width="12"
+          height="12"
+          viewBox="0 0 24 24"
+          fill="none"
+          stroke="currentColor"
+          strokeWidth="2.5"
+          strokeLinecap="round"
+          strokeLinejoin="round"
+          style={{
+            transform: isOpen ? 'rotate(90deg)' : 'rotate(0deg)',
+            transition: 'transform 0.15s ease'
+          }}
+        >
+          <polyline points="9 18 15 12 9 6" />
+        </svg>
+        <span>{isOpen ? openLabel : closedLabel}</span>
+      </button>
+    );
+  };
+
+  const renderBarragemExpandableCard = (bar: any, expandKey: string) => {
+    const isOpen = Boolean(expandedCards[expandKey]);
+    const alturaVal =
+      bar.altura !== undefined && bar.altura !== null && String(bar.altura).trim() !== ''
+        ? `${bar.altura} m`
+        : 'Não informada';
+    const volumeVal =
+      bar.volume !== undefined && bar.volume !== null && String(bar.volume).trim() !== ''
+        ? `${bar.volume} m³`
+        : 'Não informado';
+    const dpaVal = bar.danoPotencial || bar.dpa || '';
+    const criVal = bar.categoriaRisco || bar.cri || '';
+    const hasDpaClassificada = Boolean(dpaVal && String(dpaVal).trim() !== '' && String(dpaVal).trim() !== 'Não classificada');
+    const docsDaDam = docsByBarragemId[String(bar.id || '')] || [];
+    const rtsDaDam = getRtsForDam(bar);
+
+    return (
+      <div
+        key={expandKey}
+        style={{
+          padding: '9px 11px',
+          background: isOpen ? '#ffffff' : '#f8fafc',
+          borderRadius: '8px',
+          border: isOpen ? '1.5px solid #059669' : '1px solid #cbd5e1',
+          fontSize: '12px'
+        }}
+      >
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+            <strong style={{ color: '#0f172a', fontSize: '12.5px' }}>{bar.nome || bar.nomeBarragem || 'Barragem'}</strong>
+            {hasDpaClassificada && (
+              <span className={`badge ${dpaVal === 'Alto' ? 'red' : dpaVal === 'Médio' ? 'amber' : 'green'}`} style={{ fontSize: '10px' }}>
+                DPA: {dpaVal}
+              </span>
+            )}
+            {docsDaDam.length > 0 && (
+              <span style={{ fontSize: '10px', fontWeight: 700, padding: '1px 6px', borderRadius: '4px', backgroundColor: '#e0f2fe', color: '#0369a1' }}>
+                {docsDaDam.length} doc(s)
+              </span>
+            )}
+          </div>
+          {renderExpandArrowButton(expandKey, 'Características e vínculos', 'Suprimir')}
+        </div>
+
+        <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', marginTop: '4px', color: '#475569', fontSize: '11.5px' }}>
+          <span>CAR/MT: <strong style={{ color: '#0369a1', fontFamily: 'monospace' }}>{bar.car || 'Não informado'}</strong></span>
+          {bar.processo && <span>Processo: <strong>{bar.processo}</strong></span>}
+          {bar.municipio && <span>Município: <strong>{bar.municipio}</strong></span>}
+        </div>
+
+        {isOpen && (
+          <div style={{ marginTop: '9px', paddingTop: '9px', borderTop: '1px dashed #cbd5e1', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(160px, 1fr))', gap: '6px' }}>
+              <div style={{ background: '#f8fafc', padding: '6px 8px', borderRadius: '6px', border: '1px solid #cbd5e1' }}>
+                <span style={{ fontSize: '10px', color: '#64748b', display: 'block' }}>Altura do Maciço</span>
+                <strong style={{ fontSize: '12px', color: '#0f172a' }}>{alturaVal}</strong>
+              </div>
+              <div style={{ background: '#f8fafc', padding: '6px 8px', borderRadius: '6px', border: '1px solid #cbd5e1' }}>
+                <span style={{ fontSize: '10px', color: '#64748b', display: 'block' }}>Volume do Reservatório</span>
+                <strong style={{ fontSize: '12px', color: '#0f172a' }}>{volumeVal}</strong>
+              </div>
+              <div
+                style={{
+                  background: hasDpaClassificada
+                    ? dpaVal === 'Alto'
+                      ? '#fef2f2'
+                      : dpaVal === 'Médio'
+                      ? '#fffbeb'
+                      : '#f0fdf4'
+                    : '#f8fafc',
+                  padding: '6px 8px',
+                  borderRadius: '6px',
+                  border: hasDpaClassificada ? '1px solid #94a3b8' : '1px solid #cbd5e1'
+                }}
+              >
+                <span style={{ fontSize: '10px', color: '#64748b', display: 'block' }}>Dano Potencial (DPA)</span>
+                <strong style={{ fontSize: '12px', color: '#0f172a' }}>
+                  {hasDpaClassificada ? `${dpaVal} (Classificada)` : 'Não classificada'}
+                </strong>
+              </div>
+              <div style={{ background: '#f8fafc', padding: '6px 8px', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
+                <span style={{ fontSize: '10px', color: '#64748b', display: 'block' }}>Categoria de Risco (CRI)</span>
+                <strong style={{ fontSize: '12px', color: '#0f172a' }}>{criVal || 'Não classificada'}</strong>
+              </div>
+              <div style={{ background: '#f8fafc', padding: '6px 8px', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
+                <span style={{ fontSize: '10px', color: '#64748b', display: 'block' }}>Curso d’Água</span>
+                <strong style={{ fontSize: '11.5px', color: '#0f172a' }}>{bar.cursoAgua || bar.cursoDagua || 'Não informado'}</strong>
+              </div>
+              <div style={{ background: '#f8fafc', padding: '6px 8px', borderRadius: '6px', border: '1px solid #e2e8f0' }}>
+                <span style={{ fontSize: '10px', color: '#64748b', display: 'block' }}>Coordenadas</span>
+                <strong style={{ fontSize: '11px', color: '#0f172a', fontFamily: 'monospace' }}>
+                  {bar.latitude || bar.longitude ? `${formatCoordDisplay(bar.latitude, false)} / ${formatCoordDisplay(bar.longitude, true)}` : 'Não informadas'}
+                </strong>
+              </div>
+            </div>
+
+            {rtsDaDam.length > 0 && (
+              <div style={{ fontSize: '11.5px', color: '#334155', background: '#f8fafc', padding: '6px 8px', borderRadius: '5px', border: '1px solid #e2e8f0' }}>
+                <strong>RT(s): </strong>
+                {rtsDaDam.map(r => (r.art ? `${r.nome} (ART: ${r.art})` : r.nome)).join('; ')}
+              </div>
+            )}
+
+            {docsDaDam.length > 0 && (
+              <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                <strong style={{ fontSize: '10.5px', color: '#0369a1' }}>Documentos emitidos ({docsDaDam.length}):</strong>
+                {docsDaDam.map((doc, dIdx) => (
+                  <div key={`${doc.id}-${dIdx}`} style={{ fontSize: '11px', color: '#334155', background: '#f0f9ff', padding: '5px 8px', borderRadius: '5px', border: '1px solid #bae6fd' }}>
+                    <strong>[{doc.tipo}]</strong> {doc.numero ? `${doc.titulo} · Nº ${doc.numero}` : doc.titulo}
+                    {doc.dataEmissao ? ` · ${formatDataIso(doc.dataEmissao)}` : ''}
+                  </div>
+                ))}
+              </div>
+            )}
+          </div>
+        )}
+      </div>
+    );
+  };
 
   return (
     <div className="modal-back" onClick={e => e.target === e.currentTarget && onClose()}>
@@ -352,17 +572,10 @@ export function VisualizacaoModal({
                       {!empVinculos || empVinculos.barragensVinculadas.length === 0 ? (
                         <span style={{ fontSize: '12px', color: '#64748b' }}>Nenhuma barragem vinculada.</span>
                       ) : (
-                        <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                          {empVinculos.barragensVinculadas.map((bar: any, idx: number) => (
-                            <div key={bar.id || idx} style={{ padding: '8px 10px', background: '#f8fafc', borderRadius: '6px', border: '1px solid #e2e8f0', fontSize: '12px' }}>
-                              <strong style={{ color: '#0f172a', display: 'block' }}>{bar.nome || bar.nomeBarragem || 'Barragem'}</strong>
-                              <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', marginTop: '3px', color: '#475569', fontSize: '11.5px' }}>
-                                <span>CAR/MT: <strong style={{ color: '#0369a1' }}>{bar.car || 'Não informado'}</strong></span>
-                                {bar.processo && <span>Processo: <strong>{bar.processo}</strong></span>}
-                                {bar.municipio && <span>Município: {bar.municipio}</span>}
-                              </div>
-                            </div>
-                          ))}
+                        <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                          {empVinculos.barragensVinculadas.map((bar: any, idx: number) =>
+                            renderBarragemExpandableCard(bar, `emp-geral-dam-${bar.id || idx}`)
+                          )}
                         </div>
                       )}
                     </div>
@@ -378,6 +591,8 @@ export function VisualizacaoModal({
                           {record.empreendimentos.map((emp: any, idx: number) => {
                             const barragensDoCar = findBarragensMatchingCarString(emp.car, db.barragens);
                             const hasBarragem = barragensDoCar.length > 0;
+                            const empExpandKey = `emp-geral-imovel-${emp.id || idx}`;
+                            const isEmpOpen = Boolean(expandedCards[empExpandKey]);
                             return (
                               <div
                                 key={emp.id || idx}
@@ -404,10 +619,11 @@ export function VisualizacaoModal({
                                           color: '#ffffff'
                                         }}
                                       >
-                                        BARRAGEM NO CADASTRO
+                                        BARRAGEM NO CADASTRO ({barragensDoCar.length})
                                       </span>
                                     )}
                                     <span style={{ fontSize: '10.5px', color: '#64748b' }}>{emp.tipo || 'Rural'}</span>
+                                    {hasBarragem && renderExpandArrowButton(empExpandKey, 'Ver barragens', 'Suprimir')}
                                   </div>
                                 </div>
                                 <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', marginTop: '3px', color: '#475569', fontSize: '11.5px' }}>
@@ -415,9 +631,11 @@ export function VisualizacaoModal({
                                   {emp.escritura && <span>Escritura: <strong>{emp.escritura}</strong></span>}
                                   {emp.municipio && <span>{emp.municipio}{emp.uf ? `/${emp.uf}` : ''}</span>}
                                 </div>
-                                {hasBarragem && (
-                                  <div style={{ marginTop: '4px', fontSize: '11px', color: '#065f46', fontWeight: 600 }}>
-                                    Barragem(ns): {barragensDoCar.map((b: any) => b.nome || b.nomeBarragem || 'Barragem').join(', ')}
+                                {hasBarragem && isEmpOpen && (
+                                  <div style={{ marginTop: '8px', display: 'flex', flexDirection: 'column', gap: '6px' }}>
+                                    {barragensDoCar.map((b: any, bIdx: number) =>
+                                      renderBarragemExpandableCard(b, `${empExpandKey}-dam-${b.id || bIdx}`)
+                                    )}
                                   </div>
                                 )}
                               </div>
@@ -452,30 +670,9 @@ export function VisualizacaoModal({
                       </div>
                     ) : (
                       <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                        {empVinculos.barragensVinculadas.map((bar: any, i: number) => (
-                          <div key={bar.id || i} style={{ background: '#f8fafc', border: '1px solid #cbd5e1', borderRadius: '8px', padding: '10px 14px' }}>
-                            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '6px' }}>
-                              <strong style={{ fontSize: '13px', color: '#0f172a' }}>{bar.nome || bar.nomeBarragem || 'Barragem'}</strong>
-                              <span style={{ fontSize: '11px', color: '#64748b' }}>{bar.municipio || 'MT'}</span>
-                            </div>
-                            <div style={{ display: 'flex', flexWrap: 'wrap', gap: '14px', marginTop: '6px', fontSize: '12px', color: '#334155' }}>
-                              <div>
-                                <span style={{ color: '#64748b' }}>CAR/MT: </span>
-                                <strong style={{ fontFamily: 'monospace', color: '#0284c7' }}>{bar.car || '—'}</strong>
-                              </div>
-                              <div>
-                                <span style={{ color: '#64748b' }}>Processo SEMA: </span>
-                                <span>{bar.processo || '—'}</span>
-                              </div>
-                              {(bar.latitude || bar.longitude) && (
-                                <div>
-                                  <span style={{ color: '#64748b' }}>Coordenadas: </span>
-                                  <span style={{ fontFamily: 'monospace' }}>{bar.latitude || '—'} / {bar.longitude || '—'}</span>
-                                </div>
-                              )}
-                            </div>
-                          </div>
-                        ))}
+                        {empVinculos.barragensVinculadas.map((bar: any, i: number) =>
+                          renderBarragemExpandableCard(bar, `emp-tab-dam-${bar.id || i}`)
+                        )}
                       </div>
                     )}
                   </div>
@@ -652,36 +849,138 @@ export function VisualizacaoModal({
                     </div>
                   </div>
 
-                  {/* Características de Segurança e Classificação */}
-                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '10px' }}>
-                    <div style={{ background: '#f8fafc', padding: '10px 12px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
-                      <span style={{ fontSize: '11px', color: '#64748b', display: 'block' }}>Categoria de Risco (CRI)</span>
-                      <span className={`badge ${record.categoriaRisco === 'Alto' ? 'red' : record.categoriaRisco === 'Médio' ? 'amber' : 'green'}`} style={{ marginTop: '2px' }}>
-                        {record.categoriaRisco || 'Não classificada'}
-                      </span>
-                    </div>
+                  {/* Características de Segurança, Dimensões e Classificação */}
+                  {(() => {
+                    const criVal = record.categoriaRisco || record.cri || '';
+                    const dpaVal = record.danoPotencial || record.dpa || '';
+                    const hasDpaClassificada = Boolean(
+                      dpaVal && String(dpaVal).trim() !== '' && String(dpaVal).trim() !== 'Não classificada'
+                    );
+                    const alturaDisplay =
+                      record.altura !== undefined && record.altura !== null && String(record.altura).trim() !== ''
+                        ? `${record.altura} m`
+                        : 'Não informada';
+                    const volumeDisplay =
+                      record.volume !== undefined && record.volume !== null && String(record.volume).trim() !== ''
+                        ? `${record.volume} m³`
+                        : 'Não informado';
+                    const rtsDaBarragem = getRtsForDam(record);
+                    const vinculosOpen = Boolean(expandedCards['dam-vinculos-integrados']);
 
-                    <div style={{ background: '#f8fafc', padding: '10px 12px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
-                      <span style={{ fontSize: '11px', color: '#64748b', display: 'block' }}>Dano Potencial (DPA)</span>
-                      <span className={`badge ${record.danoPotencial === 'Alto' ? 'red' : record.danoPotencial === 'Médio' ? 'amber' : 'green'}`} style={{ marginTop: '2px' }}>
-                        {record.danoPotencial || 'Não classificada'}
-                      </span>
-                    </div>
+                    return (
+                      <>
+                        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(180px, 1fr))', gap: '10px' }}>
+                          <div style={{ background: '#f8fafc', padding: '10px 12px', borderRadius: '8px', border: '1px solid #cbd5e1' }}>
+                            <span style={{ fontSize: '11px', color: '#64748b', display: 'block' }}>Altura do Maciço</span>
+                            <span style={{ fontSize: '13.5px', color: '#0f172a', fontWeight: 700 }}>
+                              {alturaDisplay}
+                            </span>
+                          </div>
 
-                    <div style={{ background: '#f8fafc', padding: '10px 12px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
-                      <span style={{ fontSize: '11px', color: '#64748b', display: 'block' }}>Altura do Maciço</span>
-                      <span style={{ fontSize: '13px', color: '#0f172a', fontWeight: 600 }}>
-                        {record.altura ? `${record.altura} m` : '—'}
-                      </span>
-                    </div>
+                          <div style={{ background: '#f8fafc', padding: '10px 12px', borderRadius: '8px', border: '1px solid #cbd5e1' }}>
+                            <span style={{ fontSize: '11px', color: '#64748b', display: 'block' }}>Volume do Reservatório</span>
+                            <span style={{ fontSize: '13.5px', color: '#0f172a', fontWeight: 700 }}>
+                              {volumeDisplay}
+                            </span>
+                          </div>
 
-                    <div style={{ background: '#f8fafc', padding: '10px 12px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
-                      <span style={{ fontSize: '11px', color: '#64748b', display: 'block' }}>Volume do Reservatório</span>
-                      <span style={{ fontSize: '13px', color: '#0f172a', fontWeight: 600 }}>
-                        {record.volume ? `${record.volume} m³` : '—'}
-                      </span>
-                    </div>
-                  </div>
+                          <div
+                            style={{
+                              background: hasDpaClassificada
+                                ? dpaVal === 'Alto'
+                                  ? '#fef2f2'
+                                  : dpaVal === 'Médio'
+                                  ? '#fffbeb'
+                                  : '#f0fdf4'
+                                : '#f8fafc',
+                              padding: '10px 12px',
+                              borderRadius: '8px',
+                              border: hasDpaClassificada ? '1px solid #94a3b8' : '1px solid #cbd5e1'
+                            }}
+                          >
+                            <span style={{ fontSize: '11px', color: '#64748b', display: 'block' }}>Dano Potencial Associado (DPA)</span>
+                            <span
+                              className={`badge ${
+                                hasDpaClassificada
+                                  ? dpaVal === 'Alto'
+                                    ? 'red'
+                                    : dpaVal === 'Médio'
+                                    ? 'amber'
+                                    : 'green'
+                                  : 'gray'
+                              }`}
+                              style={{ marginTop: '3px' }}
+                            >
+                              {hasDpaClassificada ? `${dpaVal} (Classificada)` : 'Não classificada'}
+                            </span>
+                          </div>
+
+                          <div style={{ background: '#f8fafc', padding: '10px 12px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
+                            <span style={{ fontSize: '11px', color: '#64748b', display: 'block' }}>Categoria de Risco (CRI)</span>
+                            <span
+                              className={`badge ${
+                                criVal === 'Alto' ? 'red' : criVal === 'Médio' ? 'amber' : criVal ? 'green' : 'gray'
+                              }`}
+                              style={{ marginTop: '3px' }}
+                            >
+                              {criVal || 'Não classificada'}
+                            </span>
+                          </div>
+                        </div>
+
+                        {/* Vínculos integrados (RTs + Documentos emitidos) inicialmente suprimidos */}
+                        <div style={{ background: '#ffffff', padding: '10px 14px', borderRadius: '8px', border: '1px solid #cbd5e1' }}>
+                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+                            <strong style={{ fontSize: '12px', color: '#0f172a' }}>
+                              Vínculos Integrados: {rtsDaBarragem.length} RT(s) · {docsBarragem.length} Documento(s) Emitido(s)
+                            </strong>
+                            {renderExpandArrowButton('dam-vinculos-integrados', 'Expandir vínculos e documentos', 'Suprimir')}
+                          </div>
+                          {vinculosOpen && (
+                            <div style={{ marginTop: '10px', paddingTop: '10px', borderTop: '1px dashed #cbd5e1', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                              <div>
+                                <strong style={{ fontSize: '11px', color: '#0369a1', display: 'block', marginBottom: '4px' }}>
+                                  Responsáveis Técnicos ({rtsDaBarragem.length})
+                                </strong>
+                                {rtsDaBarragem.length === 0 ? (
+                                  <span style={{ fontSize: '11.5px', color: '#64748b' }}>Nenhum responsável técnico vinculado.</span>
+                                ) : (
+                                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                    {rtsDaBarragem.map((r, rIdx) => (
+                                      <div key={rIdx} style={{ fontSize: '11.5px', color: '#0f172a', background: '#f8fafc', padding: '5px 8px', borderRadius: '5px', border: '1px solid #e2e8f0' }}>
+                                        <strong>{r.nome}</strong>
+                                        {r.art && <span> · ART: <b>{r.art}</b></span>}
+                                        {r.validade && <span> · Validade: {formatDataIso(r.validade)}</span>}
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+
+                              <div>
+                                <strong style={{ fontSize: '11px', color: '#0369a1', display: 'block', marginBottom: '4px' }}>
+                                  Documentos Emitidos ({docsBarragem.length})
+                                </strong>
+                                {docsBarragem.length === 0 ? (
+                                  <span style={{ fontSize: '11.5px', color: '#64748b' }}>Nenhum documento emitido localizado para esta barragem.</span>
+                                ) : (
+                                  <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                                    {docsBarragem.map((doc: any, dIdx: number) => (
+                                      <div key={doc.id || dIdx} style={{ fontSize: '11.5px', color: '#0f172a', background: '#f0f9ff', padding: '5px 8px', borderRadius: '5px', border: '1px solid #bae6fd' }}>
+                                        <strong>[{doc.tipo}]</strong> {doc.numero ? `${doc.titulo} · Nº ${doc.numero}` : doc.titulo}
+                                        {doc.dataEmissao ? ` · ${formatDataIso(doc.dataEmissao)}` : ''}
+                                        {doc.situacao ? ` · ${doc.situacao}` : ''}
+                                      </div>
+                                    ))}
+                                  </div>
+                                )}
+                              </div>
+                            </div>
+                          )}
+                        </div>
+                      </>
+                    );
+                  })()}
 
                   {/* Observações */}
                   <div style={{ background: '#f8fafc', padding: '12px 14px', borderRadius: '8px', border: '1px solid #e2e8f0' }}>
@@ -812,44 +1111,51 @@ export function VisualizacaoModal({
                   <h4 style={{ fontSize: '13px', margin: '0 0 10px', color: '#334155' }}>
                     Vínculos de ART e Barragens Associadas
                   </h4>
-                  {Array.isArray(record.vinculos) && record.vinculos.length > 0 ? (
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
-                      {record.vinculos.map((v: any, i: number) => (
-                        <div key={v.id || i} style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '12px 14px' }}>
-                          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
-                            <div>
-                              <span className="badge blue" style={{ fontSize: '10px' }}>ART: {v.art || 'S/ ART'}</span>
-                              <strong style={{ fontSize: '13px', color: '#0f172a', marginLeft: '8px' }}>
-                                ➔ {v.barragemNome || v.nomeBarragem || v.barragemId || 'Barragem vinculada'}
-                              </strong>
+                  {(() => {
+                    const rtVinculos = Array.isArray(record.vinculos) && record.vinculos.length > 0
+                      ? record.vinculos
+                      : [{
+                          id: 'rt-vinculo-principal',
+                          art: record.art || record.artRrt,
+                          barragemId: record.barragemId || record.barragemVinculada,
+                          barragemNome: record.barragemVinculada || record.nomeBarragem,
+                          validade: record.validade
+                        }];
+
+                    return (
+                      <div style={{ display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                        {rtVinculos.map((v: any, i: number) => {
+                          const targetId = String(v.barragemId || '').trim();
+                          const targetName = String(v.barragemNome || v.nomeBarragem || v.barragemVinculada || '').trim().toLowerCase();
+                          const matchedDam = (db.barragens || []).find((b: any) =>
+                            (targetId && String(b.id) === targetId) ||
+                            (targetName && String(b.nome || '').trim().toLowerCase() === targetName)
+                          );
+                          return (
+                            <div key={v.id || i} style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '10px 12px', display: 'flex', flexDirection: 'column', gap: '8px' }}>
+                              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
+                                <div>
+                                  <span className="badge blue" style={{ fontSize: '10px' }}>ART: {v.art || 'Não informada'}</span>
+                                  <strong style={{ fontSize: '13px', color: '#0f172a', marginLeft: '8px' }}>
+                                    {v.barragemNome || v.nomeBarragem || v.barragemVinculada || matchedDam?.nome || 'Barragem vinculada'}
+                                  </strong>
+                                </div>
+                                <span style={{ fontSize: '11px', color: '#64748b' }}>
+                                  {v.validade ? `Validade: ${formatDataIso(v.validade)}` : ''}
+                                </span>
+                              </div>
+                              {v.tipoVinculo && (
+                                <div style={{ fontSize: '11.5px', color: '#475569' }}>
+                                  Tipo de atuação: <strong>{v.tipoVinculo}</strong>
+                                </div>
+                              )}
+                              {matchedDam && renderBarragemExpandableCard(matchedDam, `rt-dam-${matchedDam.id || i}`)}
                             </div>
-                            <span style={{ fontSize: '11px', color: '#64748b' }}>
-                              {v.validade ? `Validade: ${formatDataIso(v.validade)}` : ''}
-                            </span>
-                          </div>
-                          {v.tipoVinculo && (
-                            <div style={{ fontSize: '11.5px', color: '#475569', marginTop: '6px' }}>
-                              Tipo de atuação: <strong>{v.tipoVinculo}</strong>
-                            </div>
-                          )}
-                        </div>
-                      ))}
-                    </div>
-                  ) : (
-                    <div style={{ background: '#ffffff', border: '1px solid #e2e8f0', borderRadius: '8px', padding: '14px' }}>
-                      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
-                        <div>
-                          <span className="badge blue" style={{ fontSize: '10px' }}>ART: {record.art || record.artRrt || 'Não informada'}</span>
-                          <strong style={{ fontSize: '13px', color: '#0f172a', marginLeft: '8px' }}>
-                            ➔ {record.barragemVinculada || record.nomeBarragem || 'Barragem cadastrada'}
-                          </strong>
-                        </div>
-                        <span style={{ fontSize: '11px', color: '#64748b' }}>
-                          {record.validade ? `Validade: ${formatDataIso(record.validade)}` : ''}
-                        </span>
+                          );
+                        })}
                       </div>
-                    </div>
-                  )}
+                    );
+                  })()}
                 </div>
               )}
             </>

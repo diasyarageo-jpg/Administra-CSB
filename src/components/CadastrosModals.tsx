@@ -862,6 +862,18 @@ export function BarragemModal({
     return parsed.gms || String(record.longitude);
   });
   const [situacao, setSituacao] = useState<string>(record.situacao || 'Aguardando confirmação');
+  const [altura, setAltura] = useState<string>(
+    record.altura !== undefined && record.altura !== null ? String(record.altura) : ''
+  );
+  const [volume, setVolume] = useState<string>(
+    record.volume !== undefined && record.volume !== null ? String(record.volume) : ''
+  );
+  const [danoPotencial, setDanoPotencial] = useState<string>(
+    record.danoPotencial || record.dpa || ''
+  );
+  const [categoriaRisco, setCategoriaRisco] = useState<string>(
+    record.categoriaRisco || record.cri || ''
+  );
   const [observacoes, setObservacoes] = useState<string>(record.observacoes || '');
 
   // Vínculo com Empreendedor
@@ -1006,6 +1018,10 @@ export function BarragemModal({
       cursoAgua: cursoAgua.trim(),
       latitude: latitude.trim(),
       longitude: longitude.trim(),
+      altura: altura.trim(),
+      volume: volume.trim(),
+      danoPotencial: danoPotencial.trim(),
+      categoriaRisco: categoriaRisco.trim(),
       situacao,
       observacoes: observacoes.trim()
     });
@@ -1298,6 +1314,50 @@ export function BarragemModal({
                 <option value="Ativa">Ativa</option>
                 <option value="Inativa">Inativa</option>
                 <option value="Aguardando confirmação">Aguardando confirmação</option>
+              </select>
+            </div>
+
+            <div className="form-field">
+              <label>Altura do maciço (m)</label>
+              <input
+                className="input"
+                type="text"
+                inputMode="decimal"
+                value={altura}
+                onChange={e => setAltura(e.target.value)}
+                placeholder="Ex: 12,5"
+              />
+            </div>
+
+            <div className="form-field">
+              <label>Volume do reservatório (m³)</label>
+              <input
+                className="input"
+                type="text"
+                inputMode="decimal"
+                value={volume}
+                onChange={e => setVolume(e.target.value)}
+                placeholder="Ex: 500000"
+              />
+            </div>
+
+            <div className="form-field">
+              <label>Dano Potencial Associado (DPA)</label>
+              <select className="select" value={danoPotencial} onChange={e => setDanoPotencial(e.target.value)}>
+                <option value="">Não classificada</option>
+                <option value="Baixo">Baixo</option>
+                <option value="Médio">Médio</option>
+                <option value="Alto">Alto</option>
+              </select>
+            </div>
+
+            <div className="form-field">
+              <label>Categoria de Risco (CRI)</label>
+              <select className="select" value={categoriaRisco} onChange={e => setCategoriaRisco(e.target.value)}>
+                <option value="">Não classificada</option>
+                <option value="Baixo">Baixo</option>
+                <option value="Médio">Médio</option>
+                <option value="Alto">Alto</option>
               </select>
             </div>
 
