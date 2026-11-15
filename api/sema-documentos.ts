@@ -10,6 +10,12 @@ import {
   preserveSemaProperties,
   stripOuterQuotesAndBrackets
 } from '../src/config/carCampos';
+import {
+  authorizeSemaLookupRequest,
+  parseSemaAuditTargetContext,
+  recordSemaServerAudit,
+  validateTargetEntityAccess
+} from '../src/server/semaAudit';
 
 interface VercelLikeRequest extends IncomingMessage {
   query?: Record<string, string | string[]>;
@@ -39,6 +45,7 @@ interface CamadaStatus {
   suportado: boolean;
   registrosEncontrados: number;
   camposPesquisados?: string[];
+  camposConfirmados?: string[];
   mensagem: string;
 }
 
@@ -668,16 +675,84 @@ function evaluateFeatureMatch(
   return { matches: false, confirmatory: false };
 }
 
+function inspectConfirmedCpfCnpjFromSchema(
+  rawProps: Record<string, any>,
+  schemaFields: Map<string, string>
+): {
+  cpfCnpjCompletoDisponivel: boolean;
+  cpfCnpjCampoOrigem?: string;
+  cpfCnpjStatus: 'completo' | 'mascarado' | 'ausente';
+  fullDocReadable?: string;
+  docDigits?: string;
+} {
+  const confirmedDocFields = resolveConfirmedFields(schemaFields, SEMA_FIELD_CANDIDATES.documento);
+  const confirmedOwnerFields = resolveConfirmedFields(schemaFields, SEMA_FIELD_CANDIDATES.titular);
+  let sawMasked = false;
+
+  for (const field of confirmedDocFields) {
+    const val = rawProps[field];
+    if (val === undefined || val === null) continue;
+    const str = String(val).trim();
+    if (!str) continue;
+    if (/[x*]/i.test(str)) {
+      sawMasked = true;
+      continue;
+    }
+    const digits = str.replace(/\D/g, '');
+    if (digits.length === 11 || digits.length === 14) {
+      return {
+        cpfCnpjCompletoDisponivel: true,
+        cpfCnpjCampoOrigem: field,
+        cpfCnpjStatus: 'completo',
+        fullDocReadable: formatCpfCnpjReadable(digits),
+        docDigits: digits
+      };
+    }
+  }
+
+  for (const field of confirmedOwnerFields) {
+    const val = rawProps[field];
+    if (val === undefined || val === null) continue;
+    const str = String(val).trim();
+    if (!str) continue;
+    const docMatch =
+      str.match(/\b\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}\b/) ||
+      str.match(/\b\d{3}\.\d{3}\.\d{3}-\d{2}\b/) ||
+      str.match(/(?<![\d/.\-xX*])(\d{14}|\d{11})(?![\d/.\-xX*])/);
+    if (docMatch?.[0]) {
+      const digits = docMatch[0].replace(/\D/g, '');
+      return {
+        cpfCnpjCompletoDisponivel: true,
+        cpfCnpjCampoOrigem: field,
+        cpfCnpjStatus: 'completo',
+        fullDocReadable: formatCpfCnpjReadable(docMatch[0]),
+        docDigits: digits
+      };
+    }
+    if (/x{2,}\d+x{2,}|\*{2,}/i.test(str)) {
+      sawMasked = true;
+    }
+  }
+
+  return {
+    cpfCnpjCompletoDisponivel: false,
+    cpfCnpjStatus: sawMasked ? 'mascarado' : 'ausente'
+  };
+}
+
 function mapFeatureToDocumentItem(
   f: any,
   layerName: string,
   layerTitle: string,
   grupo: string,
   schemaFields: Map<string, string>,
+  geomFields: Set<string>,
   confirmedDocFields: string[],
-  correspondenciaExploratoria: boolean
+  correspondenciaExploratoria: boolean,
+  consultadoEm: string
 ) {
   const rawProps = f.properties && typeof f.properties === 'object' ? f.properties : {};
+  const camposConfirmadosEsquema = Array.from(schemaFields.keys()).filter(k => !geomFields.has(k));
 
   const confirmedIdProp = extractConfirmedFieldValue(
     rawProps,
@@ -692,6 +767,7 @@ function mapFeatureToDocumentItem(
       : null;
 
   const preservedProps = preserveSemaProperties(rawProps, confirmedDocFields);
+  const docCheck = inspectConfirmedCpfCnpjFromSchema(rawProps, schemaFields);
 
   const rawDocVal = extractConfirmedFieldValue(
     rawProps,
@@ -728,16 +804,7 @@ function mapFeatureToDocumentItem(
   );
   const titular = titularRaw ? stripOuterQuotesAndBrackets(titularRaw) : undefined;
 
-  let cpfCnpjReadable = formatCpfCnpjReadable(rawDocVal);
-  if (!cpfCnpjReadable && titular) {
-    const docMatch =
-      titular.match(/\b\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}\b/) ||
-      titular.match(/\b\d{3}\.\d{3}\.\d{3}-\d{2}\b/) ||
-      titular.match(/(?<![\d/.\-])(\d{14}|\d{11})(?![\d/.\-])/) ;
-    if (docMatch?.[0]) {
-      cpfCnpjReadable = formatCpfCnpjReadable(docMatch[0]);
-    }
-  }
+  const cpfCnpjReadable = docCheck.fullDocReadable || formatCpfCnpjReadable(rawDocVal);
 
   const situacaoRaw = extractConfirmedFieldValue(
     preservedProps,
@@ -796,6 +863,7 @@ function mapFeatureToDocumentItem(
       numeroDocumento: carEstadual || carFederal || protocolo || '',
       nomeDocumento: nomePropriedade || '',
       dataDocumento: dataDoc || '',
+      numeroProcesso: numProcesso,
       status: situacaoLimpa,
       razaoSocial: titular,
       cpfCnpjMascarado: cpfCnpjReadable,
@@ -808,7 +876,15 @@ function mapFeatureToDocumentItem(
       atividade: atividadeLimpa,
       linkDocumento: linkDoc,
       correspondenciaExploratoria,
-      propriedadesBrutas: preservedProps
+      camposConfirmadosEsquema,
+      cpfCnpjCompletoDisponivel: docCheck.cpfCnpjCompletoDisponivel,
+      cpfCnpjCampoOrigem: docCheck.cpfCnpjCampoOrigem,
+      cpfCnpjStatus: docCheck.cpfCnpjStatus,
+      consultadoEm,
+      propriedadesBrutas: preservedProps,
+      _auditRawProps: rawProps,
+      _auditDocDigits: docCheck.docDigits,
+      _auditCar: carEstadual || carFederal || protocolo || undefined
     };
   }
 
@@ -851,7 +927,15 @@ function mapFeatureToDocumentItem(
     camadaTitulo: layerTitle,
     atividade: atividadeLimpa,
     correspondenciaExploratoria,
-    propriedadesBrutas: preservedProps
+    camposConfirmadosEsquema,
+    cpfCnpjCompletoDisponivel: docCheck.cpfCnpjCompletoDisponivel,
+    cpfCnpjCampoOrigem: docCheck.cpfCnpjCampoOrigem,
+    cpfCnpjStatus: docCheck.cpfCnpjStatus,
+    consultadoEm,
+    propriedadesBrutas: preservedProps,
+    _auditRawProps: rawProps,
+    _auditDocDigits: docCheck.docDigits,
+    _auditCar: carEstadual || carFederal || protocolo || undefined
   };
 }
 
@@ -938,6 +1022,14 @@ export default async function handler(
     return;
   }
 
+  const authCtx = await authorizeSemaLookupRequest(req as any);
+  if (!authCtx.authorized) {
+    res.status(authCtx.httpStatus || 401)!.json!({
+      error: authCtx.error || 'Autenticação obrigatória.'
+    });
+    return;
+  }
+
   let rawCpfCnpj: any;
   let rawProcesso: any;
   let rawProcessos: any[] = [];
@@ -946,6 +1038,8 @@ export default async function handler(
   let rawCars: any[] = [];
   let rawCoords: any[] = [];
   let rawExploratorio: any;
+  let rawTargetTipo: any;
+  let rawTargetId: any;
 
   if (method === 'GET') {
     let queryCpfCnpj = req.query?.cpfCnpj;
@@ -953,6 +1047,8 @@ export default async function handler(
     rawNome = req.query?.nome;
     rawCar = req.query?.car;
     rawExploratorio = req.query?.buscaExploratoria;
+    rawTargetTipo = req.query?.entidadeAlvoTipo;
+    rawTargetId = req.query?.entidadeAlvoId;
     const qCars = req.query?.cars;
     const qProcs = req.query?.processos;
 
@@ -964,6 +1060,8 @@ export default async function handler(
         if (rawNome === undefined) rawNome = parsedUrl.searchParams.get('nome');
         if (rawCar === undefined) rawCar = parsedUrl.searchParams.get('car');
         if (rawExploratorio === undefined) rawExploratorio = parsedUrl.searchParams.get('buscaExploratoria');
+        if (rawTargetTipo === undefined) rawTargetTipo = parsedUrl.searchParams.get('entidadeAlvoTipo');
+        if (rawTargetId === undefined) rawTargetId = parsedUrl.searchParams.get('entidadeAlvoId');
         const carsParam = qCars ?? parsedUrl.searchParams.get('cars');
         if (carsParam) rawCars = String(carsParam).split(/[,;]/);
         const procsParam = qProcs ?? parsedUrl.searchParams.get('processos');
@@ -988,12 +1086,26 @@ export default async function handler(
       rawCars = Array.isArray(body.cars) ? body.cars : [];
       rawCoords = Array.isArray(body.coordenadas) ? body.coordenadas : [];
       rawExploratorio = body.buscaExploratoria;
+      rawTargetTipo = body.entidadeAlvoTipo;
+      rawTargetId = body.entidadeAlvoId;
     } catch (err: any) {
       res.status(400)!.json!({
         error: err?.message || 'Dados inválidos na requisição.'
       });
       return;
     }
+  }
+
+  const targetCtx = parseSemaAuditTargetContext({
+    entidadeAlvoTipo: rawTargetTipo,
+    entidadeAlvoId: rawTargetId
+  });
+  const targetAccess = await validateTargetEntityAccess(authCtx, targetCtx);
+  if (!targetAccess.ok) {
+    res.status(targetAccess.httpStatus || 403)!.json!({
+      error: targetAccess.error || 'Sem permissão para o registro alvo informado.'
+    });
+    return;
   }
 
   const rawDocStr = String(rawCpfCnpj || '').trim();
@@ -1082,6 +1194,8 @@ export default async function handler(
     });
     return;
   }
+
+  const consultadoEm = new Date().toISOString();
 
   const resultado = {
     carImoveis: [] as any[],
@@ -1226,8 +1340,10 @@ export default async function handler(
             layerTitle,
             target.grupo,
             schemaRes.fields,
+            schemaRes.geomFields,
             filterBuild.confirmedDocFields,
-            !matchEval.confirmatory
+            !matchEval.confirmatory,
+            consultadoEm
           );
 
           if (item.id) {
@@ -1247,6 +1363,7 @@ export default async function handler(
           suportado: true,
           registrosEncontrados: items.length,
           camposPesquisados: filterBuild.fieldsUsed,
+          camposConfirmados: propertyNames,
           mensagem:
             items.length > 0
               ? `${items.length} registro(s) encontrado(s).`
@@ -1270,6 +1387,79 @@ export default async function handler(
   }
 
   resultado.carImoveis = deduplicateCarImoveisByCar(resultado.carImoveis);
+
+  const auditCritTipo: 'car' | 'coordenada' | 'processo' | 'cpf_cnpj_hash' | 'nome_exploratorio' =
+    cleanDoc
+      ? 'cpf_cnpj_hash'
+      : carTokens.length > 0
+      ? 'car'
+      : procList.length > 0
+      ? 'processo'
+      : coordList.length > 0
+      ? 'coordenada'
+      : 'nome_exploratorio';
+  const auditCritVal =
+    auditCritTipo === 'cpf_cnpj_hash'
+      ? cleanDoc
+      : auditCritTipo === 'car'
+      ? rawCarStr || carTokens[0]
+      : auditCritTipo === 'processo'
+      ? procList[0]
+      : auditCritTipo === 'coordenada'
+      ? `${coordList[0].lat.toFixed(6)},${coordList[0].lng.toFixed(6)}`
+      : cleanNome;
+
+  const attachAuditToGroup = async (list: any[]): Promise<any[]> => {
+    return await Promise.all(
+      list.map(async item => {
+        const { _auditRawProps, _auditDocDigits, _auditCar, ...publicItem } = item;
+        const auditoriaId = await recordSemaServerAudit(authCtx, targetAccess.resolvedTarget, {
+          criterioTipo: auditCritTipo,
+          criterioValor: auditCritVal,
+          camada: publicItem.camadaOrigem || 'Geoportal:CAR_ATP',
+          featureId: String(publicItem.id || publicItem.numeroDocumento || 'sema_item'),
+          car: _auditCar || publicItem.carFederal || (publicItem.camadaOrigem?.includes('CAR') ? publicItem.numeroDocumento : undefined),
+          rawProps: _auditRawProps || publicItem.propriedadesBrutas || {},
+          docStatus: publicItem.cpfCnpjStatus || 'ausente',
+          docDigits: _auditDocDigits,
+          extraSafeAttrs: {
+            ...(publicItem.razaoSocial ? { titularNome: publicItem.razaoSocial } : {}),
+            ...(publicItem.nomeDocumento ? { nomeDocumento: publicItem.nomeDocumento } : {}),
+            ...(publicItem.municipio ? { municipio: publicItem.municipio } : {}),
+            ...(publicItem.municipioCodigo ? { municipioCodigo: publicItem.municipioCodigo } : {}),
+            ...(publicItem.numeroProcesso ? { numeroProcesso: publicItem.numeroProcesso } : {}),
+            ...(_auditDocDigits
+              ? { tipoPessoa: _auditDocDigits.length === 11 ? 'Pessoa física' : 'Pessoa jurídica' }
+              : {})
+          }
+        });
+        return auditoriaId ? { ...publicItem, auditoriaId } : publicItem;
+      })
+    );
+  };
+
+  const [
+    auditedCarImoveis,
+    auditedLicencas,
+    auditedNotificacoes,
+    auditedAutosInfracao,
+    auditedTermosEmbargo,
+    auditedOutros
+  ] = await Promise.all([
+    attachAuditToGroup(resultado.carImoveis),
+    attachAuditToGroup(resultado.licencas),
+    attachAuditToGroup(resultado.notificacoes),
+    attachAuditToGroup(resultado.autosInfracao),
+    attachAuditToGroup(resultado.termosEmbargo),
+    attachAuditToGroup(resultado.outros)
+  ]);
+
+  resultado.carImoveis = auditedCarImoveis;
+  resultado.licencas = auditedLicencas;
+  resultado.notificacoes = auditedNotificacoes;
+  resultado.autosInfracao = auditedAutosInfracao;
+  resultado.termosEmbargo = auditedTermosEmbargo;
+  resultado.outros = auditedOutros;
 
   const totalRegistros =
     resultado.carImoveis.length +
@@ -1318,7 +1508,7 @@ export default async function handler(
     },
     ...resultado,
     totalRegistros,
-    consultadoEm: new Date().toISOString(),
+    consultadoEm,
     mensagemStatus,
     camadasConsultadas
   });

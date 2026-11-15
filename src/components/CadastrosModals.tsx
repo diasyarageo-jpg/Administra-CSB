@@ -11,14 +11,25 @@ import {
   resolveDamEmpreendimento,
   resolveDamName
 } from '../App';
-import { RtVinculo, cleanCpf, cleanRegistro, getEmpreendedorVinculos } from '../services/notificaDataService';
+import { RtVinculo, cleanCpf, cleanRegistro, getEmpreendedorVinculos, notificaDataService } from '../services/notificaDataService';
 import {
+  aceitarCamposSemaParaMestre,
   clearPersistedSemaLookup,
   consultarCarPorCoordenada,
   getPersistedSemaLookup,
+  isValidSemaAuditoriaId,
   setPersistedSemaLookup
 } from '../services/carLookupService';
+import { isSupabaseConfigured } from '../services/supabaseClient';
 import { CarLookupResult } from '../types/carLookup';
+import {
+  BarragemSemaVinculoPanel,
+  ConfirmVinculoPayload
+} from './BarragemSemaVinculoPanel';
+import {
+  checkDuplicateEmpreendedorByCpfCnpj,
+  extractCarNumberFromSemaItem
+} from '../utils/semaVinculoHelpers';
 import {
   parseCoordAdvanced,
   formatGmsInput,
@@ -846,12 +857,18 @@ export function BarragemModal({
   record,
   isNew,
   empreendedores,
+  barragens = [],
+  onCreateEmpreendedor,
+  onSyncRecordFromVinculo,
   onClose,
   onSave
 }: {
   record: any;
   isNew: boolean;
   empreendedores: any[];
+  barragens?: any[];
+  onCreateEmpreendedor?: (newEmp: any) => Promise<{ success: boolean; error?: string; record?: any }>;
+  onSyncRecordFromVinculo?: (updatedRecord: any, remoteAlreadyUpdated?: boolean) => void;
   onClose: () => void;
   onSave: (savedRecord: any) => void;
 }) {
@@ -960,6 +977,198 @@ export function BarragemModal({
   // Estados de confirmação para substituição de campos já preenchidos
   const [overwriteCar, setOverwriteCar] = useState<boolean>(false);
   const [overwriteMunicipio, setOverwriteMunicipio] = useState<boolean>(false);
+  const [vinculoAppliedInModal, setVinculoAppliedInModal] = useState<boolean>(false);
+
+  const hasMissingEmpreendedor = !linkedEmp && (!record?.empreendedorId || !String(record.empreendedorId).trim());
+
+  const handleConfirmSemaVinculo = async (
+    payload: ConfirmVinculoPayload
+  ): Promise<{ success: boolean; error?: string }> => {
+    if (!isNew && record?.id && isSupabaseConfigured() && !isValidSemaAuditoriaId(payload.item.auditoriaId)) {
+      return {
+        success: false,
+        error: 'Registro de auditoria da consulta SEMA-MT ausente ou expirado. Execute a consulta novamente antes de confirmar.'
+      };
+    }
+
+    let resolvedEmpId = '';
+    let resolvedCreatedEmp: any = null;
+
+    if (payload.empreendedorAction === 'existente' && payload.selectedEmpreendedor) {
+      resolvedEmpId = String(payload.selectedEmpreendedor.id);
+    } else if (payload.empreendedorAction === 'criar_novo' && payload.newEmpreendedorDraft) {
+      const dupCheck = checkDuplicateEmpreendedorByCpfCnpj(
+        payload.newEmpreendedorDraft.cpfCnpj,
+        empreendedores
+      );
+      if (dupCheck.hasDuplicate && dupCheck.existing) {
+        return {
+          success: false,
+          error: `Já existe empreendedor cadastrado com este CPF/CNPJ: "${dupCheck.existing.nome}". Selecione-o manualmente em vez de duplicar.`
+        };
+      }
+
+      const newEmpId = generateClientUuid('emp');
+      const carStr = extractCarNumberFromSemaItem(payload.item);
+      const propNome = cleanSemaRawText(
+        payload.item.propriedadesBrutas?.NOMEPROPRIEDADE || payload.item.nomeDocumento
+      );
+      const validPropNome =
+        propNome && propNome.toLowerCase() !== 'imóvel sem denominação informada' ? propNome : '';
+
+      const newEmpObj = {
+        id: newEmpId,
+        tipoPessoa: payload.newEmpreendedorDraft.tipoPessoa,
+        nome: payload.newEmpreendedorDraft.nome,
+        cpfCnpj: payload.newEmpreendedorDraft.cpfCnpj,
+        nomeFantasia: '',
+        email: '',
+        telefone: '',
+        uf: payload.newEmpreendedorDraft.uf || 'MT',
+        municipio: payload.newEmpreendedorDraft.municipio || '',
+        municipioIbge: payload.newEmpreendedorDraft.municipioIbge || '',
+        observacoes: `Cadastro criado mediante conferência de consulta pública SEMA-MT (${payload.item.camadaOrigem}).`,
+        situacao: 'Ativo',
+        empreendimentos:
+          carStr && validPropNome
+            ? [
+                {
+                  id: generateClientUuid('empr'),
+                  nome: validPropNome,
+                  tipo: 'Rural',
+                  car: carStr,
+                  escritura: '',
+                  uf: payload.newEmpreendedorDraft.uf || 'MT',
+                  municipio: payload.newEmpreendedorDraft.municipio || '',
+                  municipioIbge: payload.newEmpreendedorDraft.municipioIbge || '',
+                  createdAt: new Date().toISOString()
+                }
+              ]
+            : [],
+        createdAt: new Date().toISOString(),
+        updatedAt: new Date().toISOString()
+      };
+
+      if (onCreateEmpreendedor) {
+        const createdRes = await onCreateEmpreendedor(newEmpObj);
+        if (!createdRes.success) {
+          return {
+            success: false,
+            error: createdRes.error || 'Falha ao cadastrar o novo empreendedor na base central.'
+          };
+        }
+        resolvedCreatedEmp = createdRes.record || newEmpObj;
+        resolvedEmpId = String(resolvedCreatedEmp.id);
+      } else {
+        resolvedCreatedEmp = newEmpObj;
+        resolvedEmpId = newEmpId;
+      }
+    }
+
+    let nextCar = car;
+    let nextMunicipio = municipio;
+    let nextMunicipioIbge = municipioIbge;
+    let nextProcesso = processo;
+    let nextEmpreendimento = selectedEmpreendimentoId;
+    const rpcFields: Record<string, string> = {};
+
+    for (const f of payload.selectedFields) {
+      if (f.key === 'car') {
+        nextCar = f.semaValue;
+        rpcFields.car = f.semaValue;
+      } else if (f.key === 'empreendimento') {
+        const matchedEmpr = (resolvedCreatedEmp?.empreendimentos || availableEmpreendimentos).find(
+          (em: any) => String(em.nome || '').trim().toLowerCase() === f.semaValue.trim().toLowerCase()
+        );
+        nextEmpreendimento = matchedEmpr ? String(matchedEmpr.id) : f.semaValue;
+        rpcFields.empreendimento = nextEmpreendimento;
+      } else if (f.key === 'municipio') {
+        nextMunicipio = f.semaValue;
+        rpcFields.municipio = f.semaValue;
+      } else if (f.key === 'municipio_ibge') {
+        nextMunicipioIbge = f.semaValue;
+        rpcFields.municipio_ibge = f.semaValue;
+      } else if (f.key === 'processo') {
+        nextProcesso = f.semaValue;
+        rpcFields.processo = f.semaValue;
+      }
+    }
+
+    if (resolvedEmpId) {
+      rpcFields.empreendedor_id = resolvedEmpId;
+    }
+
+    const updatedRecord = {
+      ...record,
+      nome: nome.trim(),
+      car: nextCar.trim(),
+      uf: 'MT',
+      municipio: nextMunicipio.trim(),
+      municipioIbge: String(nextMunicipioIbge || '').trim(),
+      empreendedor: resolvedEmpId || selectedEmpId.trim(),
+      empreendedorId: resolvedEmpId || (linkedEmp ? String(linkedEmp.id) : (record.empreendedorId || '')),
+      empreendimento: nextEmpreendimento.trim(),
+      processo: nextProcesso.trim(),
+      snisb: snisb.trim(),
+      cursoAgua: cursoAgua.trim(),
+      latitude: latitude.trim(),
+      longitude: longitude.trim(),
+      altura: altura.trim(),
+      volume: volume.trim(),
+      danoPotencial: danoPotencial.trim(),
+      categoriaRisco: categoriaRisco.trim(),
+      situacao,
+      observacoes: observacoes.trim(),
+      updatedAt: new Date().toISOString()
+    };
+
+    let remoteAlreadyUpdated = false;
+
+    if (!isNew && record?.id && isSupabaseConfigured()) {
+      const auditoriaId = String(payload.item.auditoriaId || '');
+      if (!isValidSemaAuditoriaId(auditoriaId)) {
+        return {
+          success: false,
+          error: 'Registro de auditoria server-side ausente ou inválido. Execute a consulta SEMA-MT novamente.'
+        };
+      }
+
+      const rpcRes = await aceitarCamposSemaParaMestre({
+        auditoriaId,
+        entidadeTipo: 'barragem',
+        entidadeId: String(record.id),
+        campos: rpcFields,
+        motivo: `Vínculo e aceite SEMA-MT (${payload.item.camadaOrigem})`,
+        criterioVinculo: payload.criterioVinculo
+      });
+
+      if (!rpcRes.success) {
+        return {
+          success: false,
+          error: rpcRes.error || 'Não foi possível aplicar os dados na base central.'
+        };
+      }
+
+      remoteAlreadyUpdated = true;
+    }
+
+    // Atualiza os campos no formulário (sem alterar coordenadas, altura, volume, DPA, CRI ou situação)
+    setCar(nextCar);
+    setMunicipio(nextMunicipio);
+    setMunicipioIbge(nextMunicipioIbge);
+    setProcesso(nextProcesso);
+    if (resolvedEmpId) {
+      setSelectedEmpId(resolvedEmpId);
+    }
+    setSelectedEmpreendimentoId(nextEmpreendimento);
+    setVinculoAppliedInModal(true);
+
+    if (!isNew && onSyncRecordFromVinculo) {
+      onSyncRecordFromVinculo(updatedRecord, remoteAlreadyUpdated);
+    }
+
+    return { success: true };
+  };
 
   // Validação estrita em tempo real no padrão GMS
   const latParse = parseCoordAdvanced(latitude, false);
@@ -975,7 +1184,10 @@ export function BarragemModal({
     setShowCarPreview(false);
 
     try {
-      const res = await consultarCarPorCoordenada(latitude, longitude);
+      const res = await consultarCarPorCoordenada(latitude, longitude, {
+        entidadeAlvoTipo: !isNew && record?.id ? 'barragem' : 'car',
+        entidadeAlvoId: !isNew && record?.id ? String(record.id) : undefined
+      });
       if (!res.sucesso) {
         setCarLookupError(res.mensagemErro || 'Erro ao consultar Geoportal SEMA-MT.');
       } else if (!res.encontrado || res.feicoes.length === 0) {
@@ -1071,13 +1283,37 @@ export function BarragemModal({
         </div>
 
         <div className="modal-body" style={{ maxHeight: '78vh', overflowY: 'auto' }}>
-          <SemaCadastroLookupPanel
-            entityLabel="Barragem"
-            entidadeAlvoTipo="barragem"
-            entidadeAlvoId={!isNew && record?.id ? String(record.id) : undefined}
-            isNew={isNew}
-            allowCar={true}
-            persistKey={isNew ? 'barragem:novo' : `barragem:${record?.id || record?.nome || 'edit'}`}
+          {(hasMissingEmpreendedor || vinculoAppliedInModal) && (
+            <BarragemSemaVinculoPanel
+              barragemId={!isNew && record?.id ? String(record.id) : undefined}
+              isNew={isNew}
+              currentBarragem={{
+                nome,
+                car,
+                empreendimento: selectedEmpreendimentoId,
+                municipio,
+                municipioIbge,
+                processo,
+                latitude,
+                longitude,
+                empreendedorId: selectedEmpId
+              }}
+              barragensCadastradas={barragens}
+              empreendedores={empreendedores}
+              mtMunicipios={mtMunicipios}
+              onConfirmApply={handleConfirmSemaVinculo}
+            />
+          )}
+
+          {!hasMissingEmpreendedor && !vinculoAppliedInModal && (
+            <SemaCadastroLookupPanel
+              entityLabel="Barragem"
+              entidadeAlvoTipo="barragem"
+              entidadeAlvoId={!isNew && record?.id ? String(record.id) : undefined}
+              isNew={isNew}
+              allowCar={true}
+              persistKey={isNew ? 'barragem:novo' : `barragem:${record?.id || record?.nome || 'edit'}`}
+              barragensCadastradas={barragens}
             defaultMode={
               linkedEmp?.cpfCnpj
                 ? linkedEmp.cpfCnpj.replace(/\D/g, '').length === 14
@@ -1179,7 +1415,8 @@ export function BarragemModal({
                 setSelectedEmpreendimentoId('');
               }
             }}
-          />
+            />
+          )}
 
           <div className="form-grid">
             <div className="form-field full">

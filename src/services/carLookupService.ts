@@ -4,7 +4,12 @@
  * e sincronização da base do Geoportal SEMA-MT.
  */
 
-import { CAR_CAMPOS, extractFirstMatchingField } from '../config/carCampos';
+import {
+  CAR_CAMPOS,
+  extractFirstMatchingField,
+  maskCpfCnpjDisplay,
+  sanitizeSemaProperties
+} from '../config/carCampos';
 import {
   CarFeatureMapped,
   CarGeoJsonFeature,
@@ -26,6 +31,90 @@ getMatoGrossoMunicipios()
 
 const SEMA_LOOKUP_STORAGE_PREFIX = 'administra:sema_consulta:v1:';
 const semaLookupMemoryStore = new Map<string, unknown>();
+
+async function getOptionalAuthHeaders(): Promise<Record<string, string>> {
+  if (!isSupabaseConfigured() || !supabase) return {};
+  try {
+    const { data } = await supabase.auth.getSession();
+    const token = data?.session?.access_token;
+    return token ? { Authorization: `Bearer ${token}` } : {};
+  } catch {
+    return {};
+  }
+}
+
+const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
+export function isValidSemaAuditoriaId(val: unknown): boolean {
+  return UUID_REGEX.test(String(val || '').trim());
+}
+
+const SENSITIVE_STORAGE_KEY_RE =
+  /^(cpf|cnpj|cpfcnpj|cpf_cnpj|nr_cpf|nr_cnpj|nr_cpf_cnpj|documento_titular|querydigits|rawquery)$/i;
+
+const NON_DOC_STORAGE_KEY_RE =
+  /^(id|featureid|empreendedoridselecionado|codigo|ibge|municipio_codigo|municipiocodigo|municipioibge|cod_ibge|processo|numeroprocesso|numero_processo|protocolo|protocolo_numero|numero_documento|numerodocumento|car|car_federal|carfederal|carestadual|numeroestadual|objectid|gid|fid)$/i;
+
+function scrubSensitiveStringForStorage(raw: string): string {
+  const trimmed = String(raw || '').trim();
+  if (!trimmed) return raw;
+  const masked = maskCpfCnpjDisplay(trimmed);
+  if (masked && masked !== trimmed) return masked;
+  return trimmed
+    .replace(/\b(\d{3})\.(\d{3})\.(\d{3})-(\d{2})\b/g, '***.$2.***-$4')
+    .replace(/\b(\d{2})\.(\d{3})\.(\d{3})\/(\d{4})-(\d{2})\b/g, '**.$2.***/$4-**')
+    .replace(/(?<![\/.\-\d])(\d{2})(\d{3})(\d{3})(\d{4})(\d{2})(?![\/.\-\d])/g, '**.$2.***/$4-**')
+    .replace(/(?<![\/.\-\d])(\d{3})(\d{3})(\d{3})(\d{2})(?![\/.\-\d])/g, '***.$2.***-$4');
+}
+
+export function sanitizePersistedLookupForStorage<T>(value: T, parentKey = ''): T {
+  if (value === null || value === undefined) return value;
+
+  if (typeof value === 'string') {
+    const trimmed = value.trim();
+    if (
+      NON_DOC_STORAGE_KEY_RE.test(parentKey) &&
+      (/^\d{11}$/.test(trimmed) || /^\d{14}$/.test(trimmed))
+    ) {
+      return value;
+    }
+    if (SENSITIVE_STORAGE_KEY_RE.test(parentKey)) {
+      const digits = value.replace(/\D/g, '');
+      if (digits.length === 11 || digits.length === 14) {
+        return (maskCpfCnpjDisplay(digits) || '***') as unknown as T;
+      }
+    }
+    return scrubSensitiveStringForStorage(value) as unknown as T;
+  }
+
+  if (Array.isArray(value)) {
+    return value.map(item => sanitizePersistedLookupForStorage(item, parentKey)) as unknown as T;
+  }
+
+  if (typeof value === 'object') {
+    const obj = value as Record<string, any>;
+    if (parentKey === 'propriedadesBrutas' || parentKey === 'properties') {
+      return sanitizeSemaProperties(obj) as unknown as T;
+    }
+
+    const out: Record<string, any> = {};
+    for (const [k, v] of Object.entries(obj)) {
+      if (k === 'propriedadesBrutas' || k === 'properties') {
+        out[k] = sanitizeSemaProperties(v);
+      } else if (k === 'query' && typeof v === 'string') {
+        const digits = v.replace(/\D/g, '');
+        out[k] =
+          digits.length === 11 || digits.length === 14
+            ? maskCpfCnpjDisplay(digits) || '***'
+            : scrubSensitiveStringForStorage(v);
+      } else {
+        out[k] = sanitizePersistedLookupForStorage(v, k);
+      }
+    }
+    return out as T;
+  }
+
+  return value;
+}
 
 export function getPersistedSemaLookup<T>(scopeKey: string): T | null {
   const key = String(scopeKey || '').trim();
@@ -59,9 +148,10 @@ export function setPersistedSemaLookup<T>(scopeKey: string, value: T): void {
 
   if (typeof window !== 'undefined' && window.sessionStorage) {
     try {
+      const safeForStorage = sanitizePersistedLookupForStorage(value);
       window.sessionStorage.setItem(
         `${SEMA_LOOKUP_STORAGE_PREFIX}${key}`,
-        JSON.stringify(value)
+        JSON.stringify(safeForStorage)
       );
     } catch {
       // Caso exceda cota do sessionStorage, mantém preservado no store em memória sem expirar
@@ -106,8 +196,11 @@ export function mapPropertiesToCarFeature(feature: CarGeoJsonFeature): CarFeatur
     }
   }
 
+  const schemaMeta = feature?._schemaMeta;
+
   return {
     id: feature?.id ? String(feature.id) : undefined,
+    auditoriaId: feature?.auditoriaId ? String(feature.auditoriaId) : undefined,
     camadaOrigem: feature?.camadaOrigem,
     car: extractFirstMatchingField(props, CAR_CAMPOS.car),
     carFederal: extractFirstMatchingField(props, CAR_CAMPOS.carFederal),
@@ -122,6 +215,12 @@ export function mapPropertiesToCarFeature(feature: CarGeoJsonFeature): CarFeatur
     apfNumero: extractFirstMatchingField(props, CAR_CAMPOS.apfNumero),
     numeroArt: extractFirstMatchingField(props, CAR_CAMPOS.numeroArt),
     modulosFiscais: extractFirstMatchingField(props, CAR_CAMPOS.modulosFiscais),
+    camposConfirmadosEsquema: Array.isArray(schemaMeta?.camposConfirmados)
+      ? schemaMeta.camposConfirmados
+      : undefined,
+    cpfCnpjCompletoDisponivel: schemaMeta?.cpfCnpjCompletoDisponivel,
+    cpfCnpjCampoOrigem: schemaMeta?.cpfCnpjCampoOrigem,
+    cpfCnpjStatus: schemaMeta?.cpfCnpjStatus,
     propriedadesBrutas: props
   };
 }
@@ -131,7 +230,11 @@ export function mapPropertiesToCarFeature(feature: CarGeoJsonFeature): CarFeatur
  */
 export async function consultarCarPorCoordenada(
   latInput: string | number | null | undefined,
-  lngInput: string | number | null | undefined
+  lngInput: string | number | null | undefined,
+  targetContext?: {
+    entidadeAlvoTipo?: 'barragem' | 'empreendedor' | 'car';
+    entidadeAlvoId?: string;
+  }
 ): Promise<CarLookupResult> {
   const latRes = parseCoordAdvanced(latInput, false);
   const lngRes = parseCoordAdvanced(lngInput, true);
@@ -170,11 +273,19 @@ export async function consultarCarPorCoordenada(
       lat: String(decLat),
       lng: String(decLng)
     });
+    if (targetContext?.entidadeAlvoTipo) {
+      params.set('entidadeAlvoTipo', targetContext.entidadeAlvoTipo);
+    }
+    if (targetContext?.entidadeAlvoId) {
+      params.set('entidadeAlvoId', targetContext.entidadeAlvoId);
+    }
 
+    const authHeaders = await getOptionalAuthHeaders();
     const res = await fetch(`/api/car-lookup?${params.toString()}`, {
       method: 'GET',
       headers: {
-        Accept: 'application/json'
+        Accept: 'application/json',
+        ...authHeaders
       }
     });
 
@@ -247,6 +358,8 @@ export interface ConsultarDocumentosSemaParams {
   cars?: string[];
   coordenadas?: Array<{ lat: number; lng: number; label?: string }>;
   buscaExploratoria?: boolean;
+  entidadeAlvoTipo?: 'empreendedor' | 'barragem' | 'car';
+  entidadeAlvoId?: string;
 }
 
 /**
@@ -264,6 +377,8 @@ export async function consultarDocumentosSema(
   let cars: string[] = [];
   let coordenadas: Array<{ lat: number; lng: number; label?: string }> = [];
   let buscaExploratoria = false;
+  let entidadeAlvoTipo: 'empreendedor' | 'barragem' | 'car' | undefined;
+  let entidadeAlvoId: string | undefined;
 
   if (typeof param === 'string') {
     cleanDoc = String(param || '').replace(/\D/g, '');
@@ -277,6 +392,8 @@ export async function consultarDocumentosSema(
     cars = Array.isArray(param.cars) ? param.cars.filter(Boolean) : [];
     coordenadas = Array.isArray(param.coordenadas) ? param.coordenadas : [];
     buscaExploratoria = Boolean(param.buscaExploratoria);
+    entidadeAlvoTipo = param.entidadeAlvoTipo;
+    entidadeAlvoId = param.entidadeAlvoId ? String(param.entidadeAlvoId).trim() : undefined;
   }
 
   const hasConfirmatory = Boolean(
@@ -307,6 +424,7 @@ export async function consultarDocumentosSema(
 
   try {
     let res: Response;
+    const authHeaders = await getOptionalAuthHeaders();
     const usePost = Boolean(
       cleanDoc || cars.length > 0 || processos.length > 0 || coordenadas.length > 0 || nome
     );
@@ -316,7 +434,8 @@ export async function consultarDocumentosSema(
         method: 'POST',
         headers: {
           'Content-Type': 'application/json',
-          Accept: 'application/json'
+          Accept: 'application/json',
+          ...authHeaders
         },
         body: JSON.stringify({
           ...(cleanDoc ? { cpfCnpj: cleanDoc } : {}),
@@ -326,17 +445,24 @@ export async function consultarDocumentosSema(
           ...(processos.length > 0 ? { processos } : {}),
           ...(coordenadas.length > 0 ? { coordenadas } : {}),
           ...(nome ? { nome } : {}),
-          ...(useExploratoryName ? { buscaExploratoria: true } : {})
+          ...(useExploratoryName ? { buscaExploratoria: true } : {}),
+          ...(entidadeAlvoTipo ? { entidadeAlvoTipo } : {}),
+          ...(entidadeAlvoId ? { entidadeAlvoId } : {})
         })
       });
     } else {
       const params = new URLSearchParams();
       if (processo) params.set('processo', processo);
       if (car) params.set('car', car);
+      if (entidadeAlvoTipo) params.set('entidadeAlvoTipo', entidadeAlvoTipo);
+      if (entidadeAlvoId) params.set('entidadeAlvoId', entidadeAlvoId);
 
       res = await fetch(`/api/sema-documentos?${params.toString()}`, {
         method: 'GET',
-        headers: { Accept: 'application/json' }
+        headers: {
+          Accept: 'application/json',
+          ...authHeaders
+        }
       });
     }
 
@@ -494,54 +620,59 @@ export async function obterStatusSincronizacaoGeoportal(): Promise<{
   return { status: 'ocioso', registrosSincronizados: 0 };
 }
 
-async function sha256Hex(value: string): Promise<string> {
-  if (typeof crypto !== 'undefined' && crypto.subtle) {
-    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
-    return Array.from(new Uint8Array(buf))
-      .map(b => b.toString(16).padStart(2, '0'))
-      .join('');
-  }
-  return '';
+const ALLOWED_SEMA_MASTER_FIELDS: Record<'barragem' | 'empreendedor', ReadonlySet<string>> = {
+  barragem: new Set([
+    'car',
+    'empreendimento',
+    'municipio',
+    'municipio_ibge',
+    'processo',
+    'empreendedor_id'
+  ]),
+  empreendedor: new Set([
+    'tipo_pessoa',
+    'nome',
+    'uf',
+    'municipio',
+    'municipio_ibge'
+  ])
+};
+
+const BLOCKED_SEMA_BARRAGEM_FIELDS = new Set([
+  'latitude',
+  'longitude',
+  'altura',
+  'volume',
+  'dano_potencial',
+  'danopotencial',
+  'dpa',
+  'categoria_risco',
+  'categoriarisco',
+  'cri',
+  'situacao',
+  'classificada_em',
+  'snisb',
+  'curso_agua',
+  'empreendedor'
+]);
+
+export type SemaCriterioVinculo =
+  | 'cpf_cnpj_exato'
+  | 'confirmacao_manual_analista'
+  | 'cadastro_novo_cpf_cnpj';
+
+export function isSemaMasterFieldAllowed(
+  entidadeTipo: 'barragem' | 'empreendedor',
+  campoNome: string
+): boolean {
+  const norm = String(campoNome || '').trim().toLowerCase();
+  if (!norm || BLOCKED_SEMA_BARRAGEM_FIELDS.has(norm)) return false;
+  return ALLOWED_SEMA_MASTER_FIELDS[entidadeTipo].has(norm);
 }
 
 /**
- * Nível 2 SEMA-MT: registra auditoria de consulta persistida sem gravar CPF/CNPJ em claro nem alterar cadastro mestre.
- */
-export async function registrarConsultaSemaAuditoria(params: {
-  entidadeAlvoTipo?: 'empreendedor' | 'barragem' | 'car';
-  entidadeAlvoId?: string;
-  criterioTipo: 'car' | 'coordenada' | 'processo' | 'cpf_cnpj_hash' | 'nome_exploratorio';
-  criterioValor?: string;
-  camada: string;
-  featureId: string;
-  car?: string;
-  atributosRecebidos: Record<string, any>;
-}): Promise<string | null> {
-  if (!isSupabaseConfigured() || !supabase) return null;
-  try {
-    let ref = String(params.criterioValor || '').trim();
-    if (params.criterioTipo === 'cpf_cnpj_hash' && ref) {
-      ref = await sha256Hex(ref.replace(/\D/g, ''));
-    }
-    const { data, error } = await supabase.rpc('registrar_consulta_sema_auditoria', {
-      p_entidade_alvo_tipo: params.entidadeAlvoTipo ?? null,
-      p_entidade_alvo_id: params.entidadeAlvoId ?? null,
-      p_criterio_tipo: params.criterioTipo,
-      p_criterio_referencia: ref || null,
-      p_camada: params.camada,
-      p_feature_id: params.featureId,
-      p_car: params.car ?? null,
-      p_atributos_recebidos: params.atributosRecebidos || {}
-    });
-    if (error) return null;
-    return data ? String(data) : null;
-  } catch {
-    return null;
-  }
-}
-
-/**
- * Nível 3 SEMA-MT: aplica explicitamente um campo aceito pelo analista no cadastro mestre com histórico e proveniência.
+ * Nível 3 SEMA-MT: aplica explicitamente um campo aceito pelo analista no cadastro mestre
+ * validando auditoria gerada no servidor, histórico de alterações e proveniência.
  */
 export async function aceitarDadoSemaParaMestre(params: {
   auditoriaId: string;
@@ -550,7 +681,20 @@ export async function aceitarDadoSemaParaMestre(params: {
   campoNome: string;
   novoValor: string;
   motivo?: string;
+  criterioVinculo?: SemaCriterioVinculo;
 }): Promise<{ success: boolean; error?: string }> {
+  if (!isSemaMasterFieldAllowed(params.entidadeTipo, params.campoNome)) {
+    return {
+      success: false,
+      error: `Campo "${params.campoNome}" não é permitido para atualização automática via SEMA-MT.`
+    };
+  }
+  if (!isValidSemaAuditoriaId(params.auditoriaId)) {
+    return {
+      success: false,
+      error: 'Registro de auditoria da consulta SEMA-MT ausente ou inválido. Execute a consulta novamente antes de confirmar.'
+    };
+  }
   if (!isSupabaseConfigured() || !supabase) {
     return { success: false, error: 'Banco de dados central não configurado.' };
   }
@@ -561,12 +705,86 @@ export async function aceitarDadoSemaParaMestre(params: {
       p_entidade_id: params.entidadeId,
       p_campo_nome: params.campoNome,
       p_novo_valor: params.novoValor,
-      p_motivo: params.motivo ?? null
+      p_motivo: params.motivo ?? null,
+      p_criterio_vinculo: params.criterioVinculo ?? null
     });
     if (error) return { success: false, error: error.message };
     if (data && data.success === false) return { success: false, error: data.error };
     return { success: true };
   } catch (err: any) {
     return { success: false, error: err?.message || 'Erro ao registrar aceite no cadastro mestre.' };
+  }
+}
+
+/**
+ * Aplica em lote os campos selecionados e o vínculo de empreendedor de forma 100% atômica no banco
+ * com validação server-side da auditoria gerada na consulta, histórico de alterações e proveniência SEMA-MT.
+ */
+export async function aceitarCamposSemaParaMestre(params: {
+  auditoriaId: string;
+  entidadeTipo: 'barragem' | 'empreendedor';
+  entidadeId: string;
+  campos: Record<string, string>;
+  motivo?: string;
+  criterioVinculo?: SemaCriterioVinculo;
+}): Promise<{ success: boolean; error?: string; appliedFields?: string[] }> {
+  const entries = Object.entries(params.campos || {}).filter(
+    ([k, v]) => String(k || '').trim() !== '' && v !== undefined && v !== null
+  );
+
+  for (const [campo] of entries) {
+    if (!isSemaMasterFieldAllowed(params.entidadeTipo, campo)) {
+      return {
+        success: false,
+        error: `Campo "${campo}" está protegido e não pode ser sobrescrito por dados da SEMA-MT.`
+      };
+    }
+  }
+
+  if (entries.length === 0) {
+    return { success: true, appliedFields: [] };
+  }
+
+  if (!isValidSemaAuditoriaId(params.auditoriaId)) {
+    return {
+      success: false,
+      error: 'Registro de auditoria da consulta SEMA-MT ausente ou inválido. Execute a consulta novamente antes de confirmar.'
+    };
+  }
+
+  if (!isSupabaseConfigured() || !supabase) {
+    return { success: false, error: 'Banco de dados central não configurado.' };
+  }
+
+  try {
+    const camposMap = Object.fromEntries(entries.map(([k, v]) => [k, String(v)]));
+    const { data, error } = await supabase.rpc('aceitar_campos_sema_para_mestre', {
+      p_auditoria_id: params.auditoriaId,
+      p_entidade_tipo: params.entidadeTipo,
+      p_entidade_id: params.entidadeId,
+      p_campos: camposMap,
+      p_motivo: params.motivo ?? null,
+      p_criterio_vinculo: params.criterioVinculo ?? null
+    });
+
+    if (error) {
+      return { success: false, error: error.message || 'Falha ao aplicar campos na base central.' };
+    }
+
+    if (data && data.success === false) {
+      return { success: false, error: data.error || 'Falha ao aplicar campos no servidor.' };
+    }
+
+    return {
+      success: true,
+      appliedFields: Array.isArray(data?.applied_fields)
+        ? data.applied_fields
+        : entries.map(([k]) => k)
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      error: err?.message || 'Erro ao persistir campos aceitos no cadastro mestre.'
+    };
   }
 }

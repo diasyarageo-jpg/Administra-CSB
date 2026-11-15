@@ -415,7 +415,17 @@ export function sanitizeSemaProperties(
     // Verifica se o valor integral é exatamente 11 ou 14 dígitos (com ou sem pontuação)
     const isFormattedCpf = /^\d{3}\.\d{3}\.\d{3}-\d{2}$/.test(strVal);
     const isFormattedCnpj = /^\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}$/.test(strVal);
-    const isPlain11or14Digits = /^\d{11}$/.test(strVal) || /^\d{14}$/.test(strVal);
+    const isNonDocIdentifierKey =
+      /^(id|featureid|empreendedoridselecionado|codigo|ibge|municipio_codigo|municipioibge|cod_ibge|processo|numeroprocesso|numero_processo|protocolo|protocolo_numero|numero_documento|numerodocumento|car|car_federal|carfederal|carestadual|numeroestadual|objectid|gid|fid)$/i.test(
+        keyLower
+      );
+    if (isNonDocIdentifierKey && (/^\d{11}$/.test(strVal) || /^\d{14}$/.test(strVal))) {
+      sanitized[key] = val;
+      continue;
+    }
+
+    const isPlain11or14Digits =
+      !isNonDocIdentifierKey && (/^\d{11}$/.test(strVal) || /^\d{14}$/.test(strVal));
 
     if (isFormattedCpf || isFormattedCnpj || isPlain11or14Digits) {
       sanitized[key] = maskCpfCnpjDisplay(strVal) || '***';

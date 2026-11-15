@@ -4,7 +4,6 @@ import {
   clearPersistedSemaLookup,
   consultarDocumentosSema,
   getPersistedSemaLookup,
-  registrarConsultaSemaAuditoria,
   setPersistedSemaLookup
 } from '../services/carLookupService';
 import { parseCoordAdvanced } from '../services/coordService';
@@ -330,8 +329,19 @@ export function SemaCadastroLookupPanel({
     setLastMeta(meta);
 
     try {
+      const resolvedTargetType = entidadeAlvoTipo || (mode === 'car' ? 'car' : undefined);
       const res = await consultarDocumentosSema(
-        mode === 'car' ? { car: trimmed } : { cpfCnpj: digits }
+        mode === 'car'
+          ? {
+              car: trimmed,
+              entidadeAlvoTipo: resolvedTargetType,
+              entidadeAlvoId: !isNew ? entidadeAlvoId : undefined
+            }
+          : {
+              cpfCnpj: digits,
+              entidadeAlvoTipo: resolvedTargetType,
+              entidadeAlvoId: !isNew ? entidadeAlvoId : undefined
+            }
       );
       setResult(res);
 
@@ -360,33 +370,6 @@ export function SemaCadastroLookupPanel({
       setSelectedItemIdx(0);
       if (merged.length > 0) {
         initSelectionForItem(merged[0], meta);
-        const topItem = merged[0];
-        const topCar =
-          String(
-            topItem.propriedadesBrutas?.NUMEROESTADUAL ||
-              topItem.carFederal ||
-              (topItem.camadaOrigem?.includes('CAR') ? topItem.numeroDocumento : '') ||
-              (mode === 'car' ? trimmed : '')
-          ).trim() || undefined;
-        void registrarConsultaSemaAuditoria({
-          entidadeAlvoTipo: entidadeAlvoTipo || (mode === 'car' ? 'car' : undefined),
-          entidadeAlvoId,
-          criterioTipo: mode === 'car' ? 'car' : 'cpf_cnpj_hash',
-          criterioValor: mode === 'car' ? trimmed : digits,
-          camada: topItem.camadaOrigem || 'Geoportal:CAR_ATP',
-          featureId: topItem.id || topItem.numeroDocumento || 'sema_item_0',
-          car: topCar,
-          atributosRecebidos: {
-            camada: topItem.camadaOrigem,
-            tipo: topItem.tipo,
-            numeroDocumento: topItem.numeroDocumento,
-            numeroProcesso: topItem.numeroProcesso,
-            carEstadual: topItem.propriedadesBrutas?.NUMEROESTADUAL || undefined,
-            carFederal: topItem.carFederal,
-            municipio: topItem.municipio,
-            totalRegistros: res.totalRegistros
-          }
-        });
       }
     } catch (err: any) {
       setApiError(err?.message || 'Erro ao consultar a base da SEMA-MT.');

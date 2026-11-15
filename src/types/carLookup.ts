@@ -20,7 +20,15 @@ export interface CamadaConsultaStatus {
   suportado: boolean;
   registrosEncontrados: number;
   camposPesquisados?: string[];
+  camposConfirmados?: string[];
   mensagem: string;
+}
+
+export interface FeatureSchemaMeta {
+  camposConfirmados: string[];
+  cpfCnpjCompletoDisponivel: boolean;
+  cpfCnpjCampoOrigem?: string;
+  cpfCnpjStatus: 'completo' | 'mascarado' | 'ausente';
 }
 
 export interface CarGeoJsonFeature {
@@ -29,11 +37,14 @@ export interface CarGeoJsonFeature {
   geometry?: any;
   geometry_name?: string;
   camadaOrigem?: string;
+  auditoriaId?: string;
+  _schemaMeta?: FeatureSchemaMeta;
   properties: Record<string, any>;
 }
 
 export interface CarFeatureMapped {
   id?: string;
+  auditoriaId?: string;
   camadaOrigem?: string;
   car: string;
   carFederal: string;
@@ -48,6 +59,10 @@ export interface CarFeatureMapped {
   apfNumero: string;
   numeroArt: string;
   modulosFiscais: string;
+  camposConfirmadosEsquema?: string[];
+  cpfCnpjCompletoDisponivel?: boolean;
+  cpfCnpjCampoOrigem?: string;
+  cpfCnpjStatus?: 'completo' | 'mascarado' | 'ausente';
   propriedadesBrutas: Record<string, any>;
 }
 
@@ -92,11 +107,17 @@ export interface SemaDocumentoItem {
   municipioCodigo?: string;
   linkDocumento?: string;
   camadaOrigem: string;
+  auditoriaId?: string;
   camadaTitulo?: string;
   carFederal?: string;
   areaHa?: string;
   atividade?: string;
   correspondenciaExploratoria?: boolean;
+  camposConfirmadosEsquema?: string[];
+  cpfCnpjCompletoDisponivel?: boolean;
+  cpfCnpjCampoOrigem?: string;
+  cpfCnpjStatus?: 'completo' | 'mascarado' | 'ausente';
+  consultadoEm?: string;
   propriedadesBrutas: Record<string, any>;
 }
 

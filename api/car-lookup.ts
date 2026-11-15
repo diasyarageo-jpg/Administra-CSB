@@ -3,8 +3,16 @@ import type { IncomingMessage, ServerResponse } from 'http';
 import {
   SEMA_FIELD_CANDIDATES,
   resolveConfirmedFields,
-  preserveSemaProperties
+  preserveSemaProperties,
+  extractConfirmedFieldValue,
+  stripOuterQuotesAndBrackets
 } from '../src/config/carCampos';
+import {
+  authorizeSemaLookupRequest,
+  parseSemaAuditTargetContext,
+  recordSemaServerAudit,
+  validateTargetEntityAccess
+} from '../src/server/semaAudit';
 
 interface VercelLikeRequest extends IncomingMessage {
   query?: Record<string, string | string[]>;
@@ -32,6 +40,7 @@ interface CamadaStatus {
   suportado: boolean;
   registrosEncontrados: number;
   camposPesquisados?: string[];
+  camposConfirmados?: string[];
   mensagem: string;
 }
 
@@ -241,11 +250,71 @@ async function describeLayerSchemaXml(layerName: string): Promise<{
   }
 }
 
+function inspectConfirmedCpfCnpj(
+  rawProps: Record<string, any>,
+  confirmedDocFields: string[],
+  confirmedOwnerFields: string[]
+): {
+  cpfCnpjCompletoDisponivel: boolean;
+  cpfCnpjCampoOrigem?: string;
+  cpfCnpjStatus: 'completo' | 'mascarado' | 'ausente';
+  docDigits?: string;
+} {
+  let sawMasked = false;
+  for (const field of confirmedDocFields) {
+    const val = rawProps[field];
+    if (val === undefined || val === null) continue;
+    const str = String(val).trim();
+    if (!str) continue;
+    if (/[x*]/i.test(str)) {
+      sawMasked = true;
+      continue;
+    }
+    const digits = str.replace(/\D/g, '');
+    if (digits.length === 11 || digits.length === 14) {
+      return {
+        cpfCnpjCompletoDisponivel: true,
+        cpfCnpjCampoOrigem: field,
+        cpfCnpjStatus: 'completo',
+        docDigits: digits
+      };
+    }
+  }
+  for (const field of confirmedOwnerFields) {
+    const val = rawProps[field];
+    if (val === undefined || val === null) continue;
+    const str = String(val).trim();
+    if (!str) continue;
+    const fullMatch =
+      str.match(/\b\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}\b/) ||
+      str.match(/\b\d{3}\.\d{3}\.\d{3}-\d{2}\b/) ||
+      str.match(/(?<![\d/.\-xX*])(\d{14}|\d{11})(?![\d/.\-xX*])/);
+    if (fullMatch?.[0]) {
+      const digits = fullMatch[0].replace(/\D/g, '');
+      return {
+        cpfCnpjCompletoDisponivel: true,
+        cpfCnpjCampoOrigem: field,
+        cpfCnpjStatus: 'completo',
+        docDigits: digits
+      };
+    }
+    if (/x{2,}\d+x{2,}|\*{2,}/i.test(str)) {
+      sawMasked = true;
+    }
+  }
+  return {
+    cpfCnpjCompletoDisponivel: false,
+    cpfCnpjStatus: sawMasked ? 'mascarado' : 'ausente'
+  };
+}
+
 async function queryLayerSpatial(
   layerName: string,
   layerTitle: string | undefined,
   geomField: string,
+  confirmedNonGeomFields: string[],
   confirmedDocFields: string[],
+  confirmedOwnerFields: string[],
   lat: number,
   lng: number,
   maxFeatures: number
@@ -327,17 +396,25 @@ async function queryLayerSpatial(
         ? parsed.features.slice(0, maxFeatures)
         : [];
 
-      const features = rawFeatures.map((f: any) => ({
-        type: f.type || 'Feature',
-        id: f.id,
-        geometry: f.geometry,
-        geometry_name: f.geometry_name,
-        camadaOrigem: layerName,
-        properties: preserveSemaProperties(
-          f.properties && typeof f.properties === 'object' ? f.properties : {},
-          confirmedDocFields
-        )
-      }));
+      const features = rawFeatures.map((f: any) => {
+        const rawProps = f.properties && typeof f.properties === 'object' ? f.properties : {};
+        const docInspection = inspectConfirmedCpfCnpj(rawProps, confirmedDocFields, confirmedOwnerFields);
+        const { docDigits, ...publicDocInspection } = docInspection;
+        return {
+          type: f.type || 'Feature',
+          id: f.id,
+          geometry: f.geometry,
+          geometry_name: f.geometry_name,
+          camadaOrigem: layerName,
+          _schemaMeta: {
+            camposConfirmados: confirmedNonGeomFields,
+            ...publicDocInspection
+          },
+          _auditDocDigits: docDigits,
+          _rawProperties: rawProps,
+          properties: preserveSemaProperties(rawProps, confirmedDocFields)
+        };
+      });
 
       return {
         status: {
@@ -347,6 +424,7 @@ async function queryLayerSpatial(
           suportado: true,
           registrosEncontrados: features.length,
           camposPesquisados: [geomField],
+          camposConfirmados: confirmedNonGeomFields,
           mensagem:
             features.length > 0
               ? `${features.length} imóvel(is) localizado(s) para a coordenada.`
@@ -402,15 +480,39 @@ export default async function handler(
     return;
   }
 
+  const authCtx = await authorizeSemaLookupRequest(req as any);
+  if (!authCtx.authorized) {
+    res.status(authCtx.httpStatus || 401)!.json!({
+      error: authCtx.error || 'Autenticação obrigatória.'
+    });
+    return;
+  }
+
   let rawLat: any = req.query?.lat;
   let rawLng: any = req.query?.lng;
+  let rawTargetTipo: any = req.query?.entidadeAlvoTipo;
+  let rawTargetId: any = req.query?.entidadeAlvoId;
 
-  if ((rawLat === undefined || rawLng === undefined) && req.url) {
+  if ((rawLat === undefined || rawLng === undefined || rawTargetTipo === undefined || rawTargetId === undefined) && req.url) {
     try {
       const parsedUrl = new URL(req.url, 'http://localhost');
       if (rawLat === undefined) rawLat = parsedUrl.searchParams.get('lat');
       if (rawLng === undefined) rawLng = parsedUrl.searchParams.get('lng');
+      if (rawTargetTipo === undefined) rawTargetTipo = parsedUrl.searchParams.get('entidadeAlvoTipo');
+      if (rawTargetId === undefined) rawTargetId = parsedUrl.searchParams.get('entidadeAlvoId');
     } catch {}
+  }
+
+  const targetCtx = parseSemaAuditTargetContext({
+    entidadeAlvoTipo: rawTargetTipo,
+    entidadeAlvoId: rawTargetId
+  });
+  const targetAccess = await validateTargetEntityAccess(authCtx, targetCtx);
+  if (!targetAccess.ok) {
+    res.status(targetAccess.httpStatus || 403)!.json!({
+      error: targetAccess.error || 'Sem permissão para o registro alvo informado.'
+    });
+    return;
   }
 
   if (rawLat === undefined || rawLat === null || rawLng === undefined || rawLng === null) {
@@ -491,16 +593,25 @@ export default async function handler(
     const remaining = 5 - collectedFeatures.length;
     if (remaining <= 0) break;
 
+    const confirmedNonGeomFields = Array.from(schemaRes.fields.keys()).filter(
+      fieldName => fieldName !== schemaRes.geomField
+    );
     const confirmedDocFields = resolveConfirmedFields(
       schemaRes.fields,
       SEMA_FIELD_CANDIDATES.documento
+    );
+    const confirmedOwnerFields = resolveConfirmedFields(
+      schemaRes.fields,
+      SEMA_FIELD_CANDIDATES.titular
     );
 
     const queryRes = await queryLayerSpatial(
       layerName,
       capInfo.title,
       schemaRes.geomField,
+      confirmedNonGeomFields,
       confirmedDocFields,
+      confirmedOwnerFields,
       lat,
       lng,
       remaining
@@ -547,14 +658,46 @@ export default async function handler(
     return;
   }
 
+  const finalFeatures = await Promise.all(
+    collectedFeatures.slice(0, 5).map(async feat => {
+      const { _auditDocDigits, _rawProperties, ...publicFeature } = feat;
+      const rawProps = _rawProperties || feat.properties || {};
+      const schemaFieldMap = schemaCache.get(feat.camadaOrigem)?.fields || new Map<string, string>();
+      const carVal =
+        extractConfirmedFieldValue(rawProps, schemaFieldMap, SEMA_FIELD_CANDIDATES.carEstadual) ||
+        extractConfirmedFieldValue(rawProps, schemaFieldMap, SEMA_FIELD_CANDIDATES.carFederal) ||
+        extractConfirmedFieldValue(rawProps, schemaFieldMap, SEMA_FIELD_CANDIDATES.protocolo);
+      const titularRaw = extractConfirmedFieldValue(rawProps, schemaFieldMap, SEMA_FIELD_CANDIDATES.titular);
+      const titularClean = titularRaw ? stripOuterQuotesAndBrackets(titularRaw) : undefined;
+      const auditoriaId = await recordSemaServerAudit(authCtx, targetAccess.resolvedTarget, {
+        criterioTipo: 'coordenada',
+        criterioValor: `${lat.toFixed(6)},${lng.toFixed(6)}`,
+        camada: feat.camadaOrigem || CAR_LAYER,
+        featureId: String(feat.id || carVal || 'sema_feature'),
+        car: carVal,
+        rawProps,
+        docStatus: feat._schemaMeta?.cpfCnpjStatus || 'ausente',
+        docDigits: _auditDocDigits,
+        extraSafeAttrs: {
+          ...(titularClean ? { titularNome: titularClean } : {}),
+          ...(_auditDocDigits
+            ? { tipoPessoa: _auditDocDigits.length === 11 ? 'Pessoa física' : 'Pessoa jurídica' }
+            : {})
+        }
+      });
+
+      return auditoriaId ? { ...publicFeature, auditoriaId } : publicFeature;
+    })
+  );
+
   const mensagemStatus =
-    collectedFeatures.length > 0
-      ? `${collectedFeatures.length} imóvel(is) encontrado(s) para a coordenada informada.`
+    finalFeatures.length > 0
+      ? `${finalFeatures.length} imóvel(is) encontrado(s) para a coordenada informada.`
       : 'Consulta concluída com sucesso; nenhum imóvel encontrado nesta coordenada nas camadas consultadas.';
 
   res.status(200)!.json!({
-    encontrado: collectedFeatures.length > 0,
-    feicoes: collectedFeatures.slice(0, 5),
+    encontrado: finalFeatures.length > 0,
+    feicoes: finalFeatures,
     camadasConsultadas,
     mensagemStatus,
     consultadoEm

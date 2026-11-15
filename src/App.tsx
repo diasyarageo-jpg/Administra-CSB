@@ -633,6 +633,67 @@ export default function App() {
     });
   };
 
+  const handleCreateEmpreendedorFromVinculo = async (
+    newEmp: any
+  ): Promise<{ success: boolean; error?: string; record?: any }> => {
+    const res = await notificaDataService.saveRecord(
+      db,
+      'empreendedores',
+      newEmp,
+      null,
+      currentAuthUser?.id
+    );
+    if (isSupabaseConfigured() && !res.savedRemote && res.error) {
+      return { success: false, error: res.error };
+    }
+    setDb(res.updatedDb);
+    showToast(
+      res.savedRemote
+        ? 'Novo empreendedor criado na base central.'
+        : 'Novo empreendedor salvo localmente.'
+    );
+    return { success: true, record: res.updatedDb.empreendedores[0] || newEmp };
+  };
+
+  const handleSyncBarragemFromVinculo = (
+    updatedRecord: any,
+    remoteAlreadyUpdated = false
+  ) => {
+    const idxById = db.barragens.findIndex(
+      b => String(b.id) === String(updatedRecord.id)
+    );
+    const targetIdx = idxById >= 0 ? idxById : modalConfig?.index ?? null;
+
+    if (remoteAlreadyUpdated) {
+      setDb(prev => {
+        const nextList = [...prev.barragens];
+        if (targetIdx !== null && targetIdx >= 0 && targetIdx < nextList.length) {
+          nextList[targetIdx] = updatedRecord;
+        } else {
+          nextList.unshift(updatedRecord);
+        }
+        const nextDb = { ...prev, barragens: nextList };
+        saveNotificaDatabase(nextDb);
+        return nextDb;
+      });
+      showToast('Vínculo e campos SEMA-MT gravados com proveniência na base central.');
+      return;
+    }
+
+    notificaDataService
+      .saveRecord(db, 'barragens', updatedRecord, targetIdx, currentAuthUser?.id)
+      .then(res => {
+        setDb(res.updatedDb);
+        if (res.savedRemote) {
+          showToast('Vínculo e campos da barragem salvos na base central.');
+        } else if (res.error) {
+          showToast(`Salvo localmente. Aviso da base central: ${res.error}`);
+        } else {
+          showToast('Vínculo e campos da barragem salvos localmente.');
+        }
+      });
+  };
+
   const handleArchiveRecord = (key: string, index: number) => {
     const list = [...(db[key as keyof typeof db] || [])];
     const record: any = list[index];
@@ -2920,6 +2981,9 @@ export default function App() {
               record={modalConfig.record}
               isNew={modalConfig.index === null}
               empreendedores={db.empreendedores}
+              barragens={db.barragens}
+              onCreateEmpreendedor={handleCreateEmpreendedorFromVinculo}
+              onSyncRecordFromVinculo={handleSyncBarragemFromVinculo}
               onClose={() => setModalConfig(null)}
               onSave={handleSaveCustomRecord}
             />

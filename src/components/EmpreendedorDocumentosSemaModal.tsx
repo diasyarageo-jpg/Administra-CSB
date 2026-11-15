@@ -4,7 +4,6 @@ import {
   clearPersistedSemaLookup,
   consultarDocumentosSema,
   getPersistedSemaLookup,
-  registrarConsultaSemaAuditoria,
   setPersistedSemaLookup
 } from '../services/carLookupService';
 import { getEmpreendedorVinculos } from '../services/notificaDataService';
@@ -154,7 +153,9 @@ export function EmpreendedorDocumentosSemaModal({
       processos: procsExtra,
       coordenadas: incluirCoords ? vinculos.coordenadas : [],
       nome: nomeVal,
-      buscaExploratoria: exploratoria
+      buscaExploratoria: exploratoria,
+      entidadeAlvoTipo: 'empreendedor',
+      entidadeAlvoId: empreendedor?.id ? String(empreendedor.id) : undefined
     })
       .then(res => {
         let nextTab: SemaModalTab = 'car';
@@ -178,62 +179,6 @@ export function EmpreendedorDocumentosSemaModal({
           expandedByKey: {},
           expandedBarragemByKey: {}
         });
-
-        const firstFound =
-          res.carImoveis[0] ||
-          res.licencas[0] ||
-          res.notificacoes[0] ||
-          res.autosInfracao[0] ||
-          res.termosEmbargo[0] ||
-          res.outros[0];
-        if (firstFound) {
-          const cleanDocDigits = String(doc || '').replace(/\D/g, '');
-          const critTipo =
-            cleanDocDigits.length === 11 || cleanDocDigits.length === 14
-              ? 'cpf_cnpj_hash'
-              : carsExtra.length > 0
-              ? 'car'
-              : procsExtra.length > 0
-              ? 'processo'
-              : incluirCoords && vinculos.coordenadas.length > 0
-              ? 'coordenada'
-              : 'nome_exploratorio';
-          const critVal =
-            critTipo === 'cpf_cnpj_hash'
-              ? cleanDocDigits
-              : critTipo === 'car'
-              ? carsExtra[0]
-              : critTipo === 'processo'
-              ? procsExtra[0]
-              : critTipo === 'coordenada'
-              ? `${vinculos.coordenadas[0]?.lat},${vinculos.coordenadas[0]?.lng}`
-              : nomeVal;
-          const firstCar =
-            String(
-              firstFound.propriedadesBrutas?.NUMEROESTADUAL ||
-                firstFound.carFederal ||
-                (firstFound.camadaOrigem?.includes('CAR') ? firstFound.numeroDocumento : '') ||
-                carsExtra[0] ||
-                ''
-            ).trim() || undefined;
-          void registrarConsultaSemaAuditoria({
-            entidadeAlvoTipo: 'empreendedor',
-            entidadeAlvoId: empreendedor?.id ? String(empreendedor.id) : undefined,
-            criterioTipo: critTipo,
-            criterioValor: critVal,
-            camada: firstFound.camadaOrigem || 'Geoportal:CAR_ATP',
-            featureId: firstFound.id || firstFound.numeroDocumento || 'sema_doc_0',
-            car: firstCar,
-            atributosRecebidos: {
-              totalRegistros: res.totalRegistros,
-              carImoveis: res.carImoveis.length,
-              licencas: res.licencas.length,
-              notificacoes: res.notificacoes.length,
-              autosInfracao: res.autosInfracao.length,
-              termosEmbargo: res.termosEmbargo.length
-            }
-          });
-        }
       })
       .catch(() => {})
       .finally(() => setIsLoading(false));
