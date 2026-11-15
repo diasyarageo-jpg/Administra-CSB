@@ -562,10 +562,10 @@ export async function carregarDocumentosEmitidosPorBarragens(
     const { key, dam, procNorm } = entry;
 
     if (Array.isArray(dam.documentos)) {
-      for (const d of dam.documentos) {
-        if (!d) continue;
+      dam.documentos.forEach((d: any, docIdx: number) => {
+        if (!d) return;
         addDocToDam(key, {
-          id: String(d.id || `doc_${key}_${Math.random().toString(36).slice(2, 7)}`),
+          id: String(d.id || `doc_${key}_${docIdx}`),
           tipo: d.tipo || d.tipoNome || 'Documento',
           titulo: d.titulo || d.tipoNome || d.tipo || 'Documento emitido',
           numero: d.numero || undefined,
@@ -576,7 +576,7 @@ export async function carregarDocumentosEmitidosPorBarragens(
           analistas: Array.isArray(d.analistas) ? d.analistas : d.analista ? [String(d.analista)] : undefined,
           resumo: d.resumo || d.objetivo || undefined
         });
-      }
+      });
     }
 
     if (dam.parecerClassificacao || dam.parecer) {
@@ -651,12 +651,17 @@ export async function carregarDocumentosEmitidosPorBarragens(
 
   // 2. Consultas leves ao Supabase para buscar pareceres, notificações, ofícios e portarias reais
   if (isSupabaseConfigured() && supabase) {
-    const [catRes, fiscRes, transfRes] = await Promise.allSettled([
+    const [catRes, vincRes, fiscRes, transfRes] = await Promise.allSettled([
       supabase
         .from('documentos_catalogo')
         .select('id,origem_sistema,tipo_codigo,tipo_nome,titulo,numero,data_emissao,criado_em,analistas_elaboradores,processo,barragem_id,barragem_nome,car_mt,situacao')
         .order('data_emissao', { ascending: false })
         .limit(500),
+      supabase
+        .from('documento_vinculos')
+        .select('documento_id,barragem_id,car_norm,processo,conciliacao_status')
+        .neq('conciliacao_status', 'rejeitado')
+        .limit(1000),
       supabase
         .from('fiscaliza_notificacoes_importadas')
         .select('id,processo,municipio,status,tipo_documento,payload,situacao,data,analista,oficio_gerado,barragens,origem_sistema,created_at')
@@ -667,15 +672,33 @@ export async function carregarDocumentosEmitidosPorBarragens(
         .limit(300)
     ]);
 
+    const vincsByDocId = new Map<string, Array<{ barragem_id?: string; car_norm?: string; processo?: string }>>();
+    if (vincRes.status === 'fulfilled' && !vincRes.value.error && Array.isArray(vincRes.value.data)) {
+      for (const v of vincRes.value.data) {
+        const docId = String(v.documento_id || '');
+        if (!docId) continue;
+        if (!vincsByDocId.has(docId)) vincsByDocId.set(docId, []);
+        vincsByDocId.get(docId)!.push(v);
+      }
+    }
+
     if (catRes.status === 'fulfilled' && !catRes.value.error && Array.isArray(catRes.value.data)) {
       for (const row of catRes.value.data) {
         const rBarrId = String(row.barragem_id || '').trim();
         const rCar = normCarKeySimple(row.car_mt);
         const rProc = normDocMatchStr(row.processo);
         const rNome = normDocMatchStr(row.barragem_nome);
+        const rowVinc = vincsByDocId.get(String(row.id)) || [];
 
         for (const entry of damEntries) {
+          const matchedViaVinc = rowVinc.some(
+            v =>
+              (v.barragem_id && String(v.barragem_id).trim() === entry.idStr) ||
+              (v.car_norm && entry.carNorm && normCarKeySimple(v.car_norm) === entry.carNorm) ||
+              (v.processo && entry.procNorm && normDocMatchStr(v.processo) === entry.procNorm)
+          );
           const matched =
+            matchedViaVinc ||
             (rBarrId && entry.idStr && rBarrId === entry.idStr) ||
             (rCar && entry.carNorm && rCar === entry.carNorm) ||
             (rProc && entry.procNorm && rProc === entry.procNorm) ||
@@ -707,15 +730,24 @@ export async function carregarDocumentosEmitidosPorBarragens(
         const payload = row.payload && typeof row.payload === 'object' ? row.payload : {};
         const rProc = normDocMatchStr(row.processo || payload.numProcesso);
         const rCar = normCarKeySimple(payload.carMt);
-        const rBarragensArr = Array.isArray(row.barragens) ? row.barragens : [];
-        const rBarrRefs = rBarragensArr.map((item: any) =>
-          typeof item === 'string'
-            ? normDocMatchStr(item)
-            : normDocMatchStr(item?.id || item?.nome || item?.barragemId || '')
-        );
+        const rBarragensArr = [
+          ...(Array.isArray(row.barragens) ? row.barragens : []),
+          ...(Array.isArray(payload.barragens) ? payload.barragens : [])
+        ];
+        const rBarrRefs = rBarragensArr.flatMap((item: any) => {
+          if (typeof item === 'string') return [normDocMatchStr(item)];
+          const rawId = String(item?.id || item?.barragemId || '').trim();
+          const rawNome = String(item?.nome || '').trim();
+          return [
+            rawId ? normDocMatchStr(rawId) : '',
+            rawId ? normDocMatchStr(`FISCALIZA:BARRAGEM:${rawId}`) : '',
+            rawNome ? normDocMatchStr(rawNome) : ''
+          ].filter(Boolean);
+        });
 
         for (const entry of damEntries) {
           const matched =
+            entry.idStr === `FISCALIZA:REFERENCIA:${row.id}` ||
             (rProc && entry.procNorm && rProc === entry.procNorm) ||
             (rCar && entry.carNorm && rCar === entry.carNorm) ||
             (entry.idStr && rBarrRefs.includes(normDocMatchStr(entry.idStr))) ||

@@ -13,7 +13,10 @@ import {
 } from '../App';
 import { RtVinculo, cleanCpf, cleanRegistro, getEmpreendedorVinculos } from '../services/notificaDataService';
 import {
-  consultarCarPorCoordenada
+  clearPersistedSemaLookup,
+  consultarCarPorCoordenada,
+  getPersistedSemaLookup,
+  setPersistedSemaLookup
 } from '../services/carLookupService';
 import { CarLookupResult } from '../types/carLookup';
 import {
@@ -40,6 +43,13 @@ function cleanSemaRawText(val: any): string {
   const s = stripOuterQuotesAndBrackets(String(val)).replace(/"/g, '').trim();
   if (!s || ['nan', 'null', 'undefined'].includes(s.toLowerCase())) return '';
   return s;
+}
+
+function generateClientUuid(prefix: string): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return crypto.randomUUID();
+  }
+  return `${prefix}_${Date.now()}`;
 }
 
 function extractCleanSemaOwnerName(raw: any): string {
@@ -236,7 +246,7 @@ export function EmpreendedorModal({
     }
 
     const item = {
-      id: crypto.randomUUID ? crypto.randomUUID() : `emp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+      id: generateClientUuid('emp'),
       nome: novoNome.trim(),
       tipo: novoTipo,
       car: novoTipo === 'Rural' ? novoCar.trim() : '',
@@ -299,8 +309,11 @@ export function EmpreendedorModal({
         <div className="modal-body" style={{ maxHeight: '78vh', overflowY: 'auto' }}>
           <SemaCadastroLookupPanel
             entityLabel="Empreendedor"
+            entidadeAlvoTipo="empreendedor"
+            entidadeAlvoId={!isNew && record?.id ? String(record.id) : undefined}
             isNew={isNew}
             allowCar={true}
+            persistKey={isNew ? 'empreendedor:novo' : `empreendedor:${record?.id || record?.cpfCnpj || 'edit'}`}
             barragensCadastradas={barragens}
             defaultMode={
               cpfCnpj.replace(/\D/g, '').length === 14
@@ -472,9 +485,7 @@ export function EmpreendedorModal({
                   setEmpreendimentos(prev => [
                     ...prev,
                     {
-                      id: crypto.randomUUID
-                        ? crypto.randomUUID()
-                        : `emp_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`,
+                      id: generateClientUuid('emp'),
                       nome: ep.nome,
                       tipo: 'Rural',
                       car: ep.car,
@@ -921,11 +932,29 @@ export function BarragemModal({
     !linkedEmpreendimento && Boolean(selectedEmpreendimentoId && String(selectedEmpreendimentoId).trim());
 
   // Estados da consulta ao Geoportal SEMA-MT (CAR/MT)
+  const coordLookupPersistKey = isNew
+    ? 'barragem-coord:novo'
+    : `barragem-coord:${record?.id || record?.nome || 'edit'}`;
+
+  interface PersistedCoordLookup {
+    carLookupResult: CarLookupResult | null;
+    selectedFeatureIndex: number;
+    showCarPreview: boolean;
+  }
+
+  const savedCoordLookup = getPersistedSemaLookup<PersistedCoordLookup>(coordLookupPersistKey);
+
   const [isCarLoading, setIsCarLoading] = useState<boolean>(false);
   const [carLookupError, setCarLookupError] = useState<string | null>(null);
-  const [carLookupResult, setCarLookupResult] = useState<CarLookupResult | null>(null);
-  const [selectedFeatureIndex, setSelectedFeatureIndex] = useState<number>(0);
-  const [showCarPreview, setShowCarPreview] = useState<boolean>(false);
+  const [carLookupResult, setCarLookupResult] = useState<CarLookupResult | null>(
+    savedCoordLookup?.carLookupResult ?? null
+  );
+  const [selectedFeatureIndex, setSelectedFeatureIndex] = useState<number>(
+    savedCoordLookup?.selectedFeatureIndex ?? 0
+  );
+  const [showCarPreview, setShowCarPreview] = useState<boolean>(
+    Boolean(savedCoordLookup?.showCarPreview && savedCoordLookup?.carLookupResult)
+  );
   const [showFullCarDetails, setShowFullCarDetails] = useState<boolean>(false);
 
   // Estados de confirmação para substituição de campos já preenchidos
@@ -961,6 +990,11 @@ export function BarragemModal({
         setOverwriteMunicipio(false);
         setShowFullCarDetails(false);
         setShowCarPreview(true);
+        setPersistedSemaLookup<PersistedCoordLookup>(coordLookupPersistKey, {
+          carLookupResult: res,
+          selectedFeatureIndex: 0,
+          showCarPreview: true
+        });
       }
     } catch (err: any) {
       setCarLookupError(err?.message || 'Falha ao consultar o Geoportal SEMA-MT.');
@@ -994,6 +1028,7 @@ export function BarragemModal({
 
     setShowCarPreview(false);
     setCarLookupResult(null);
+    clearPersistedSemaLookup(coordLookupPersistKey);
   };
 
   const handleSubmit = (e: React.FormEvent) => {
@@ -1038,8 +1073,11 @@ export function BarragemModal({
         <div className="modal-body" style={{ maxHeight: '78vh', overflowY: 'auto' }}>
           <SemaCadastroLookupPanel
             entityLabel="Barragem"
+            entidadeAlvoTipo="barragem"
+            entidadeAlvoId={!isNew && record?.id ? String(record.id) : undefined}
             isNew={isNew}
             allowCar={true}
+            persistKey={isNew ? 'barragem:novo' : `barragem:${record?.id || record?.nome || 'edit'}`}
             defaultMode={
               linkedEmp?.cpfCnpj
                 ? linkedEmp.cpfCnpj.replace(/\D/g, '').length === 14
@@ -1866,7 +1904,7 @@ export function RtModal({
     } else {
       // Adiciona novo vínculo
       const newVinc: RtVinculo = {
-        id: `vinc_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+        id: generateClientUuid('vinc'),
         art: vincArt.trim(),
         artRrt: vincArt.trim(),
         barragemVinculada: vincBarragem.trim(),
@@ -1976,6 +2014,7 @@ export function RtModal({
             entityLabel="Responsável Técnico"
             isNew={isNew}
             allowCar={false}
+            persistKey={isNew ? 'rt:novo' : `rt:${record?.id || record?.cpf || 'edit'}`}
             defaultMode={cpf.replace(/\D/g, '').length === 14 ? 'cnpj' : 'cpf'}
             defaultQuery={cpf.trim()}
             buildComparisons={(item, meta) => {

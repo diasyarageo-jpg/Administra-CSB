@@ -76,7 +76,7 @@ export const ReconciliationView: React.FC<ReconciliationViewProps> = ({
     if (!selectedDam) return;
 
     const item: ReconciliationItem = {
-      id: `REC-${String(Math.floor(Math.random() * 900) + 100)}`,
+      id: typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `rec_${Date.now()}`,
       damId: selectedDam.id,
       damName: selectedDam.name,
       field: newField,

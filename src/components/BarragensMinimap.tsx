@@ -258,7 +258,7 @@ function resolveDamDocuments(
       const tipo = d.tipo || d.tipoNome || 'Documento';
       const ts = Date.parse(d.data || d.dataEmissao || '') || 0;
       docs.push({
-        id: String(d.id || Math.random()),
+        id: String(d.id || `doc_${dam.id || 'dam'}_${docs.length}`),
         tipo,
         tipoCodigo: d.tipoCodigo || 'OUTRO',
         titulo: d.titulo || `${tipo} da Barragem`,

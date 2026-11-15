@@ -324,7 +324,7 @@ export const authService = {
       }
 
       // 3. Fallback direto via INSERT RLS seguro (situacao = 'Pendente')
-      const newId = `usr_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 7)}`;
+      const newId = `usr_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
       const { error: insertError } = await supabase.from('usuarios').insert({
         id: newId,
         nome: nomeClean,
@@ -491,7 +491,7 @@ export const authService = {
       }
 
       // Fallback: insere diretamente no banco na tabela public.usuarios
-      const newId = `usr_${Date.now().toString(36)}_${Math.random().toString(36).substring(2, 7)}`;
+      const newId = `usr_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
       const { data: inserted, error: insertError } = await supabase
         .from('usuarios')
         .insert({

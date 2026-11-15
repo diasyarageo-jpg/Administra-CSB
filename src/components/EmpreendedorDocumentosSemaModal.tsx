@@ -1,6 +1,12 @@
 // src/components/EmpreendedorDocumentosSemaModal.tsx
 import React, { useState, useEffect, useMemo } from 'react';
-import { consultarDocumentosSema } from '../services/carLookupService';
+import {
+  clearPersistedSemaLookup,
+  consultarDocumentosSema,
+  getPersistedSemaLookup,
+  registrarConsultaSemaAuditoria,
+  setPersistedSemaLookup
+} from '../services/carLookupService';
 import { getEmpreendedorVinculos } from '../services/notificaDataService';
 import { parseCoordAdvanced } from '../services/coordService';
 import {
@@ -51,27 +57,63 @@ export function EmpreendedorDocumentosSemaModal({
     vinculos.processos.length > 0 ||
     vinculos.coordenadas.length > 0;
 
+  const consultaScopeKey = useMemo(() => {
+    const rawKey =
+      empreendedor?.id ||
+      String(empreendedor?.cpfCnpj || '').replace(/\D/g, '') ||
+      empreendedor?.nome ||
+      'geral';
+    return `emp:${String(rawKey).trim()}`;
+  }, [empreendedor?.id, empreendedor?.cpfCnpj, empreendedor?.nome]);
+
+  type SemaModalTab = 'car' | 'licencas' | 'notificacoes' | 'autos' | 'embargos' | 'diagnostico';
+
+  interface PersistedEmpreendedorSemaConsulta {
+    data: SemaDocumentosGroupedResult;
+    activeTab: SemaModalTab;
+    buscaCpfCnpj: string;
+    buscaCar: string;
+    buscaProcesso: string;
+    buscaNome: string;
+    usarCoordsBarragens: boolean;
+    usarBuscaExploratoria: boolean;
+    expandedByKey: Record<string, boolean>;
+    expandedBarragemByKey: Record<string, boolean>;
+  }
+
+  const initialSaved = getPersistedSemaLookup<PersistedEmpreendedorSemaConsulta>(consultaScopeKey);
+
   const [isLoading, setIsLoading] = useState<boolean>(false);
-  const [data, setData] = useState<SemaDocumentosGroupedResult | null>(null);
-  const [activeTab, setActiveTab] = useState<
-    'car' | 'licencas' | 'notificacoes' | 'autos' | 'embargos' | 'diagnostico'
-  >('car');
-  const [expandedByKey, setExpandedByKey] = useState<Record<string, boolean>>({});
-  const [expandedBarragemByKey, setExpandedBarragemByKey] = useState<Record<string, boolean>>({});
+  const [data, setData] = useState<SemaDocumentosGroupedResult | null>(initialSaved?.data ?? null);
+  const [activeTab, setActiveTab] = useState<SemaModalTab>(initialSaved?.activeTab ?? 'car');
+  const [expandedByKey, setExpandedByKey] = useState<Record<string, boolean>>(
+    initialSaved?.expandedByKey ?? {}
+  );
+  const [expandedBarragemByKey, setExpandedBarragemByKey] = useState<Record<string, boolean>>(
+    initialSaved?.expandedBarragemByKey ?? {}
+  );
   const [showVinculosCadastro, setShowVinculosCadastro] = useState<boolean>(false);
   const [showEmptyByKey, setShowEmptyByKey] = useState<Record<string, boolean>>({});
   const [docsByBarragemId, setDocsByBarragemId] = useState<Record<string, BarragemDocumentoEmitidoItem[]>>({});
   const [isLoadingDocsBarragem, setIsLoadingDocsBarragem] = useState<boolean>(false);
 
-  const [buscaCpfCnpj, setBuscaCpfCnpj] = useState<string>(initialDoc);
-  const [buscaCar, setBuscaCar] = useState<string>(initialCarStr);
-  const [buscaProcesso, setBuscaProcesso] = useState<string>(initialProcStr);
-  const [buscaNome, setBuscaNome] = useState<string>(initialNome);
+  const [buscaCpfCnpj, setBuscaCpfCnpj] = useState<string>(
+    initialSaved ? initialSaved.buscaCpfCnpj : initialDoc
+  );
+  const [buscaCar, setBuscaCar] = useState<string>(
+    initialSaved ? initialSaved.buscaCar : initialCarStr
+  );
+  const [buscaProcesso, setBuscaProcesso] = useState<string>(
+    initialSaved ? initialSaved.buscaProcesso : initialProcStr
+  );
+  const [buscaNome, setBuscaNome] = useState<string>(
+    initialSaved ? initialSaved.buscaNome : initialNome
+  );
   const [usarCoordsBarragens, setUsarCoordsBarragens] = useState<boolean>(
-    vinculos.coordenadas.length > 0
+    initialSaved ? initialSaved.usarCoordsBarragens : vinculos.coordenadas.length > 0
   );
   const [usarBuscaExploratoria, setUsarBuscaExploratoria] = useState<boolean>(
-    !hasInitialCriteria && initialNome.length >= 3
+    initialSaved ? initialSaved.usarBuscaExploratoria : !hasInitialCriteria && initialNome.length >= 3
   );
 
   const executarConsulta = (opts?: {
@@ -115,19 +157,104 @@ export function EmpreendedorDocumentosSemaModal({
       buscaExploratoria: exploratoria
     })
       .then(res => {
+        let nextTab: SemaModalTab = 'car';
+        if (res.carImoveis.length > 0) nextTab = 'car';
+        else if (res.licencas.length > 0) nextTab = 'licencas';
+        else if (res.notificacoes.length > 0) nextTab = 'notificacoes';
+        else if (res.autosInfracao.length > 0) nextTab = 'autos';
+        else if (res.termosEmbargo.length > 0) nextTab = 'embargos';
+
         setData(res);
-        if (res.carImoveis.length > 0) setActiveTab('car');
-        else if (res.licencas.length > 0) setActiveTab('licencas');
-        else if (res.notificacoes.length > 0) setActiveTab('notificacoes');
-        else if (res.autosInfracao.length > 0) setActiveTab('autos');
-        else if (res.termosEmbargo.length > 0) setActiveTab('embargos');
-        else setActiveTab('car');
+        setActiveTab(nextTab);
+        setPersistedSemaLookup<PersistedEmpreendedorSemaConsulta>(consultaScopeKey, {
+          data: res,
+          activeTab: nextTab,
+          buscaCpfCnpj: doc,
+          buscaCar: carVal,
+          buscaProcesso: procVal,
+          buscaNome: nomeVal,
+          usarCoordsBarragens: incluirCoords,
+          usarBuscaExploratoria: exploratoria,
+          expandedByKey: {},
+          expandedBarragemByKey: {}
+        });
+
+        const firstFound =
+          res.carImoveis[0] ||
+          res.licencas[0] ||
+          res.notificacoes[0] ||
+          res.autosInfracao[0] ||
+          res.termosEmbargo[0] ||
+          res.outros[0];
+        if (firstFound) {
+          const cleanDocDigits = String(doc || '').replace(/\D/g, '');
+          const critTipo =
+            cleanDocDigits.length === 11 || cleanDocDigits.length === 14
+              ? 'cpf_cnpj_hash'
+              : carsExtra.length > 0
+              ? 'car'
+              : procsExtra.length > 0
+              ? 'processo'
+              : incluirCoords && vinculos.coordenadas.length > 0
+              ? 'coordenada'
+              : 'nome_exploratorio';
+          const critVal =
+            critTipo === 'cpf_cnpj_hash'
+              ? cleanDocDigits
+              : critTipo === 'car'
+              ? carsExtra[0]
+              : critTipo === 'processo'
+              ? procsExtra[0]
+              : critTipo === 'coordenada'
+              ? `${vinculos.coordenadas[0]?.lat},${vinculos.coordenadas[0]?.lng}`
+              : nomeVal;
+          const firstCar =
+            String(
+              firstFound.propriedadesBrutas?.NUMEROESTADUAL ||
+                firstFound.carFederal ||
+                (firstFound.camadaOrigem?.includes('CAR') ? firstFound.numeroDocumento : '') ||
+                carsExtra[0] ||
+                ''
+            ).trim() || undefined;
+          void registrarConsultaSemaAuditoria({
+            entidadeAlvoTipo: 'empreendedor',
+            entidadeAlvoId: empreendedor?.id ? String(empreendedor.id) : undefined,
+            criterioTipo: critTipo,
+            criterioValor: critVal,
+            camada: firstFound.camadaOrigem || 'Geoportal:CAR_ATP',
+            featureId: firstFound.id || firstFound.numeroDocumento || 'sema_doc_0',
+            car: firstCar,
+            atributosRecebidos: {
+              totalRegistros: res.totalRegistros,
+              carImoveis: res.carImoveis.length,
+              licencas: res.licencas.length,
+              notificacoes: res.notificacoes.length,
+              autosInfracao: res.autosInfracao.length,
+              termosEmbargo: res.termosEmbargo.length
+            }
+          });
+        }
       })
       .catch(() => {})
       .finally(() => setIsLoading(false));
   };
 
   useEffect(() => {
+    const saved = getPersistedSemaLookup<PersistedEmpreendedorSemaConsulta>(consultaScopeKey);
+    if (saved && saved.data) {
+      setData(saved.data);
+      setActiveTab(saved.activeTab || 'car');
+      setBuscaCpfCnpj(saved.buscaCpfCnpj || '');
+      setBuscaCar(saved.buscaCar || '');
+      setBuscaProcesso(saved.buscaProcesso || '');
+      setBuscaNome(saved.buscaNome || '');
+      setUsarCoordsBarragens(Boolean(saved.usarCoordsBarragens));
+      setUsarBuscaExploratoria(Boolean(saved.usarBuscaExploratoria));
+      setExpandedByKey(saved.expandedByKey || {});
+      setExpandedBarragemByKey(saved.expandedBarragemByKey || {});
+      return;
+    }
+
     const doc = String(empreendedor?.cpfCnpj || '').trim();
     const digitsLen = doc.replace(/\D/g, '').length;
     const nome = String(empreendedor?.nome || '').trim();
@@ -143,23 +270,27 @@ export function EmpreendedorDocumentosSemaModal({
     setBuscaCar(carStr);
     setBuscaProcesso(procStr);
     setUsarCoordsBarragens(hasCoords);
+    setUsarBuscaExploratoria(!hasDoc && !hasCar && !hasProc && !hasCoords && nome.length >= 3);
+    setData(null);
+    setExpandedByKey({});
+    setExpandedBarragemByKey({});
+  }, [consultaScopeKey]);
 
-    const expl = !hasDoc && !hasCar && !hasProc && !hasCoords && nome.length >= 3;
-    setUsarBuscaExploratoria(expl);
-
-    if (hasDoc || hasCar || hasProc || hasCoords || expl) {
-      executarConsulta({
-        cpfCnpj: hasDoc ? doc : '',
-        car: carStr,
-        processo: procStr,
-        nome,
-        exploratoria: expl,
-        usarCoords: hasCoords
-      });
-    } else {
-      setData(null);
-    }
-  }, [empreendedor, vinculos]);
+  useEffect(() => {
+    if (!data) return;
+    setPersistedSemaLookup<PersistedEmpreendedorSemaConsulta>(consultaScopeKey, {
+      data,
+      activeTab,
+      buscaCpfCnpj,
+      buscaCar,
+      buscaProcesso,
+      buscaNome,
+      usarCoordsBarragens,
+      usarBuscaExploratoria,
+      expandedByKey,
+      expandedBarragemByKey
+    });
+  }, [consultaScopeKey, data, activeTab, expandedByKey, expandedBarragemByKey]);
 
   useEffect(() => {
     let cancelled = false;
@@ -1701,8 +1832,23 @@ export function EmpreendedorDocumentosSemaModal({
                   <strong>Resultado da consulta: </strong>
                   <span>{data.mensagemStatus}</span>
                 </div>
-                <div style={{ fontSize: '11px', color: '#64748b' }}>
-                  {data.consultadoEm ? new Date(data.consultadoEm).toLocaleString('pt-BR') : '—'}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '10px', flexWrap: 'wrap' }}>
+                  <span style={{ fontSize: '11px', color: '#64748b' }}>
+                    {data.consultadoEm ? new Date(data.consultadoEm).toLocaleString('pt-BR') : '—'}
+                  </span>
+                  <button
+                    type="button"
+                    className="btn light small"
+                    style={{ fontSize: '11px', padding: '2px 8px' }}
+                    onClick={() => {
+                      clearPersistedSemaLookup(consultaScopeKey);
+                      setData(null);
+                      setExpandedByKey({});
+                      setExpandedBarragemByKey({});
+                    }}
+                  >
+                    Limpar resultado
+                  </button>
                 </div>
               </div>
 

@@ -1,6 +1,12 @@
 // src/components/SemaCadastroLookupPanel.tsx
 import React, { useState, useEffect } from 'react';
-import { consultarDocumentosSema } from '../services/carLookupService';
+import {
+  clearPersistedSemaLookup,
+  consultarDocumentosSema,
+  getPersistedSemaLookup,
+  registrarConsultaSemaAuditoria,
+  setPersistedSemaLookup
+} from '../services/carLookupService';
 import { parseCoordAdvanced } from '../services/coordService';
 import {
   BarragemDocumentoEmitidoItem,
@@ -39,10 +45,13 @@ export interface SemaCampoComparacao {
 
 interface SemaCadastroLookupPanelProps {
   entityLabel: string;
+  entidadeAlvoTipo?: 'empreendedor' | 'barragem' | 'car';
+  entidadeAlvoId?: string;
   isNew: boolean;
   allowCar?: boolean;
   defaultMode?: SemaLookupMode;
   defaultQuery?: string;
+  persistKey?: string;
   barragensCadastradas?: any[];
   buildComparisons: (
     item: SemaDocumentoItem,
@@ -83,14 +92,37 @@ export function normalizeTextCompare(val: string): string {
 
 export function SemaCadastroLookupPanel({
   entityLabel,
+  entidadeAlvoTipo,
+  entidadeAlvoId,
   isNew,
   allowCar = false,
   defaultMode = 'cpf',
   defaultQuery = '',
+  persistKey,
   barragensCadastradas = [],
   buildComparisons,
   onApplyFields
 }: SemaCadastroLookupPanelProps) {
+  const resolvedPersistKey = persistKey
+    ? `panel:${persistKey}`
+    : `panel:${entityLabel}:${isNew ? 'new' : 'edit'}`;
+
+  interface PersistedPanelConsulta {
+    mode: SemaLookupMode;
+    query: string;
+    result: SemaDocumentosGroupedResult | null;
+    allItems: SemaDocumentoItem[];
+    selectedItemIdx: number;
+    lastMeta: SemaSearchMeta | null;
+    checkedKeys: Record<string, boolean>;
+    decisionStatus: string | null;
+    panelDismissed: boolean;
+    showFullSemaDetails: boolean;
+    expandedBarragemKeys: Record<string, boolean>;
+  }
+
+  const initialPersisted = getPersistedSemaLookup<PersistedPanelConsulta>(resolvedPersistKey);
+
   const resolveInitialMode = (): SemaLookupMode => {
     if (defaultMode === 'car' && allowCar) return 'car';
     const digits = String(defaultQuery || '').replace(/\D/g, '');
@@ -99,8 +131,11 @@ export function SemaCadastroLookupPanel({
     return defaultMode === 'car' && !allowCar ? 'cpf' : defaultMode;
   };
 
-  const [mode, setMode] = useState<SemaLookupMode>(resolveInitialMode);
+  const [mode, setMode] = useState<SemaLookupMode>(() =>
+    initialPersisted?.mode || resolveInitialMode()
+  );
   const [query, setQuery] = useState<string>(() => {
+    if (initialPersisted?.query !== undefined) return initialPersisted.query;
     const initialMode = resolveInitialMode();
     if (initialMode === 'cpf') return formatCpfInput(defaultQuery);
     if (initialMode === 'cnpj') return formatCnpjInput(defaultQuery);
@@ -110,17 +145,35 @@ export function SemaCadastroLookupPanel({
   const [isLoading, setIsLoading] = useState<boolean>(false);
   const [validationError, setValidationError] = useState<string | null>(null);
   const [apiError, setApiError] = useState<string | null>(null);
-  const [result, setResult] = useState<SemaDocumentosGroupedResult | null>(null);
-  const [allItems, setAllItems] = useState<SemaDocumentoItem[]>([]);
-  const [selectedItemIdx, setSelectedItemIdx] = useState<number>(0);
-  const [lastMeta, setLastMeta] = useState<SemaSearchMeta | null>(null);
+  const [result, setResult] = useState<SemaDocumentosGroupedResult | null>(
+    initialPersisted?.result ?? null
+  );
+  const [allItems, setAllItems] = useState<SemaDocumentoItem[]>(
+    initialPersisted?.allItems ?? []
+  );
+  const [selectedItemIdx, setSelectedItemIdx] = useState<number>(
+    initialPersisted?.selectedItemIdx ?? 0
+  );
+  const [lastMeta, setLastMeta] = useState<SemaSearchMeta | null>(
+    initialPersisted?.lastMeta ?? null
+  );
 
-  const [checkedKeys, setCheckedKeys] = useState<Record<string, boolean>>({});
-  const [decisionStatus, setDecisionStatus] = useState<string | null>(null);
-  const [panelDismissed, setPanelDismissed] = useState<boolean>(false);
-  const [showFullSemaDetails, setShowFullSemaDetails] = useState<boolean>(false);
+  const [checkedKeys, setCheckedKeys] = useState<Record<string, boolean>>(
+    initialPersisted?.checkedKeys ?? {}
+  );
+  const [decisionStatus, setDecisionStatus] = useState<string | null>(
+    initialPersisted?.decisionStatus ?? null
+  );
+  const [panelDismissed, setPanelDismissed] = useState<boolean>(
+    Boolean(initialPersisted?.panelDismissed)
+  );
+  const [showFullSemaDetails, setShowFullSemaDetails] = useState<boolean>(
+    Boolean(initialPersisted?.showFullSemaDetails)
+  );
   const [showEmptySemaProps, setShowEmptySemaProps] = useState<boolean>(false);
-  const [expandedBarragemKeys, setExpandedBarragemKeys] = useState<Record<string, boolean>>({});
+  const [expandedBarragemKeys, setExpandedBarragemKeys] = useState<Record<string, boolean>>(
+    initialPersisted?.expandedBarragemKeys ?? {}
+  );
   const [docsByBarragemId, setDocsByBarragemId] = useState<Record<string, BarragemDocumentoEmitidoItem[]>>({});
   const [isLoadingDocsBarragem, setIsLoadingDocsBarragem] = useState<boolean>(false);
 
@@ -183,11 +236,43 @@ export function SemaCadastroLookupPanel({
     setExpandedBarragemKeys({});
   };
 
-  useEffect(() => {
-    if (selectedItem && lastMeta) {
-      initSelectionForItem(selectedItem, lastMeta);
+  const handleSelectItem = (idx: number) => {
+    setSelectedItemIdx(idx);
+    const targetItem = allItems[idx] || null;
+    if (targetItem && lastMeta) {
+      initSelectionForItem(targetItem, lastMeta);
     }
-  }, [selectedItemIdx]);
+  };
+
+  useEffect(() => {
+    if (!result && allItems.length === 0) return;
+    setPersistedSemaLookup<PersistedPanelConsulta>(resolvedPersistKey, {
+      mode,
+      query,
+      result,
+      allItems,
+      selectedItemIdx,
+      lastMeta,
+      checkedKeys,
+      decisionStatus,
+      panelDismissed,
+      showFullSemaDetails,
+      expandedBarragemKeys
+    });
+  }, [
+    resolvedPersistKey,
+    mode,
+    query,
+    result,
+    allItems,
+    selectedItemIdx,
+    lastMeta,
+    checkedKeys,
+    decisionStatus,
+    panelDismissed,
+    showFullSemaDetails,
+    expandedBarragemKeys
+  ]);
 
   const handleModeChange = (newMode: SemaLookupMode) => {
     setMode(newMode);
@@ -275,6 +360,33 @@ export function SemaCadastroLookupPanel({
       setSelectedItemIdx(0);
       if (merged.length > 0) {
         initSelectionForItem(merged[0], meta);
+        const topItem = merged[0];
+        const topCar =
+          String(
+            topItem.propriedadesBrutas?.NUMEROESTADUAL ||
+              topItem.carFederal ||
+              (topItem.camadaOrigem?.includes('CAR') ? topItem.numeroDocumento : '') ||
+              (mode === 'car' ? trimmed : '')
+          ).trim() || undefined;
+        void registrarConsultaSemaAuditoria({
+          entidadeAlvoTipo: entidadeAlvoTipo || (mode === 'car' ? 'car' : undefined),
+          entidadeAlvoId,
+          criterioTipo: mode === 'car' ? 'car' : 'cpf_cnpj_hash',
+          criterioValor: mode === 'car' ? trimmed : digits,
+          camada: topItem.camadaOrigem || 'Geoportal:CAR_ATP',
+          featureId: topItem.id || topItem.numeroDocumento || 'sema_item_0',
+          car: topCar,
+          atributosRecebidos: {
+            camada: topItem.camadaOrigem,
+            tipo: topItem.tipo,
+            numeroDocumento: topItem.numeroDocumento,
+            numeroProcesso: topItem.numeroProcesso,
+            carEstadual: topItem.propriedadesBrutas?.NUMEROESTADUAL || undefined,
+            carFederal: topItem.carFederal,
+            municipio: topItem.municipio,
+            totalRegistros: res.totalRegistros
+          }
+        });
       }
     } catch (err: any) {
       setApiError(err?.message || 'Erro ao consultar a base da SEMA-MT.');
@@ -364,12 +476,17 @@ export function SemaCadastroLookupPanel({
             className="btn light small"
             style={{ fontSize: '11px', padding: '4px 10px' }}
             onClick={() => {
+              clearPersistedSemaLookup(resolvedPersistKey);
               setResult(null);
               setAllItems([]);
+              setLastMeta(null);
               setApiError(null);
               setValidationError(null);
               setDecisionStatus(null);
               setPanelDismissed(false);
+              setCheckedKeys({});
+              setExpandedBarragemKeys({});
+              setShowFullSemaDetails(false);
             }}
           >
             Limpar consulta
@@ -522,7 +639,7 @@ export function SemaCadastroLookupPanel({
                 return (
                   <div
                     key={item.id ?? `${item.camadaOrigem}-${idx}`}
-                    onClick={() => setSelectedItemIdx(idx)}
+                    onClick={() => handleSelectItem(idx)}
                     style={{
                       padding: '8px 10px',
                       borderRadius: '6px',
@@ -555,7 +672,7 @@ export function SemaCadastroLookupPanel({
                           type="radio"
                           name={`sema-select-${entityLabel}`}
                           checked={isSelected}
-                          onChange={() => setSelectedItemIdx(idx)}
+                          onChange={() => handleSelectItem(idx)}
                         />
                         {hasBarragem && (
                           <span

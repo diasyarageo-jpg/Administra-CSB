@@ -50,7 +50,10 @@ interface CoordPoint {
 
 const WFS_URL = 'https://geo.sema.mt.gov.br/geoserver/wfs';
 const WMS_OWS_URL = 'https://geo.sema.mt.gov.br/geoserver/ows';
-const GEOSERVER_AUTHKEY = '541085de-9a2e-454e-bdba-eb3d57a2f492';
+const GEOSERVER_AUTHKEY =
+  process.env.SEMA_GEOSERVER_AUTHKEY ||
+  process.env.GEOSERVER_AUTHKEY ||
+  '541085de-9a2e-454e-bdba-eb3d57a2f492';
 
 const CACHE_TTL_MS = 10 * 60 * 1000;
 

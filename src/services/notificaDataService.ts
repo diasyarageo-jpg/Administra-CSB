@@ -118,7 +118,9 @@ export function getEmpreendedorVinculos(
   const barragensVinculadas: BarragemRecord[] = (Array.isArray(barragens) ? barragens : []).filter(b => {
     if (!b) return false;
     const bEmpId = String(b.empreendedorId || b.empreendedor_id || '').trim();
-    if (empId && bEmpId && bEmpId === empId) return true;
+    if (bEmpId) {
+      return Boolean(empId && bEmpId === empId);
+    }
 
     const bEmpRef = String(b.empreendedor || '').trim();
     if (empId && bEmpRef && bEmpRef === empId) return true;
@@ -196,7 +198,17 @@ export interface RtVinculo {
   situacao?: string;
   observacoes?: string;
   originTable?: 'responsaveis_tecnicos_barragens' | 'rts' | 'local';
+  parecerOrigemId?: string;
+  responsavelOrigemId?: string;
+  processo?: string;
   rawRecord?: any;
+}
+
+function createStableUuid(prefix: string): string {
+  if (typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function') {
+    return `${prefix}_${crypto.randomUUID()}`;
+  }
+  throw new Error('Ambiente sem suporte a crypto.randomUUID para geração segura de identificadores.');
 }
 
 export interface ResponsavelTecnicoRecord {
@@ -603,7 +615,7 @@ export function fromDbRt(row: any): ResponsavelTecnicoRecord {
   const hasReliableId = Boolean((cCpf && cCpf.length === 11) || (cReg && cReg.length >= 3));
 
   const singleVinculo: RtVinculo = {
-    id: id || `vinc_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`,
+    id: id || createStableUuid('vinc'),
     rtId: row.rt_id || row.id_rt || undefined,
     art: artVal,
     artRrt: artVal,
@@ -614,6 +626,9 @@ export function fromDbRt(row: any): ResponsavelTecnicoRecord {
     situacao,
     observacoes: observacoes || undefined,
     originTable: 'responsaveis_tecnicos_barragens',
+    parecerOrigemId: row.parecer_origem_id || undefined,
+    responsavelOrigemId: row.responsavel_origem_id || undefined,
+    processo: row.processo || undefined,
     rawRecord: row
   };
 
@@ -704,7 +719,7 @@ export function groupRtLinksIntoProfessionals(
   // 2. Processa cada vínculo importado de responsaveis_tecnicos_barragens
   for (const row of rawLinks) {
     const rawParsed = fromDbRt(row);
-    const linkId = String(rawParsed.id || row.id || `vinc_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`);
+    const linkId = String(rawParsed.id || row.id || createStableUuid('vinc'));
     const art = rawParsed.art || rawParsed.artRrt || '';
     const dam = rawParsed.barragemVinculada || '';
     const damName = rawParsed.nomeBarragem || undefined;
@@ -721,6 +736,9 @@ export function groupRtLinksIntoProfessionals(
       situacao: rawParsed.situacao || 'Ativo',
       observacoes: rawParsed.observacoes || undefined,
       originTable: 'responsaveis_tecnicos_barragens',
+      parecerOrigemId: row.parecer_origem_id || undefined,
+      responsavelOrigemId: row.responsavel_origem_id || undefined,
+      processo: row.processo || undefined,
       rawRecord: row
     };
 
@@ -1233,7 +1251,7 @@ export const notificaDataService = {
   ): Promise<SaveOperationResult> {
     const list = [...(currentDb[collectionKey] as any[])];
     const timestamp = new Date().toISOString();
-    const id = record.id || (typeof crypto !== 'undefined' && crypto.randomUUID ? crypto.randomUUID() : `rec_${Date.now()}_${Math.random().toString(36).substring(2, 7)}`);
+    const id = record.id || createStableUuid('rec');
 
     const recordWithTimestamps = {
       ...record,
@@ -1296,16 +1314,19 @@ export const notificaDataService = {
         const vinculoErrors: string[] = [];
 
         for (const vinc of vinculos) {
-          const vincId = vinc.id || `vinc_${Date.now()}_${Math.random().toString(36).substring(2, 6)}`;
+          const vincId = vinc.id || createStableUuid('vinc');
+          const barragemIdVal = vinc.barragemId || vinc.barragemVinculada || null;
           const vincPayload: any = {
             id: String(vincId),
             rt_id: String(recordWithTimestamps.id),
             nome: String(recordWithTimestamps.nome || ''),
             art: vinc.art || vinc.artRrt || '',
             art_rrt: vinc.art || vinc.artRrt || '',
-            barragem_id: vinc.barragemId || vinc.barragemVinculada || null,
-            barragem_vinculada: vinc.barragemVinculada || null,
-            nome_barragem: vinc.nomeBarragem || null,
+            barragem_id: barragemIdVal,
+            conselho: recordWithTimestamps.conselho || null,
+            parecer_origem_id: vinc.parecerOrigemId || 'ADMINISTRA:MANUAL',
+            responsavel_origem_id: vinc.responsavelOrigemId || String(recordWithTimestamps.id),
+            processo: vinc.processo || null,
             validade: vinc.validade || null,
             situacao: vinc.situacao || recordWithTimestamps.situacao || 'Ativo',
             observacoes: vinc.observacoes || null,
@@ -1315,20 +1336,9 @@ export const notificaDataService = {
             updated_at: timestamp
           };
 
-          let { error: vErr } = await supabase
+          const { error: vErr } = await supabase
             .from('responsaveis_tecnicos_barragens')
             .upsert(vincPayload, { onConflict: 'id' });
-
-          if (vErr && vErr.code === '42703') {
-            const lean: any = {
-              id: vincPayload.id,
-              nome: vincPayload.nome,
-              art: vincPayload.art,
-              barragem_id: vincPayload.barragem_id
-            };
-            const retry = await supabase.from('responsaveis_tecnicos_barragens').upsert(lean, { onConflict: 'id' });
-            if (!retry.error) vErr = null;
-          }
 
           if (vErr) {
             vinculoErrors.push(`ART ${vinc.art}: ${vErr.message}`);
@@ -1377,21 +1387,9 @@ export const notificaDataService = {
       const conf = collectionConverters[collectionKey];
       const payload = conf.toDb(recordWithTimestamps);
 
-      let { error } = await supabase
+      const { error } = await supabase
         .from(conf.table)
         .upsert(payload, { onConflict: 'id' });
-
-      if (error && error.code === '42703') {
-        const fallbackPayload = { ...payload };
-        delete fallbackPayload.empreendedor_id;
-        delete fallbackPayload.altura;
-        delete fallbackPayload.volume;
-        delete fallbackPayload.dano_potencial;
-        delete fallbackPayload.categoria_risco;
-        delete fallbackPayload.classificada_em;
-        const retry = await supabase.from(conf.table).upsert(fallbackPayload, { onConflict: 'id' });
-        error = retry.error;
-      }
 
       if (error) {
         return {
@@ -1545,18 +1543,7 @@ export const notificaDataService = {
       for (const item of items) {
         try {
           const payload = conf.toDb(item);
-          let { error } = await supabase.from(conf.table).upsert(payload, { onConflict: 'id' });
-          if (error && error.code === '42703') {
-            const fallbackPayload = { ...payload };
-            delete fallbackPayload.empreendedor_id;
-            delete fallbackPayload.altura;
-            delete fallbackPayload.volume;
-            delete fallbackPayload.dano_potencial;
-            delete fallbackPayload.categoria_risco;
-            delete fallbackPayload.classificada_em;
-            const retry = await supabase.from(conf.table).upsert(fallbackPayload, { onConflict: 'id' });
-            error = retry.error;
-          }
+          const { error } = await supabase.from(conf.table).upsert(payload, { onConflict: 'id' });
           if (error) {
             summary.errors.push(`ID ${item.id}: ${error.message}`);
             errorCount++;
@@ -1579,6 +1566,39 @@ export const notificaDataService = {
       totalMigrated,
       errorCount
     };
+  },
+
+  /**
+   * Consulta a fila oficial de pendências de conciliação (vw_pendencias_conciliacao).
+   */
+  async fetchPendenciasConciliacao(): Promise<any[]> {
+    if (!isSupabaseConfigured() || !supabase) return [];
+    const { data, error } = await supabase.from('vw_pendencias_conciliacao').select('*');
+    if (error || !Array.isArray(data)) return [];
+    return data;
+  },
+
+  /**
+   * Aprova vínculo de titularidade vigente (barragem <-> empreendedor) preservando histórico.
+   */
+  async aprovarVinculoTitularidade(
+    barragemId: string,
+    empreendedorId: string,
+    motivo = 'Conciliação manual de titularidade',
+    transferenciaId?: string
+  ): Promise<{ success: boolean; error?: string }> {
+    if (!isSupabaseConfigured() || !supabase) {
+      return { success: false, error: 'Banco de dados central não configurado.' };
+    }
+    const { data, error } = await supabase.rpc('aprovar_vinculo_titularidade', {
+      p_barragem_id: barragemId,
+      p_empreendedor_id: empreendedorId,
+      p_motivo: motivo,
+      p_transferencia_id: transferenciaId ?? null
+    });
+    if (error) return { success: false, error: error.message };
+    if (data && data.success === false) return { success: false, error: data.error };
+    return { success: true };
   },
 
   /**

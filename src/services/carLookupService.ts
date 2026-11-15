@@ -24,6 +24,66 @@ getMatoGrossoMunicipios()
   })
   .catch(() => {});
 
+const SEMA_LOOKUP_STORAGE_PREFIX = 'administra:sema_consulta:v1:';
+const semaLookupMemoryStore = new Map<string, unknown>();
+
+export function getPersistedSemaLookup<T>(scopeKey: string): T | null {
+  const key = String(scopeKey || '').trim();
+  if (!key) return null;
+
+  if (semaLookupMemoryStore.has(key)) {
+    return semaLookupMemoryStore.get(key) as T;
+  }
+
+  if (typeof window !== 'undefined' && window.sessionStorage) {
+    try {
+      const raw = window.sessionStorage.getItem(`${SEMA_LOOKUP_STORAGE_PREFIX}${key}`);
+      if (raw) {
+        const parsed = JSON.parse(raw) as T;
+        semaLookupMemoryStore.set(key, parsed);
+        return parsed;
+      }
+    } catch {
+      // Ignora falhas de acesso ao sessionStorage mantendo uso normal em memória
+    }
+  }
+
+  return null;
+}
+
+export function setPersistedSemaLookup<T>(scopeKey: string, value: T): void {
+  const key = String(scopeKey || '').trim();
+  if (!key) return;
+
+  semaLookupMemoryStore.set(key, value);
+
+  if (typeof window !== 'undefined' && window.sessionStorage) {
+    try {
+      window.sessionStorage.setItem(
+        `${SEMA_LOOKUP_STORAGE_PREFIX}${key}`,
+        JSON.stringify(value)
+      );
+    } catch {
+      // Caso exceda cota do sessionStorage, mantém preservado no store em memória sem expirar
+    }
+  }
+}
+
+export function clearPersistedSemaLookup(scopeKey: string): void {
+  const key = String(scopeKey || '').trim();
+  if (!key) return;
+
+  semaLookupMemoryStore.delete(key);
+
+  if (typeof window !== 'undefined' && window.sessionStorage) {
+    try {
+      window.sessionStorage.removeItem(`${SEMA_LOOKUP_STORAGE_PREFIX}${key}`);
+    } catch {
+      // Ignora falha de remoção no sessionStorage
+    }
+  }
+}
+
 /**
  * Converte as propriedades de uma feição GeoJSON retornada pelo GeoServer
  * em um objeto mapeado com os campos do Administra-CSB.
@@ -432,4 +492,81 @@ export async function obterStatusSincronizacaoGeoportal(): Promise<{
     }
   } catch {}
   return { status: 'ocioso', registrosSincronizados: 0 };
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  if (typeof crypto !== 'undefined' && crypto.subtle) {
+    const buf = await crypto.subtle.digest('SHA-256', new TextEncoder().encode(value));
+    return Array.from(new Uint8Array(buf))
+      .map(b => b.toString(16).padStart(2, '0'))
+      .join('');
+  }
+  return '';
+}
+
+/**
+ * Nível 2 SEMA-MT: registra auditoria de consulta persistida sem gravar CPF/CNPJ em claro nem alterar cadastro mestre.
+ */
+export async function registrarConsultaSemaAuditoria(params: {
+  entidadeAlvoTipo?: 'empreendedor' | 'barragem' | 'car';
+  entidadeAlvoId?: string;
+  criterioTipo: 'car' | 'coordenada' | 'processo' | 'cpf_cnpj_hash' | 'nome_exploratorio';
+  criterioValor?: string;
+  camada: string;
+  featureId: string;
+  car?: string;
+  atributosRecebidos: Record<string, any>;
+}): Promise<string | null> {
+  if (!isSupabaseConfigured() || !supabase) return null;
+  try {
+    let ref = String(params.criterioValor || '').trim();
+    if (params.criterioTipo === 'cpf_cnpj_hash' && ref) {
+      ref = await sha256Hex(ref.replace(/\D/g, ''));
+    }
+    const { data, error } = await supabase.rpc('registrar_consulta_sema_auditoria', {
+      p_entidade_alvo_tipo: params.entidadeAlvoTipo ?? null,
+      p_entidade_alvo_id: params.entidadeAlvoId ?? null,
+      p_criterio_tipo: params.criterioTipo,
+      p_criterio_referencia: ref || null,
+      p_camada: params.camada,
+      p_feature_id: params.featureId,
+      p_car: params.car ?? null,
+      p_atributos_recebidos: params.atributosRecebidos || {}
+    });
+    if (error) return null;
+    return data ? String(data) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * Nível 3 SEMA-MT: aplica explicitamente um campo aceito pelo analista no cadastro mestre com histórico e proveniência.
+ */
+export async function aceitarDadoSemaParaMestre(params: {
+  auditoriaId: string;
+  entidadeTipo: 'barragem' | 'empreendedor';
+  entidadeId: string;
+  campoNome: string;
+  novoValor: string;
+  motivo?: string;
+}): Promise<{ success: boolean; error?: string }> {
+  if (!isSupabaseConfigured() || !supabase) {
+    return { success: false, error: 'Banco de dados central não configurado.' };
+  }
+  try {
+    const { data, error } = await supabase.rpc('aceitar_dado_sema_para_mestre', {
+      p_auditoria_id: params.auditoriaId,
+      p_entidade_tipo: params.entidadeTipo,
+      p_entidade_id: params.entidadeId,
+      p_campo_nome: params.campoNome,
+      p_novo_valor: params.novoValor,
+      p_motivo: params.motivo ?? null
+    });
+    if (error) return { success: false, error: error.message };
+    if (data && data.success === false) return { success: false, error: data.error };
+    return { success: true };
+  } catch (err: any) {
+    return { success: false, error: err?.message || 'Erro ao registrar aceite no cadastro mestre.' };
+  }
 }

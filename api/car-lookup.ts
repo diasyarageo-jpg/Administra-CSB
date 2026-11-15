@@ -36,7 +36,10 @@ interface CamadaStatus {
 }
 
 const WFS_URL = 'https://geo.sema.mt.gov.br/geoserver/wfs';
-const GEOSERVER_AUTHKEY = '541085de-9a2e-454e-bdba-eb3d57a2f492';
+const GEOSERVER_AUTHKEY =
+  process.env.SEMA_GEOSERVER_AUTHKEY ||
+  process.env.GEOSERVER_AUTHKEY ||
+  '541085de-9a2e-454e-bdba-eb3d57a2f492';
 const CAR_LAYER = 'Geoportal:CAR_ATP';
 const CAR_REQUERIDO_LAYER = 'Geoportal:MVW_REQUERIMENTO_ATP';
 
