@@ -36,6 +36,17 @@ export interface DocumentoFilterOptions {
   dataInicio?: string;
   dataFim?: string;
   analista?: string;
+  titulo?: string;
+  numero?: string;
+  responsavelTecnico?: string;
+  empreendedor?: string;
+  processo?: string;
+  barragem?: string;
+  carMt?: string;
+  situacao?: string;
+  suportaDownload?: 'Todos' | 'sim' | 'nao';
+  sincInicio?: string;
+  sincFim?: string;
   ordenarPor?: 'data' | 'titulo' | 'origem' | 'empreendedor';
   direcao?: 'asc' | 'desc';
 }
@@ -342,16 +353,36 @@ export async function carregarCatalogoDocumentos(
 /**
  * Filtra e ordena os documentos do catálogo conforme critérios da interface.
  */
+function normDocFilterStr(val: unknown): string {
+  return String(val ?? '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/\s+/g, ' ')
+    .trim()
+    .toLowerCase();
+}
+
 export function filterAndSortDocumentos(
   docs: DocumentoCatalogoItem[],
   filters: DocumentoFilterOptions
 ): DocumentoCatalogoItem[] {
-  const busca = (filters.busca || '').trim().toLowerCase();
+  const busca = normDocFilterStr(filters.busca);
   const origem = filters.origem || 'Todas';
   const tipoCodigo = filters.tipoCodigo || 'Todos';
   const dataInicio = filters.dataInicio || '';
   const dataFim = filters.dataFim || '';
-  const analista = (filters.analista || '').trim().toLowerCase();
+  const analista = normDocFilterStr(filters.analista);
+  const titulo = normDocFilterStr(filters.titulo);
+  const numero = normDocFilterStr(filters.numero);
+  const responsavelTecnico = normDocFilterStr(filters.responsavelTecnico);
+  const empreendedor = normDocFilterStr(filters.empreendedor);
+  const processo = normDocFilterStr(filters.processo);
+  const barragem = normDocFilterStr(filters.barragem);
+  const carMt = normDocFilterStr(filters.carMt);
+  const situacao = filters.situacao || 'Todas';
+  const suportaDownload = filters.suportaDownload || 'Todos';
+  const sincInicio = filters.sincInicio || '';
+  const sincFim = filters.sincFim || '';
   const ordenarPor = filters.ordenarPor || 'data';
   const direcao = filters.direcao || 'desc';
 
@@ -364,35 +395,91 @@ export function filterAndSortDocumentos(
       return false;
     }
 
-    if (dataInicio && doc.dataEmissao && doc.dataEmissao < dataInicio) {
+    if (situacao !== 'Todas' && doc.situacao !== situacao) {
       return false;
     }
 
-    if (dataFim && doc.dataEmissao && doc.dataEmissao > dataFim) {
+    if (suportaDownload === 'sim' && doc.suportaDownload === false) {
+      return false;
+    }
+    if (suportaDownload === 'nao' && doc.suportaDownload !== false) {
+      return false;
+    }
+
+    if (dataInicio && (!doc.dataEmissao || doc.dataEmissao.slice(0, 10) < dataInicio)) {
+      return false;
+    }
+
+    if (dataFim && (!doc.dataEmissao || doc.dataEmissao.slice(0, 10) > dataFim)) {
+      return false;
+    }
+
+    const sincDate = String(doc.sincronizadoEm || '').slice(0, 10);
+    if (sincInicio && (!sincDate || sincDate < sincInicio)) {
+      return false;
+    }
+
+    if (sincFim && (!sincDate || sincDate > sincFim)) {
       return false;
     }
 
     if (analista) {
       const hasAnalista =
-        doc.analistasElaboradores.some(a => a.toLowerCase().includes(analista)) ||
-        (doc.responsavelTecnicoNome || '').toLowerCase().includes(analista);
+        doc.analistasElaboradores.some(a => normDocFilterStr(a).includes(analista)) ||
+        normDocFilterStr(doc.responsavelTecnicoNome).includes(analista);
       if (!hasAnalista) return false;
     }
 
+    if (titulo && !normDocFilterStr(doc.titulo).includes(titulo)) {
+      return false;
+    }
+
+    if (numero && !normDocFilterStr(doc.numero).includes(numero)) {
+      return false;
+    }
+
+    if (responsavelTecnico && !normDocFilterStr(doc.responsavelTecnicoNome).includes(responsavelTecnico)) {
+      return false;
+    }
+
+    if (empreendedor) {
+      const empText = normDocFilterStr(`${doc.empreendedorNome || ''} ${doc.empreendedorCpfCnpj || ''}`);
+      const qDigits = empreendedor.replace(/\D/g, '');
+      const docDigits = String(doc.empreendedorCpfCnpj || '').replace(/\D/g, '');
+      if (!empText.includes(empreendedor) && !(qDigits.length >= 2 && docDigits.includes(qDigits))) {
+        return false;
+      }
+    }
+
+    if (processo && !normDocFilterStr(doc.processo).includes(processo)) {
+      return false;
+    }
+
+    if (barragem && !normDocFilterStr(doc.barragemNome).includes(barragem)) {
+      return false;
+    }
+
+    if (carMt && !normDocFilterStr(doc.carMt).includes(carMt)) {
+      return false;
+    }
+
     if (busca) {
-      const searchable = [
-        doc.titulo,
-        doc.numero,
-        doc.empreendedorNome,
-        doc.empreendedorCpfCnpj,
-        doc.processo,
-        doc.carMt,
-        doc.barragemNome,
-        doc.tipoNome
-      ]
-        .filter(Boolean)
-        .join(' ')
-        .toLowerCase();
+      const searchable = normDocFilterStr(
+        [
+          doc.titulo,
+          doc.numero,
+          doc.empreendedorNome,
+          doc.empreendedorCpfCnpj,
+          doc.processo,
+          doc.carMt,
+          doc.barragemNome,
+          doc.tipoNome,
+          doc.responsavelTecnicoNome,
+          ...doc.analistasElaboradores
+        ]
+          .filter(Boolean)
+          .join(' ')
+      );
 
       if (!searchable.includes(busca)) {
         return false;

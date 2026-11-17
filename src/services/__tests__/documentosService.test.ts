@@ -179,6 +179,28 @@ async function runTests() {
   });
   assert.equal(sortedByTitleAsc[0].origemSistema, 'Notifica'); // "Notificação..." antes de "Parecer..."
 
+  const byAdvancedFieldsClassifica = filterAndSortDocumentos(enriched, {
+    titulo: 'revisado',
+    numero: '042/2026',
+    responsavelTecnico: 'marcos oliveira',
+    empreendedor: '12345678000190',
+    barragem: 'corrego fundo',
+    carMt: 'ABC123',
+    situacao: 'Vigente',
+    suportaDownload: 'sim',
+    sincInicio: '2026-03-16',
+    sincFim: '2026-03-16'
+  });
+  assert.equal(byAdvancedFieldsClassifica.length, 1);
+  assert.equal(byAdvancedFieldsClassifica[0].origemDocumentoId, 'CLS-2026-01');
+
+  const byProcessoNotifica = filterAndSortDocumentos(enriched, {
+    processo: '2026/00299',
+    empreendedor: 'santa clara'
+  });
+  assert.equal(byProcessoNotifica.length, 1);
+  assert.equal(byProcessoNotifica[0].origemDocumentoId, 'NOT-2026-09');
+
   // --------------------------------------------------------------------------
   // TESTE 3: Ausência de resultados
   // --------------------------------------------------------------------------

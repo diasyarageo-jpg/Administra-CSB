@@ -43,6 +43,36 @@ import {
   computeConciliacaoPendencias
 } from './components/ConciliacaoCadastrosView';
 import { parseCoordAdvanced } from './services/coordService';
+import {
+  BarragensAdvancedFilters,
+  EMPTY_BARRAGENS_FILTERS,
+  EMPTY_EMPREENDEDORES_FILTERS,
+  EMPTY_PORTARIAS_FILTERS,
+  EMPTY_PRODUTIVIDADE_FILTERS,
+  EMPTY_RTS_FILTERS,
+  EMPTY_USUARIOS_FILTERS,
+  EmpreendedoresAdvancedFilters,
+  PortariasAdvancedFilters,
+  ProdutividadeAdvancedFilters,
+  RtsAdvancedFilters,
+  UsuariosAdvancedFilters,
+  countActiveAdvancedFilters,
+  matchesBarragemAdvanced,
+  matchesEmpreendedorAdvanced,
+  matchesPortariaAdvanced,
+  matchesProdutividadeAdvanced,
+  matchesRtAdvanced,
+  matchesUsuarioAdvanced
+} from './utils/databaseAdvancedFilters';
+import {
+  AdvancedFilterToggleButton,
+  BarragensAdvancedPanel,
+  EmpreendedoresAdvancedPanel,
+  PortariasAdvancedPanel,
+  ProdutividadeAdvancedPanel,
+  RtsAdvancedPanel,
+  UsuariosAdvancedPanel
+} from './components/AdvancedFilterPanel';
 
 // ============================================================================
 // NOTIFICA CSB — AVISO DE TRANSIÇÃO E ARQUITETURA DE DADOS
@@ -367,6 +397,15 @@ export default function App() {
   const [isRejecting, setIsRejecting] = useState(false);
   const [usuarioSituacaoFilter, setUsuarioSituacaoFilter] = useState<string>('Todos');
 
+  // Estados de Pesquisa Avançada por banco de dados
+  const [advancedOpen, setAdvancedOpen] = useState<Record<string, boolean>>({});
+  const [empAdvFilters, setEmpAdvFilters] = useState<EmpreendedoresAdvancedFilters>(EMPTY_EMPREENDEDORES_FILTERS);
+  const [damAdvFilters, setDamAdvFilters] = useState<BarragensAdvancedFilters>(EMPTY_BARRAGENS_FILTERS);
+  const [rtAdvFilters, setRtAdvFilters] = useState<RtsAdvancedFilters>(EMPTY_RTS_FILTERS);
+  const [userAdvFilters, setUserAdvFilters] = useState<UsuariosAdvancedFilters>(EMPTY_USUARIOS_FILTERS);
+  const [prodAdvFilters, setProdAdvFilters] = useState<ProdutividadeAdvancedFilters>(EMPTY_PRODUTIVIDADE_FILTERS);
+  const [portariaAdvFilters, setPortariaAdvFilters] = useState<PortariasAdvancedFilters>(EMPTY_PORTARIAS_FILTERS);
+
   // Estados para integração com Geoportal SEMA-MT
   const [showGeoportalSyncModal, setShowGeoportalSyncModal] = useState<boolean>(false);
   const [empreendedorSemaModal, setEmpreendedorSemaModal] = useState<any | null>(null);
@@ -449,7 +488,17 @@ export default function App() {
 
   useEffect(() => {
     setListPage(1);
-  }, [activeView, searchTerms, usuarioSituacaoFilter]);
+  }, [
+    activeView,
+    searchTerms,
+    usuarioSituacaoFilter,
+    empAdvFilters,
+    damAdvFilters,
+    rtAdvFilters,
+    userAdvFilters,
+    prodAdvFilters,
+    portariaAdvFilters
+  ]);
 
   const fetchExternalIntegrationsStatus = async () => {
     setLoadingIntegrations(true);
@@ -1704,6 +1753,35 @@ export default function App() {
               if (activeView === 'usuarios' && usuarioSituacaoFilter !== 'Todos') {
                 if (rec.situacao !== usuarioSituacaoFilter) return false;
               }
+
+              if (activeView === 'empreendedores') {
+                const empVinc = getEmpreendedorVinculos(rec, db.barragens);
+                if (!matchesEmpreendedorAdvanced(rec, empAdvFilters, empVinc)) return false;
+              } else if (activeView === 'barragens') {
+                const resolvedEmp = resolveDamEntrepreneur(rec.empreendedor, db.empreendedores);
+                const linkedEmp = db.empreendedores.find(e => String(e.id) === String(rec.empreendedor));
+                const resolvedEmpr = resolveDamEmpreendimento(rec.empreendimento, linkedEmp?.empreendimentos || []);
+                if (
+                  !matchesBarragemAdvanced(rec, damAdvFilters, {
+                    resolvedEmpreendedorId: resolvedEmp.id,
+                    resolvedEmpreendedorName: resolvedEmp.displayName,
+                    resolvedEmpreendimentoName: resolvedEmpr.displayName
+                  })
+                ) {
+                  return false;
+                }
+              } else if (activeView === 'rts') {
+                if (
+                  !matchesRtAdvanced(rec, rtAdvFilters, (damIdOrName, fallbackName) =>
+                    resolveDamName(damIdOrName, db.barragens, fallbackName)
+                  )
+                ) {
+                  return false;
+                }
+              } else if (activeView === 'usuarios') {
+                if (!matchesUsuarioAdvanced(rec, userAdvFilters)) return false;
+              }
+
               if (!term) return true;
               if (activeView === 'barragens') {
                 const resolvedEmp = resolveDamEntrepreneur(rec.empreendedor, db.empreendedores);
@@ -1760,6 +1838,18 @@ export default function App() {
                 String(a.nome || '').localeCompare(String(b.nome || ''), 'pt-BR', { sensitivity: 'base' })
               );
             }
+
+            const activeAdvCount =
+              activeView === 'empreendedores'
+                ? countActiveAdvancedFilters(empAdvFilters, EMPTY_EMPREENDEDORES_FILTERS)
+                : activeView === 'barragens'
+                ? countActiveAdvancedFilters(damAdvFilters, EMPTY_BARRAGENS_FILTERS)
+                : activeView === 'rts'
+                ? countActiveAdvancedFilters(rtAdvFilters, EMPTY_RTS_FILTERS)
+                : activeView === 'usuarios'
+                ? countActiveAdvancedFilters(userAdvFilters, EMPTY_USUARIOS_FILTERS)
+                : 0;
+            const isAdvOpen = Boolean(advancedOpen[activeView]);
 
             const pendingUsersCount = activeView === 'usuarios'
               ? records.filter((u: any) => u.situacao === 'Pendente').length
@@ -1906,7 +1996,10 @@ export default function App() {
                                 borderColor: isSelected ? '#047857' : undefined,
                                 color: isSelected ? '#047857' : undefined
                               }}
-                              onClick={() => setUsuarioSituacaoFilter(st)}
+                              onClick={() => {
+                                setUsuarioSituacaoFilter(st);
+                                setUserAdvFilters(prev => ({ ...prev, situacao: st }));
+                              }}
                             >
                               {st === 'Todos' ? `Todos (${count})` : `${st}s (${count})`}
                             </button>
@@ -1914,6 +2007,14 @@ export default function App() {
                         })}
                       </div>
                     )}
+
+                    <AdvancedFilterToggleButton
+                      isOpen={isAdvOpen}
+                      activeCount={activeAdvCount}
+                      onToggle={() =>
+                        setAdvancedOpen(prev => ({ ...prev, [activeView]: !prev[activeView] }))
+                      }
+                    />
 
                     {(activeView === 'barragens' || activeView === 'documentos' || activeView === 'integracao') && (
                       <button
@@ -1930,6 +2031,56 @@ export default function App() {
 
                     <span className="badge gray" style={{ marginLeft: 'auto' }}>{filteredRecords.length} registros</span>
                   </div>
+
+                  {isAdvOpen && activeView === 'empreendedores' && (
+                    <EmpreendedoresAdvancedPanel
+                      filters={empAdvFilters}
+                      records={records}
+                      activeCount={activeAdvCount}
+                      onChange={setEmpAdvFilters}
+                      onClear={() => setEmpAdvFilters(EMPTY_EMPREENDEDORES_FILTERS)}
+                      onClose={() => setAdvancedOpen(prev => ({ ...prev, empreendedores: false }))}
+                    />
+                  )}
+
+                  {isAdvOpen && activeView === 'barragens' && (
+                    <BarragensAdvancedPanel
+                      filters={damAdvFilters}
+                      records={records}
+                      empreendedores={db.empreendedores}
+                      activeCount={activeAdvCount}
+                      onChange={setDamAdvFilters}
+                      onClear={() => setDamAdvFilters(EMPTY_BARRAGENS_FILTERS)}
+                      onClose={() => setAdvancedOpen(prev => ({ ...prev, barragens: false }))}
+                    />
+                  )}
+
+                  {isAdvOpen && activeView === 'rts' && (
+                    <RtsAdvancedPanel
+                      filters={rtAdvFilters}
+                      records={records}
+                      barragens={db.barragens}
+                      activeCount={activeAdvCount}
+                      onChange={setRtAdvFilters}
+                      onClear={() => setRtAdvFilters(EMPTY_RTS_FILTERS)}
+                      onClose={() => setAdvancedOpen(prev => ({ ...prev, rts: false }))}
+                    />
+                  )}
+
+                  {isAdvOpen && activeView === 'usuarios' && (
+                    <UsuariosAdvancedPanel
+                      filters={userAdvFilters}
+                      records={records}
+                      activeCount={activeAdvCount}
+                      onChange={setUserAdvFilters}
+                      onSyncSituacao={setUsuarioSituacaoFilter}
+                      onClear={() => {
+                        setUserAdvFilters(EMPTY_USUARIOS_FILTERS);
+                        setUsuarioSituacaoFilter('Todos');
+                      }}
+                      onClose={() => setAdvancedOpen(prev => ({ ...prev, usuarios: false }))}
+                    />
+                  )}
 
                   <div className="tablewrap">
                     <table>
@@ -1981,8 +2132,8 @@ export default function App() {
                                           whiteSpace: 'normal',
                                           minWidth: '150px',
                                           maxWidth: '240px',
-                                          overflowWrap: 'anywhere',
-                                          wordBreak: 'break-word',
+                                          wordBreak: 'normal',
+                                          overflowWrap: 'normal',
                                           lineHeight: 1.35
                                         }}
                                       >
@@ -2142,7 +2293,7 @@ export default function App() {
                                                 <span style={{ fontFamily: 'monospace', fontWeight: 600, color: '#0f766e', background: '#f0fdf4', padding: '0 4px', borderRadius: '3px', border: '1px solid #bbf7d0', flexShrink: 0 }}>
                                                   {v.art ? `ART: ${v.art}` : 'S/ ART'}
                                                 </span>
-                                                <span style={{ color: '#475569', overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
+                                                <span style={{ color: '#475569', whiteSpace: 'normal', wordBreak: 'normal', overflowWrap: 'normal' }}>
                                                   ➔ {damName}
                                                 </span>
                                               </div>
@@ -2344,7 +2495,11 @@ export default function App() {
             const checkedForOfficialSheet = records.filter(item => item.inOfficialSheet).length;
             const term = (searchTerms['produtividade'] || '').toLowerCase().trim();
 
+            const prodAdvActiveCount = countActiveAdvancedFilters(prodAdvFilters, EMPTY_PRODUTIVIDADE_FILTERS);
+            const isProdAdvOpen = Boolean(advancedOpen['produtividade']);
+
             const filtered = records.filter(rec => {
+              if (!matchesProdutividadeAdvanced(rec, prodAdvFilters, getProductivityPoints)) return false;
               if (!term) return true;
               const text = `${rec.serverName || ''} ${rec.productTitle || ''} ${rec.productCode || ''} ${rec.description || ''} ${rec.processRef || ''} ${rec.documentRef || ''}`.toLowerCase();
               return text.includes(term);
@@ -2393,7 +2548,7 @@ export default function App() {
                 <div className="panel" style={{ marginBottom: '14px' }}>
                   <div className="panel-head">
                     <h3>Minha produtividade</h3>
-                    <span className="badge gray">Filtro pelo nome do servidor</span>
+                    <span className="badge gray">{filtered.length} registro(s)</span>
                   </div>
                   <div className="toolbar">
                     <div className="field-search">
@@ -2405,8 +2560,26 @@ export default function App() {
                         onChange={e => setSearchTerms(prev => ({ ...prev, produtividade: e.target.value }))}
                       />
                     </div>
+                    <AdvancedFilterToggleButton
+                      isOpen={isProdAdvOpen}
+                      activeCount={prodAdvActiveCount}
+                      onToggle={() =>
+                        setAdvancedOpen(prev => ({ ...prev, produtividade: !prev.produtividade }))
+                      }
+                    />
                     <span className="micro muted">Sem autenticação ativa: a identificação é informada no lançamento e no filtro.</span>
                   </div>
+                  {isProdAdvOpen && (
+                    <ProdutividadeAdvancedPanel
+                      filters={prodAdvFilters}
+                      records={records}
+                      surhProducts={SURH_PRODUCTS}
+                      activeCount={prodAdvActiveCount}
+                      onChange={setProdAdvFilters}
+                      onClear={() => setProdAdvFilters(EMPTY_PRODUTIVIDADE_FILTERS)}
+                      onClose={() => setAdvancedOpen(prev => ({ ...prev, produtividade: false }))}
+                    />
+                  )}
                 </div>
 
                 <div className="panel">
@@ -2591,7 +2764,11 @@ export default function App() {
             const pending = records.length - completed;
             const term = (searchTerms['portarias'] || '').toLowerCase().trim();
 
+            const portariaAdvActiveCount = countActiveAdvancedFilters(portariaAdvFilters, EMPTY_PORTARIAS_FILTERS);
+            const isPortariaAdvOpen = Boolean(advancedOpen['portarias']);
+
             const filtered = records.filter(rec => {
+              if (!matchesPortariaAdvanced(rec, portariaAdvFilters)) return false;
               if (!term) return true;
               return `${rec.processNumber || ''} ${rec.orderNumber || ''} ${rec.notes || ''}`.toLowerCase().includes(term);
             });
@@ -2633,7 +2810,7 @@ export default function App() {
                 <div className="panel">
                   <div className="panel-head">
                     <h3>Trâmites de Portarias</h3>
-                    <span className="badge gray">{records.length} registros</span>
+                    <span className="badge gray">{filtered.length} registros</span>
                   </div>
                   <div className="toolbar">
                     <div className="field-search">
@@ -2645,7 +2822,23 @@ export default function App() {
                         onChange={e => setSearchTerms(prev => ({ ...prev, portarias: e.target.value }))}
                       />
                     </div>
+                    <AdvancedFilterToggleButton
+                      isOpen={isPortariaAdvOpen}
+                      activeCount={portariaAdvActiveCount}
+                      onToggle={() =>
+                        setAdvancedOpen(prev => ({ ...prev, portarias: !prev.portarias }))
+                      }
+                    />
                   </div>
+                  {isPortariaAdvOpen && (
+                    <PortariasAdvancedPanel
+                      filters={portariaAdvFilters}
+                      activeCount={portariaAdvActiveCount}
+                      onChange={setPortariaAdvFilters}
+                      onClear={() => setPortariaAdvFilters(EMPTY_PORTARIAS_FILTERS)}
+                      onClose={() => setAdvancedOpen(prev => ({ ...prev, portarias: false }))}
+                    />
+                  )}
                   <div className="tablewrap">
                     <table>
                       <thead>

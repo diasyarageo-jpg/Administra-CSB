@@ -7,6 +7,20 @@ import {
 import { PaginationBar, PageSizeOption, paginateList } from './PaginationBar';
 import { UserRole } from '../types/auth';
 import { parseCoordAdvanced } from '../services/coordService';
+import {
+  ConciliacaoAdvancedFilters,
+  EMPTY_CONCILIACAO_FILTERS,
+  collectDistinctValues,
+  countActiveAdvancedFilters,
+  matchesConciliacaoBarragemAdvanced,
+  matchesConciliacaoEmpreendedorAdvanced,
+  matchesConciliacaoRevisaoAdvanced
+} from '../utils/databaseAdvancedFilters';
+import {
+  AdvancedFilterDrawer,
+  AdvancedFilterField,
+  AdvancedFilterToggleButton
+} from './AdvancedFilterPanel';
 
 export interface IndexedItem<T> {
   record: T;
@@ -168,6 +182,8 @@ export const ConciliacaoCadastrosView: React.FC<ConciliacaoCadastrosViewProps> =
   const [activeTab, setActiveTab] = useState<ConciliacaoTab>('todos');
   const [searchTerm, setSearchTerm] = useState('');
   const [situacaoFiltro, setSituacaoFiltro] = useState<SituacaoFiltro>('todos');
+  const [showAdvancedFilters, setShowAdvancedFilters] = useState(false);
+  const [advFilters, setAdvFilters] = useState<ConciliacaoAdvancedFilters>(EMPTY_CONCILIACAO_FILTERS);
   const [empPage, setEmpPage] = useState<number>(1);
   const [empPageSize, setEmpPageSize] = useState<PageSizeOption>(20);
   const [damPage, setDamPage] = useState<number>(1);
@@ -181,7 +197,7 @@ export const ConciliacaoCadastrosView: React.FC<ConciliacaoCadastrosViewProps> =
   useEffect(() => {
     setEmpPage(1);
     setDamPage(1);
-  }, [searchTerm, situacaoFiltro, activeTab]);
+  }, [searchTerm, situacaoFiltro, activeTab, advFilters]);
 
   const matchesSituacao = (situacao?: string): boolean => {
     if (situacaoFiltro === 'todos') return true;
@@ -191,9 +207,40 @@ export const ConciliacaoCadastrosView: React.FC<ConciliacaoCadastrosViewProps> =
 
   const normalizedSearch = normalizeMatchText(searchTerm);
 
+  const advActiveCount = useMemo(
+    () => countActiveAdvancedFilters(advFilters, EMPTY_CONCILIACAO_FILTERS),
+    [advFilters]
+  );
+
+  const distinctUfs = useMemo(
+    () => collectDistinctValues([{ uf: 'MT' }, ...empreendedores, ...barragens], r => r.uf),
+    [empreendedores, barragens]
+  );
+
+  const distinctMunicipios = useMemo(
+    () => collectDistinctValues([...empreendedores, ...barragens], r => r.municipio),
+    [empreendedores, barragens]
+  );
+
+  const distinctSituacoes = useMemo(
+    () =>
+      collectDistinctValues(
+        [
+          { situacao: 'Ativo' },
+          { situacao: 'Inativo' },
+          { situacao: 'Aguardando confirmação' },
+          ...empreendedores,
+          ...barragens
+        ],
+        r => r.situacao
+      ),
+    [empreendedores, barragens]
+  );
+
   const filteredEmps = useMemo(() => {
     return empreendedoresSemBarragens.filter(({ record }) => {
       if (!matchesSituacao(record.situacao)) return false;
+      if (!matchesConciliacaoEmpreendedorAdvanced(record, advFilters)) return false;
       if (!normalizedSearch) return true;
       const carsText = Array.isArray(record.empreendimentos)
         ? record.empreendimentos.map(e => `${e.nome || ''} ${e.car || ''}`).join(' ')
@@ -203,19 +250,26 @@ export const ConciliacaoCadastrosView: React.FC<ConciliacaoCadastrosViewProps> =
       );
       return haystack.includes(normalizedSearch);
     });
-  }, [empreendedoresSemBarragens, normalizedSearch, situacaoFiltro]);
+  }, [empreendedoresSemBarragens, normalizedSearch, situacaoFiltro, advFilters]);
 
   const filteredDams = useMemo(() => {
     return barragensSemEmpreendedor.filter(item => {
       const { record, legacyText, suggestedEmpreendedorName } = item;
       if (!matchesSituacao(record.situacao)) return false;
+      if (!matchesConciliacaoBarragemAdvanced(item, advFilters)) return false;
       if (!normalizedSearch) return true;
       const haystack = normalizeMatchText(
         `${record.nome || ''} ${record.car || ''} ${record.municipio || ''} ${record.uf || ''} ${record.snisb || ''} ${record.processo || ''} ${record.cursoAgua || ''} ${legacyText || ''} ${suggestedEmpreendedorName || ''}`
       );
       return haystack.includes(normalizedSearch);
     });
-  }, [barragensSemEmpreendedor, normalizedSearch, situacaoFiltro]);
+  }, [barragensSemEmpreendedor, normalizedSearch, situacaoFiltro, advFilters]);
+
+  const filteredRevisoes = useMemo(() => {
+    return (Array.isArray(revisoes) ? revisoes : []).filter(rev =>
+      matchesConciliacaoRevisaoAdvanced(rev, searchTerm, advFilters)
+    );
+  }, [revisoes, searchTerm, advFilters]);
 
   const suggestedDamMatchesCount = useMemo(
     () => barragensSemEmpreendedor.filter(d => Boolean(d.suggestedEmpreendedorId)).length,
@@ -359,7 +413,232 @@ export const ConciliacaoCadastrosView: React.FC<ConciliacaoCadastrosViewProps> =
             <option value="ativos">Apenas ativos / pendentes</option>
             <option value="inativos">Apenas inativos</option>
           </select>
+
+          <AdvancedFilterToggleButton
+            isOpen={showAdvancedFilters}
+            activeCount={advActiveCount}
+            onToggle={() => setShowAdvancedFilters(prev => !prev)}
+          />
         </div>
+
+        {showAdvancedFilters && (
+          <AdvancedFilterDrawer
+            title="Pesquisa avançada · Conciliação de cadastros"
+            subtitle="Todos os atributos de empreendedores sem barragens, barragens sem empreendedor e revisões"
+            activeCount={advActiveCount}
+            onClear={() => setAdvFilters(EMPTY_CONCILIACAO_FILTERS)}
+            onClose={() => setShowAdvancedFilters(false)}
+          >
+            <AdvancedFilterField label="UF">
+              <select
+                className="select"
+                value={advFilters.uf}
+                onChange={e => setAdvFilters(prev => ({ ...prev, uf: e.target.value }))}
+              >
+                <option value="Todas">Todas as UFs</option>
+                {distinctUfs.map(u => (
+                  <option key={u} value={u}>{u}</option>
+                ))}
+              </select>
+            </AdvancedFilterField>
+
+            <AdvancedFilterField label="Município / IBGE">
+              <input
+                className="input"
+                list="adv-conc-municipios"
+                placeholder="Município ou código IBGE..."
+                value={advFilters.municipio}
+                onChange={e => setAdvFilters(prev => ({ ...prev, municipio: e.target.value }))}
+              />
+              <datalist id="adv-conc-municipios">
+                {distinctMunicipios.map(m => (
+                  <option key={m} value={m} />
+                ))}
+              </datalist>
+            </AdvancedFilterField>
+
+            <AdvancedFilterField label="CPF / CNPJ (Empreendedor)">
+              <input
+                className="input"
+                placeholder="CPF ou CNPJ..."
+                value={advFilters.cpfCnpj}
+                onChange={e => setAdvFilters(prev => ({ ...prev, cpfCnpj: e.target.value }))}
+              />
+            </AdvancedFilterField>
+
+            <AdvancedFilterField label="Tipo de pessoa">
+              <select
+                className="select"
+                value={advFilters.tipoPessoa}
+                onChange={e => setAdvFilters(prev => ({ ...prev, tipoPessoa: e.target.value }))}
+              >
+                <option value="Todos">Todos os tipos</option>
+                <option value="Pessoa física">Pessoa física</option>
+                <option value="Pessoa jurídica">Pessoa jurídica</option>
+              </select>
+            </AdvancedFilterField>
+
+            <AdvancedFilterField label="CAR / MT">
+              <input
+                className="input"
+                placeholder="Número do CAR/MT..."
+                value={advFilters.car}
+                onChange={e => setAdvFilters(prev => ({ ...prev, car: e.target.value }))}
+              />
+            </AdvancedFilterField>
+
+            <AdvancedFilterField label="Presença de CAR/MT">
+              <select
+                className="select"
+                value={advFilters.temCar}
+                onChange={e => setAdvFilters(prev => ({ ...prev, temCar: e.target.value }))}
+              >
+                <option value="Todos">Todos</option>
+                <option value="com_car">Com CAR cadastrado</option>
+                <option value="sem_car">Sem CAR cadastrado</option>
+              </select>
+            </AdvancedFilterField>
+
+            <AdvancedFilterField label="Empreendimentos (Empreendedor)">
+              <select
+                className="select"
+                value={advFilters.temEmpreendimentos}
+                onChange={e => setAdvFilters(prev => ({ ...prev, temEmpreendimentos: e.target.value }))}
+              >
+                <option value="Todos">Todos</option>
+                <option value="com">Com empreendimentos</option>
+                <option value="sem">Sem empreendimentos</option>
+              </select>
+            </AdvancedFilterField>
+
+            <AdvancedFilterField label="Processo (Barragem)">
+              <input
+                className="input"
+                placeholder="Número do processo..."
+                value={advFilters.processo}
+                onChange={e => setAdvFilters(prev => ({ ...prev, processo: e.target.value }))}
+              />
+            </AdvancedFilterField>
+
+            <AdvancedFilterField label="SNISB (Barragem)">
+              <input
+                className="input"
+                placeholder="Código SNISB..."
+                value={advFilters.snisb}
+                onChange={e => setAdvFilters(prev => ({ ...prev, snisb: e.target.value }))}
+              />
+            </AdvancedFilterField>
+
+            <AdvancedFilterField label="Curso d’água (Barragem)">
+              <input
+                className="input"
+                placeholder="Rio ou córrego..."
+                value={advFilters.cursoAgua}
+                onChange={e => setAdvFilters(prev => ({ ...prev, cursoAgua: e.target.value }))}
+              />
+            </AdvancedFilterField>
+
+            <AdvancedFilterField label="Coordenadas (Barragem)">
+              <select
+                className="select"
+                value={advFilters.temCoordenadas}
+                onChange={e => setAdvFilters(prev => ({ ...prev, temCoordenadas: e.target.value }))}
+              >
+                <option value="Todos">Todas</option>
+                <option value="com_coordenadas">Com coordenadas válidas</option>
+                <option value="sem_coordenadas">Sem coordenadas válidas</option>
+              </select>
+            </AdvancedFilterField>
+
+            <AdvancedFilterField label="Referência / vínculo da barragem">
+              <select
+                className="select"
+                value={advFilters.vinculoSugerido}
+                onChange={e => setAdvFilters(prev => ({ ...prev, vinculoSugerido: e.target.value }))}
+              >
+                <option value="Todos">Todos</option>
+                <option value="sugerido">Com correspondência sugerida</option>
+                <option value="ausente">ID vinculado ausente na base</option>
+                <option value="legado">Texto legado sem cadastro</option>
+                <option value="nao_informado">Empreendedor não informado</option>
+              </select>
+            </AdvancedFilterField>
+
+            <AdvancedFilterField label="Dano Potencial (DPA)">
+              <select
+                className="select"
+                value={advFilters.danoPotencial}
+                onChange={e => setAdvFilters(prev => ({ ...prev, danoPotencial: e.target.value }))}
+              >
+                <option value="Todos">Todos</option>
+                <option value="Alto">Alto</option>
+                <option value="Médio">Médio</option>
+                <option value="Baixo">Baixo</option>
+                <option value="Não classificada">Não classificada</option>
+                <option value="nao_informado">Não informado</option>
+              </select>
+            </AdvancedFilterField>
+
+            <AdvancedFilterField label="Categoria de Risco (CRI)">
+              <select
+                className="select"
+                value={advFilters.categoriaRisco}
+                onChange={e => setAdvFilters(prev => ({ ...prev, categoriaRisco: e.target.value }))}
+              >
+                <option value="Todos">Todos</option>
+                <option value="Alto">Alto</option>
+                <option value="Médio">Médio</option>
+                <option value="Baixo">Baixo</option>
+                <option value="Não classificada">Não classificada</option>
+                <option value="nao_informado">Não informado</option>
+              </select>
+            </AdvancedFilterField>
+
+            <AdvancedFilterField label="Contato ou referência textual">
+              <input
+                className="input"
+                placeholder="E-mail, telefone ou texto legado..."
+                value={advFilters.contato}
+                onChange={e => setAdvFilters(prev => ({ ...prev, contato: e.target.value }))}
+              />
+            </AdvancedFilterField>
+
+            <AdvancedFilterField label="Situação exata do registro">
+              <select
+                className="select"
+                value={advFilters.situacaoDetalhada}
+                onChange={e => setAdvFilters(prev => ({ ...prev, situacaoDetalhada: e.target.value }))}
+              >
+                <option value="Todas">Todas</option>
+                {distinctSituacoes.map(st => (
+                  <option key={st} value={st}>{st}</option>
+                ))}
+              </select>
+            </AdvancedFilterField>
+
+            <AdvancedFilterField label="Origem / entidade (Revisões)">
+              <input
+                className="input"
+                placeholder="Origem da revisão..."
+                value={advFilters.revisaoOrigem}
+                onChange={e => setAdvFilters(prev => ({ ...prev, revisaoOrigem: e.target.value }))}
+              />
+            </AdvancedFilterField>
+
+            <AdvancedFilterField label="Situação (Revisões)">
+              <select
+                className="select"
+                value={advFilters.revisaoSituacao}
+                onChange={e => setAdvFilters(prev => ({ ...prev, revisaoSituacao: e.target.value }))}
+              >
+                <option value="Todas">Todas</option>
+                <option value="Pendente">Pendente</option>
+                <option value="Conciliado">Conciliado</option>
+                <option value="Rejeitado">Rejeitado</option>
+              </select>
+            </AdvancedFilterField>
+          </AdvancedFilterDrawer>
+        )}
       </div>
 
       {(activeTab === 'todos' || activeTab === 'empreendedores') && (
@@ -611,7 +890,7 @@ export const ConciliacaoCadastrosView: React.FC<ConciliacaoCadastrosViewProps> =
                         <td style={{ whiteSpace: 'normal', maxWidth: '260px' }}>
                           {suggestedEmpreendedorId ? (
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-                              <span className="badge blue" style={{ width: 'fit-content', whiteSpace: 'normal', lineHeight: 1.3 }}>
+                              <span className="badge blue" style={{ width: 'fit-content', whiteSpace: 'normal', wordBreak: 'normal', overflowWrap: 'normal', lineHeight: 1.3 }}>
                                 Correspondência: {suggestedEmpreendedorName}
                               </span>
                               <span className="micro muted">Texto sem ID formal — abra para confirmar vínculo</span>
@@ -705,9 +984,9 @@ export const ConciliacaoCadastrosView: React.FC<ConciliacaoCadastrosViewProps> =
         <div className="panel">
           <div className="panel-head">
             <h3>Revisões pendentes e concluídas</h3>
-            <span className="badge gray">{revisoes.length} registros</span>
+            <span className="badge gray">{filteredRevisoes.length} registros</span>
           </div>
-          {revisoes.length > 0 ? (
+          {filteredRevisoes.length > 0 ? (
             <div className="tablewrap">
               <table>
                 <thead>
@@ -718,10 +997,10 @@ export const ConciliacaoCadastrosView: React.FC<ConciliacaoCadastrosViewProps> =
                   </tr>
                 </thead>
                 <tbody>
-                  {revisoes.map((rev: any, i: number) => (
+                  {filteredRevisoes.map((rev: any, i: number) => (
                     <tr key={rev.id || i} className={i % 2 === 0 ? 'row-even' : 'row-odd'}>
-                      <td className="td-main">{rev.entidade || rev.origem || 'Revisão'}</td>
-                      <td>{rev.descricao || rev.motivo || rev.detalhes || '—'}</td>
+                      <td className="td-main">{rev.entidade || rev.origem || rev.tipo || 'Revisão'}</td>
+                      <td>{rev.descricao || rev.motivo || rev.detalhes || rev.divergencias || '—'}</td>
                       <td>
                         <span className={`badge ${getSituacaoBadgeClass(rev.situacao)}`}>
                           {rev.situacao || 'Pendente'}
@@ -735,8 +1014,8 @@ export const ConciliacaoCadastrosView: React.FC<ConciliacaoCadastrosViewProps> =
           ) : (
             <div className="empty">
               <div className="empty-icon">⇄</div>
-              <b>Nenhuma revisão cadastrada</b>
-              <p>Quando houver registros de fontes distintas para comparação direta, as revisões aparecerão aqui.</p>
+              <b>Nenhuma revisão encontrada</b>
+              <p>Quando houver registros correspondentes aos filtros para comparação direta, as revisões aparecerão aqui.</p>
             </div>
           )}
         </div>

@@ -14,6 +14,11 @@ import {
   filterAndSortDocumentos
 } from '../services/documentosService';
 import { PaginationBar, PageSizeOption, paginateList } from './PaginationBar';
+import {
+  AdvancedFilterDrawer,
+  AdvancedFilterField,
+  AdvancedFilterToggleButton
+} from './AdvancedFilterPanel';
 
 interface DocumentosViewProps {
   commonData: AdministraCommonData;
@@ -74,6 +79,18 @@ export const DocumentosView: React.FC<DocumentosViewProps> = ({
   const [dataInicio, setDataInicio] = useState<string>('');
   const [dataFim, setDataFim] = useState<string>('');
   const [analistaFiltro, setAnalistaFiltro] = useState<string>('');
+  const [tituloFiltro, setTituloFiltro] = useState<string>('');
+  const [numeroFiltro, setNumeroFiltro] = useState<string>('');
+  const [rtFiltro, setRtFiltro] = useState<string>('');
+  const [empreendedorFiltro, setEmpreendedorFiltro] = useState<string>('');
+  const [processoFiltro, setProcessoFiltro] = useState<string>('');
+  const [barragemFiltro, setBarragemFiltro] = useState<string>('');
+  const [carMtFiltro, setCarMtFiltro] = useState<string>('');
+  const [situacaoFiltro, setSituacaoFiltro] = useState<string>('Todas');
+  const [suportaDownloadFiltro, setSuportaDownloadFiltro] = useState<'Todos' | 'sim' | 'nao'>('Todos');
+  const [sincInicio, setSincInicio] = useState<string>('');
+  const [sincFim, setSincFim] = useState<string>('');
+  const [showAdvancedFilters, setShowAdvancedFilters] = useState<boolean>(false);
   const [ordenarPor, setOrdenarPor] = useState<'data' | 'titulo' | 'origem' | 'empreendedor'>('data');
   const [direcao, setDirecao] = useState<'asc' | 'desc'>('desc');
 
@@ -114,6 +131,17 @@ export const DocumentosView: React.FC<DocumentosViewProps> = ({
       dataInicio,
       dataFim,
       analista: analistaFiltro,
+      titulo: tituloFiltro,
+      numero: numeroFiltro,
+      responsavelTecnico: rtFiltro,
+      empreendedor: empreendedorFiltro,
+      processo: processoFiltro,
+      barragem: barragemFiltro,
+      carMt: carMtFiltro,
+      situacao: situacaoFiltro,
+      suportaDownload: suportaDownloadFiltro,
+      sincInicio,
+      sincFim,
       ordenarPor,
       direcao
     });
@@ -125,35 +153,96 @@ export const DocumentosView: React.FC<DocumentosViewProps> = ({
     dataInicio,
     dataFim,
     analistaFiltro,
+    tituloFiltro,
+    numeroFiltro,
+    rtFiltro,
+    empreendedorFiltro,
+    processoFiltro,
+    barragemFiltro,
+    carMtFiltro,
+    situacaoFiltro,
+    suportaDownloadFiltro,
+    sincInicio,
+    sincFim,
     ordenarPor,
     direcao
   ]);
 
   useEffect(() => {
     setCurrentPage(1);
-  }, [busca, origemFiltro, tipoFiltro, dataInicio, dataFim, analistaFiltro, ordenarPor, direcao]);
+  }, [
+    busca,
+    origemFiltro,
+    tipoFiltro,
+    dataInicio,
+    dataFim,
+    analistaFiltro,
+    tituloFiltro,
+    numeroFiltro,
+    rtFiltro,
+    empreendedorFiltro,
+    processoFiltro,
+    barragemFiltro,
+    carMtFiltro,
+    situacaoFiltro,
+    suportaDownloadFiltro,
+    sincInicio,
+    sincFim,
+    ordenarPor,
+    direcao
+  ]);
 
   const { pagedItems: pagedDocs, safePage } = useMemo(
     () => paginateList(filteredDocs, currentPage, pageSize),
     [filteredDocs, currentPage, pageSize]
   );
 
+  const advancedActiveCount = [
+    tituloFiltro.trim(),
+    numeroFiltro.trim(),
+    analistaFiltro.trim(),
+    rtFiltro.trim(),
+    empreendedorFiltro.trim(),
+    processoFiltro.trim(),
+    barragemFiltro.trim(),
+    carMtFiltro.trim(),
+    situacaoFiltro !== 'Todas' ? situacaoFiltro : '',
+    suportaDownloadFiltro !== 'Todos' ? suportaDownloadFiltro : '',
+    dataInicio,
+    dataFim,
+    sincInicio,
+    sincFim
+  ].filter(Boolean).length;
+
   const hasActiveFilters = Boolean(
     busca.trim() ||
       origemFiltro !== 'Todas' ||
       tipoFiltro !== 'Todos' ||
-      dataInicio ||
-      dataFim ||
-      analistaFiltro.trim()
+      advancedActiveCount > 0
   );
+
+  const clearAdvancedFilters = () => {
+    setTituloFiltro('');
+    setNumeroFiltro('');
+    setAnalistaFiltro('');
+    setRtFiltro('');
+    setEmpreendedorFiltro('');
+    setProcessoFiltro('');
+    setBarragemFiltro('');
+    setCarMtFiltro('');
+    setSituacaoFiltro('Todas');
+    setSuportaDownloadFiltro('Todos');
+    setDataInicio('');
+    setDataFim('');
+    setSincInicio('');
+    setSincFim('');
+  };
 
   const clearFilters = () => {
     setBusca('');
     setOrigemFiltro('Todas');
     setTipoFiltro('Todos');
-    setDataInicio('');
-    setDataFim('');
-    setAnalistaFiltro('');
+    clearAdvancedFilters();
   };
 
   const handleOpenOriginal = async (doc: DocumentoCatalogoItem) => {
@@ -384,33 +473,6 @@ export const DocumentosView: React.FC<DocumentosViewProps> = ({
               ))}
           </select>
 
-          <input
-            type="text"
-            className="input filter"
-            placeholder="Analista / RT..."
-            value={analistaFiltro}
-            onChange={e => setAnalistaFiltro(e.target.value)}
-            aria-label="Filtrar por analista ou elaborador"
-          />
-
-          <input
-            type="date"
-            className="input filter"
-            value={dataInicio}
-            onChange={e => setDataInicio(e.target.value)}
-            title="Data inicial de emissão"
-            aria-label="Data inicial"
-          />
-
-          <input
-            type="date"
-            className="input filter"
-            value={dataFim}
-            onChange={e => setDataFim(e.target.value)}
-            title="Data final de emissão"
-            aria-label="Data final"
-          />
-
           <select
             className="select filter"
             value={`${ordenarPor}:${direcao}`}
@@ -432,6 +494,12 @@ export const DocumentosView: React.FC<DocumentosViewProps> = ({
             <option value="empreendedor:asc">Empreendedor (A–Z)</option>
           </select>
 
+          <AdvancedFilterToggleButton
+            isOpen={showAdvancedFilters}
+            activeCount={advancedActiveCount}
+            onToggle={() => setShowAdvancedFilters(prev => !prev)}
+          />
+
           {hasActiveFilters && (
             <button type="button" className="btn light small" onClick={clearFilters}>
               Limpar filtros
@@ -442,6 +510,154 @@ export const DocumentosView: React.FC<DocumentosViewProps> = ({
             {filteredDocs.length} documento(s)
           </span>
         </div>
+
+        {showAdvancedFilters && (
+          <AdvancedFilterDrawer
+            title="Pesquisa avançada · Catálogo de Documentos"
+            subtitle="Todos os metadados do catálogo federado: documento, responsáveis, vínculos e períodos"
+            activeCount={advancedActiveCount}
+            onClear={clearAdvancedFilters}
+            onClose={() => setShowAdvancedFilters(false)}
+          >
+            <AdvancedFilterField label="Título do documento">
+              <input
+                className="input"
+                placeholder="Título..."
+                value={tituloFiltro}
+                onChange={e => setTituloFiltro(e.target.value)}
+              />
+            </AdvancedFilterField>
+
+            <AdvancedFilterField label="Número do documento">
+              <input
+                className="input"
+                placeholder="Ex.: 042/2026..."
+                value={numeroFiltro}
+                onChange={e => setNumeroFiltro(e.target.value)}
+              />
+            </AdvancedFilterField>
+
+            <AdvancedFilterField label="Analista / Elaborador">
+              <input
+                className="input"
+                placeholder="Nome do analista..."
+                value={analistaFiltro}
+                onChange={e => setAnalistaFiltro(e.target.value)}
+              />
+            </AdvancedFilterField>
+
+            <AdvancedFilterField label="Responsável Técnico (RT)">
+              <input
+                className="input"
+                placeholder="Nome do RT..."
+                value={rtFiltro}
+                onChange={e => setRtFiltro(e.target.value)}
+              />
+            </AdvancedFilterField>
+
+            <AdvancedFilterField label="Empreendedor / CPF-CNPJ">
+              <input
+                className="input"
+                placeholder="Nome ou CPF/CNPJ..."
+                value={empreendedorFiltro}
+                onChange={e => setEmpreendedorFiltro(e.target.value)}
+              />
+            </AdvancedFilterField>
+
+            <AdvancedFilterField label="Processo relacionado">
+              <input
+                className="input"
+                placeholder="Número do processo..."
+                value={processoFiltro}
+                onChange={e => setProcessoFiltro(e.target.value)}
+              />
+            </AdvancedFilterField>
+
+            <AdvancedFilterField label="Barragem relacionada">
+              <input
+                className="input"
+                placeholder="Nome da barragem..."
+                value={barragemFiltro}
+                onChange={e => setBarragemFiltro(e.target.value)}
+              />
+            </AdvancedFilterField>
+
+            <AdvancedFilterField label="CAR / MT">
+              <input
+                className="input"
+                placeholder="Número do CAR/MT..."
+                value={carMtFiltro}
+                onChange={e => setCarMtFiltro(e.target.value)}
+              />
+            </AdvancedFilterField>
+
+            <AdvancedFilterField label="Situação do documento">
+              <select
+                className="select"
+                value={situacaoFiltro}
+                onChange={e => setSituacaoFiltro(e.target.value)}
+              >
+                <option value="Todas">Todas as situações</option>
+                <option value="Emitido">Emitido</option>
+                <option value="Vigente">Vigente</option>
+                <option value="Em análise">Em análise</option>
+                <option value="Cancelado">Cancelado</option>
+                <option value="Arquivado">Arquivado</option>
+                <option value="Indisponível na origem">Indisponível na origem</option>
+              </select>
+            </AdvancedFilterField>
+
+            <AdvancedFilterField label="Download disponível">
+              <select
+                className="select"
+                value={suportaDownloadFiltro}
+                onChange={e => setSuportaDownloadFiltro(e.target.value as 'Todos' | 'sim' | 'nao')}
+              >
+                <option value="Todos">Todos</option>
+                <option value="sim">Com download</option>
+                <option value="nao">Somente visualização</option>
+              </select>
+            </AdvancedFilterField>
+
+            <AdvancedFilterField label="Data de emissão (de / até)">
+              <div className="adv-filter-range">
+                <input
+                  type="date"
+                  className="input"
+                  value={dataInicio}
+                  onChange={e => setDataInicio(e.target.value)}
+                  aria-label="Data inicial de emissão"
+                />
+                <input
+                  type="date"
+                  className="input"
+                  value={dataFim}
+                  onChange={e => setDataFim(e.target.value)}
+                  aria-label="Data final de emissão"
+                />
+              </div>
+            </AdvancedFilterField>
+
+            <AdvancedFilterField label="Sincronização (de / até)">
+              <div className="adv-filter-range">
+                <input
+                  type="date"
+                  className="input"
+                  value={sincInicio}
+                  onChange={e => setSincInicio(e.target.value)}
+                  aria-label="Data inicial de sincronização"
+                />
+                <input
+                  type="date"
+                  className="input"
+                  value={sincFim}
+                  onChange={e => setSincFim(e.target.value)}
+                  aria-label="Data final de sincronização"
+                />
+              </div>
+            </AdvancedFilterField>
+          </AdvancedFilterDrawer>
+        )}
 
         {/* Estado de Carregamento */}
         {loading ? (

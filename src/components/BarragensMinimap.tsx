@@ -5,6 +5,18 @@ import { resolveDamEntrepreneur } from '../App';
 import { MT_BORDER_COORDINATES, MT_OUTER_MASK_GEOJSON, MT_STATE_GEOJSON } from '../data/mtGeoFallback';
 import { DocumentoCatalogoItem } from '../types/documentos';
 import { carregarCatalogoDocumentos } from '../services/documentosService';
+import {
+  AdvancedFilterDrawer,
+  AdvancedFilterField,
+  AdvancedFilterToggleButton
+} from './AdvancedFilterPanel';
+import {
+  collectDistinctValues,
+  countActiveAdvancedFilters,
+  matchesNumericRange,
+  matchesTextField,
+  normFilterText
+} from '../utils/databaseAdvancedFilters';
 
 export interface BarragensMinimapProps {
   barragens: any[];
@@ -431,6 +443,24 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
   const [filterEmpreendedor, setFilterEmpreendedor] = useState<string>('TODOS');
   const [filterAnalista, setFilterAnalista] = useState<string>('TODOS');
 
+  const EMPTY_MINIMAP_ADV = {
+    car: '',
+    processo: '',
+    snisb: '',
+    cursoAgua: '',
+    danoPotencial: 'Todos',
+    categoriaRisco: 'Todos',
+    situacao: 'Todas',
+    alturaMin: '',
+    alturaMax: '',
+    volumeMin: '',
+    volumeMax: '',
+    tipoDocumento: 'Todos',
+    observacoes: ''
+  };
+  const [showAdvFilters, setShowAdvFilters] = useState<boolean>(false);
+  const [advFilters, setAdvFilters] = useState(EMPTY_MINIMAP_ADV);
+
   // Carrega catálogo central de documentos se não fornecido via prop
   useEffect(() => {
     if (propDocumentos && propDocumentos.length > 0) {
@@ -543,7 +573,21 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
     return { mappedDams: mapped, unmappedCount: unmapped };
   }, [barragens, empreendedores, catalogoDocs]);
 
-  // Aplica filtros de pesquisa: por analista, por município, por empreendedor, por nome e sistemas ativos
+  const advActiveCount = useMemo(
+    () => countActiveAdvancedFilters(advFilters, EMPTY_MINIMAP_ADV),
+    [advFilters]
+  );
+
+  const minimapSituacoes = useMemo(
+    () =>
+      collectDistinctValues(
+        [{ situacao: 'Ativa' }, { situacao: 'Inativa' }, { situacao: 'Aguardando confirmação' }, ...barragens],
+        r => r.situacao
+      ),
+    [barragens]
+  );
+
+  // Aplica filtros de pesquisa: por analista, por município, por empreendedor, por nome, avançados e sistemas ativos
   const filteredMappedDams = useMemo(() => {
     return mappedDams.filter(dam => {
       // 1. Filtro por Nome da Barragem
@@ -578,6 +622,61 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
         if (!hasAnalista) return false;
       }
 
+      // 4b. Filtros da Pesquisa Avançada
+      const raw = dam.raw || {};
+      if (!matchesTextField(raw.car || dam.car, advFilters.car)) return false;
+      if (!matchesTextField(raw.processo || dam.processo, advFilters.processo)) return false;
+      if (!matchesTextField(raw.snisb || raw.codeSnisb, advFilters.snisb)) return false;
+      if (!matchesTextField(raw.cursoAgua || raw.river, advFilters.cursoAgua)) return false;
+      if (!matchesTextField(raw.observacoes || raw.notes, advFilters.observacoes)) return false;
+
+      const dpaVal = String(raw.danoPotencial ?? raw.dpa ?? '').trim();
+      if (advFilters.danoPotencial !== 'Todos') {
+        if (advFilters.danoPotencial === 'nao_informado') {
+          if (dpaVal && normFilterText(dpaVal) !== 'nao classificada') return false;
+        } else if (normFilterText(dpaVal) !== normFilterText(advFilters.danoPotencial)) {
+          return false;
+        }
+      }
+
+      const criVal = String(raw.categoriaRisco ?? raw.cri ?? '').trim();
+      if (advFilters.categoriaRisco !== 'Todos') {
+        if (advFilters.categoriaRisco === 'nao_informado') {
+          if (criVal && normFilterText(criVal) !== 'nao classificada') return false;
+        } else if (normFilterText(criVal) !== normFilterText(advFilters.categoriaRisco)) {
+          return false;
+        }
+      }
+
+      if (
+        advFilters.situacao !== 'Todas' &&
+        normFilterText(dam.situacao) !== normFilterText(advFilters.situacao)
+      ) {
+        return false;
+      }
+
+      if (!matchesNumericRange(raw.altura ?? raw.height, advFilters.alturaMin, advFilters.alturaMax)) {
+        return false;
+      }
+      if (
+        !matchesNumericRange(
+          raw.volume ?? raw.reservoirVolume,
+          advFilters.volumeMin,
+          advFilters.volumeMax
+        )
+      ) {
+        return false;
+      }
+
+      if (advFilters.tipoDocumento !== 'Todos') {
+        const hasDocType = dam.documentos.some(
+          d =>
+            normFilterText(d.tipo).includes(normFilterText(advFilters.tipoDocumento)) ||
+            normFilterText(d.tipoCodigo) === normFilterText(advFilters.tipoDocumento)
+        );
+        if (!hasDocType) return false;
+      }
+
       // 5. Filtro por Sistemas Ativos (SISB-MT, Classifica, Notifica, Fiscaliza)
       // Se todos desativados, oculta tudo; caso contrário, verifica se a estrutura tem correspondência
       const activeOrigens: string[] = [];
@@ -595,7 +694,7 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
       );
       return hasDocFromActiveSystem;
     });
-  }, [mappedDams, searchNome, filterMunicipio, filterEmpreendedor, filterAnalista, activeSystems]);
+  }, [mappedDams, searchNome, filterMunicipio, filterEmpreendedor, filterAnalista, activeSystems, advFilters]);
 
   // Sincroniza seleção externa via selectedDamId
   useEffect(() => {
@@ -1018,6 +1117,7 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
     setFilterMunicipio('TODOS');
     setFilterEmpreendedor('TODOS');
     setFilterAnalista('TODOS');
+    setAdvFilters(EMPTY_MINIMAP_ADV);
     setActiveSystems(SISTEMAS_DEFAULT);
     handleLimparCoordenadas();
   };
@@ -1040,6 +1140,7 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
     filterMunicipio !== 'TODOS' ||
     filterEmpreendedor !== 'TODOS' ||
     filterAnalista !== 'TODOS' ||
+    advActiveCount > 0 ||
     !activeSystems.sisb ||
     !activeSystems.classifica ||
     !activeSystems.notifica ||
@@ -1061,18 +1162,7 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
       {/* ==================================================================== */}
       {/* BARRA SUPERIOR: PESQUISA POR COORDENADAS GMS E SELEÇÃO DE SISTEMAS   */}
       {/* ==================================================================== */}
-      <div
-        style={{
-          padding: '12px 18px',
-          borderBottom: '1px solid var(--line)',
-          background: '#fbfcfd',
-          display: 'flex',
-          flexWrap: 'wrap',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: '12px'
-        }}
-      >
+      <div className="minimap-top-bar">
         {/* Bloco de Coordenadas GMS conforme layout fornecido */}
         <div style={{ display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: '6px' }}>
@@ -1088,22 +1178,10 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
             </span>
             <input
               type="text"
+              className="minimap-coord-input"
               value={inputLat}
               onChange={e => setInputLat(formatGMSAutoMask(e.target.value, false))}
               placeholder="Ex: 15° 35' 55&quot; S"
-              style={{
-                height: '34px',
-                width: '145px',
-                background: '#ffffff',
-                border: '1px solid #cbd5e1',
-                borderRadius: '10px',
-                padding: '0 10px',
-                fontSize: '11px',
-                fontWeight: 600,
-                color: '#0f172a',
-                outline: 'none',
-                boxShadow: 'inset 0 1px 2px rgba(0,0,0,0.03)'
-              }}
             />
           </div>
 
@@ -1120,22 +1198,10 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
             </span>
             <input
               type="text"
+              className="minimap-coord-input"
               value={inputLong}
               onChange={e => setInputLong(formatGMSAutoMask(e.target.value, true))}
               placeholder="Ex: 56° 05' 47&quot; W"
-              style={{
-                height: '34px',
-                width: '145px',
-                background: '#ffffff',
-                border: '1px solid #cbd5e1',
-                borderRadius: '10px',
-                padding: '0 10px',
-                fontSize: '11px',
-                fontWeight: 600,
-                color: '#0f172a',
-                outline: 'none',
-                boxShadow: 'inset 0 1px 2px rgba(0,0,0,0.03)'
-              }}
             />
           </div>
 
@@ -1391,15 +1457,9 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
       {/* BARRA INFERIOR DE FILTROS: ANALISTA, MUNICÍPIO, EMPREENDEDOR E NOME   */}
       {/* ==================================================================== */}
       <div
+        className="minimap-filter-bar"
         style={{
-          padding: '10px 18px',
-          borderBottom: isExpanded ? '1px solid var(--line)' : 'none',
-          background: '#ffffff',
-          display: 'flex',
-          flexWrap: 'wrap',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          gap: '10px'
+          borderBottom: isExpanded ? '1px solid var(--line)' : 'none'
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap', flex: 1 }}>
@@ -1562,6 +1622,12 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
             </select>
           </div>
 
+          <AdvancedFilterToggleButton
+            isOpen={showAdvFilters}
+            activeCount={advActiveCount}
+            onToggle={() => setShowAdvFilters(prev => !prev)}
+          />
+
           {hasActiveFilters && (
             <button
               type="button"
@@ -1605,6 +1671,161 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
         </div>
       </div>
 
+      {showAdvFilters && (
+        <AdvancedFilterDrawer
+          title="Pesquisa avançada · Mapa Geográfico"
+          subtitle="Refine os pontos exibidos no mapa por todos os atributos técnicos e documentais das barragens"
+          activeCount={advActiveCount}
+          onClear={() => setAdvFilters(EMPTY_MINIMAP_ADV)}
+          onClose={() => setShowAdvFilters(false)}
+        >
+          <AdvancedFilterField label="CAR / MT">
+            <input
+              className="input"
+              placeholder="Número do CAR/MT..."
+              value={advFilters.car}
+              onChange={e => setAdvFilters(prev => ({ ...prev, car: e.target.value }))}
+            />
+          </AdvancedFilterField>
+
+          <AdvancedFilterField label="Número do processo">
+            <input
+              className="input"
+              placeholder="Nº do processo..."
+              value={advFilters.processo}
+              onChange={e => setAdvFilters(prev => ({ ...prev, processo: e.target.value }))}
+            />
+          </AdvancedFilterField>
+
+          <AdvancedFilterField label="Identificador SNISB">
+            <input
+              className="input"
+              placeholder="Código SNISB..."
+              value={advFilters.snisb}
+              onChange={e => setAdvFilters(prev => ({ ...prev, snisb: e.target.value }))}
+            />
+          </AdvancedFilterField>
+
+          <AdvancedFilterField label="Curso d’água">
+            <input
+              className="input"
+              placeholder="Rio ou córrego..."
+              value={advFilters.cursoAgua}
+              onChange={e => setAdvFilters(prev => ({ ...prev, cursoAgua: e.target.value }))}
+            />
+          </AdvancedFilterField>
+
+          <AdvancedFilterField label="Dano Potencial (DPA)">
+            <select
+              className="select"
+              value={advFilters.danoPotencial}
+              onChange={e => setAdvFilters(prev => ({ ...prev, danoPotencial: e.target.value }))}
+            >
+              <option value="Todos">Todos</option>
+              <option value="Alto">Alto</option>
+              <option value="Médio">Médio</option>
+              <option value="Baixo">Baixo</option>
+              <option value="Não classificada">Não classificada</option>
+              <option value="nao_informado">Não informado</option>
+            </select>
+          </AdvancedFilterField>
+
+          <AdvancedFilterField label="Categoria de Risco (CRI)">
+            <select
+              className="select"
+              value={advFilters.categoriaRisco}
+              onChange={e => setAdvFilters(prev => ({ ...prev, categoriaRisco: e.target.value }))}
+            >
+              <option value="Todos">Todos</option>
+              <option value="Alto">Alto</option>
+              <option value="Médio">Médio</option>
+              <option value="Baixo">Baixo</option>
+              <option value="Não classificada">Não classificada</option>
+              <option value="nao_informado">Não informado</option>
+            </select>
+          </AdvancedFilterField>
+
+          <AdvancedFilterField label="Situação cadastral">
+            <select
+              className="select"
+              value={advFilters.situacao}
+              onChange={e => setAdvFilters(prev => ({ ...prev, situacao: e.target.value }))}
+            >
+              <option value="Todas">Todas</option>
+              {minimapSituacoes.map(st => (
+                <option key={st} value={st}>{st}</option>
+              ))}
+            </select>
+          </AdvancedFilterField>
+
+          <AdvancedFilterField label="Altura em metros (mín / máx)">
+            <div className="adv-filter-range">
+              <input
+                type="number"
+                step="any"
+                className="input"
+                placeholder="Mín (m)"
+                value={advFilters.alturaMin}
+                onChange={e => setAdvFilters(prev => ({ ...prev, alturaMin: e.target.value }))}
+              />
+              <input
+                type="number"
+                step="any"
+                className="input"
+                placeholder="Máx (m)"
+                value={advFilters.alturaMax}
+                onChange={e => setAdvFilters(prev => ({ ...prev, alturaMax: e.target.value }))}
+              />
+            </div>
+          </AdvancedFilterField>
+
+          <AdvancedFilterField label="Volume (mín / máx)">
+            <div className="adv-filter-range">
+              <input
+                type="number"
+                step="any"
+                className="input"
+                placeholder="Mín"
+                value={advFilters.volumeMin}
+                onChange={e => setAdvFilters(prev => ({ ...prev, volumeMin: e.target.value }))}
+              />
+              <input
+                type="number"
+                step="any"
+                className="input"
+                placeholder="Máx"
+                value={advFilters.volumeMax}
+                onChange={e => setAdvFilters(prev => ({ ...prev, volumeMax: e.target.value }))}
+              />
+            </div>
+          </AdvancedFilterField>
+
+          <AdvancedFilterField label="Tipo de documento vinculado">
+            <select
+              className="select"
+              value={advFilters.tipoDocumento}
+              onChange={e => setAdvFilters(prev => ({ ...prev, tipoDocumento: e.target.value }))}
+            >
+              <option value="Todos">Todos os documentos</option>
+              <option value="Parecer">Parecer de Classificação</option>
+              <option value="Notificação">Notificação</option>
+              <option value="Ofício">Ofício</option>
+              <option value="Vistoria">Relatório / Termo de Vistoria</option>
+              <option value="Relatório Técnico">Relatório Técnico</option>
+            </select>
+          </AdvancedFilterField>
+
+          <AdvancedFilterField label="Observações">
+            <input
+              className="input"
+              placeholder="Trecho nas observações..."
+              value={advFilters.observacoes}
+              onChange={e => setAdvFilters(prev => ({ ...prev, observacoes: e.target.value }))}
+            />
+          </AdvancedFilterField>
+        </AdvancedFilterDrawer>
+      )}
+
       {/* ==================================================================== */}
       {/* CONTEÚDO DO MAPA E PAINEL DE RESUMO                                  */}
       {/* ==================================================================== */}
@@ -1612,13 +1833,7 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
         <div>
           <div
             ref={mapContainerRef}
-            style={{
-              width: '100%',
-              height: '380px',
-              position: 'relative',
-              zIndex: 1,
-              background: '#0a101d'
-            }}
+            className="minimap-map-canvas"
           />
 
           {/* Legenda e Resumo do Ponto Selecionado */}
@@ -1732,7 +1947,7 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
                     <div
                       style={{
                         display: 'grid',
-                        gridTemplateColumns: 'repeat(auto-fill, minmax(260px, 1fr))',
+                        gridTemplateColumns: 'repeat(auto-fill, minmax(min(100%, 240px), 1fr))',
                         gap: '10px'
                       }}
                     >
