@@ -1972,6 +1972,24 @@ export default function App() {
                                     const linkedEmp = db.empreendedores.find(e => String(e.id) === String(record.empreendedor));
                                     value = resolveDamEmpreendimento(record.empreendimento, linkedEmp?.empreendimentos || []).displayName;
                                   }
+                                  if (activeView === 'barragens' && field === 'nome') {
+                                    return (
+                                      <td
+                                        key={field}
+                                        className="td-main"
+                                        style={{
+                                          whiteSpace: 'normal',
+                                          minWidth: '150px',
+                                          maxWidth: '240px',
+                                          overflowWrap: 'anywhere',
+                                          wordBreak: 'break-word',
+                                          lineHeight: 1.35
+                                        }}
+                                      >
+                                        {valueLabel(record.nome)}
+                                      </td>
+                                    );
+                                  }
                                   if (activeView === 'barragens' && field === 'municipio') {
                                     const municipioText = record.municipio
                                       ? `${record.municipio}${record.municipioIbge ? ` (${record.municipioIbge})` : ''}`
@@ -1984,24 +2002,42 @@ export default function App() {
                                     };
                                     const latGms = formatCoordGms(record.latitude, false);
                                     const lngGms = formatCoordGms(record.longitude, true);
-                                    const coordsGms =
-                                      latGms && lngGms
-                                        ? `${latGms} · ${lngGms}`
-                                        : latGms || lngGms || 'Coordenadas não informadas';
 
                                     return (
-                                      <td key={field}>
+                                      <td key={field} style={{ whiteSpace: 'normal', minWidth: '155px' }}>
                                         <div>{municipioText}</div>
-                                        <span
-                                          className="td-sub"
-                                          style={{
-                                            fontFamily: 'monospace',
-                                            fontSize: '11px',
-                                            color: latGms || lngGms ? '#475569' : '#94a3b8'
-                                          }}
-                                        >
-                                          {coordsGms}
-                                        </span>
+                                        {latGms || lngGms ? (
+                                          <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', marginTop: '3px' }}>
+                                            <span
+                                              className="td-sub"
+                                              style={{
+                                                fontFamily: 'monospace',
+                                                fontSize: '10.5px',
+                                                color: '#475569',
+                                                marginTop: 0,
+                                                whiteSpace: 'normal'
+                                              }}
+                                            >
+                                              Lat: {latGms || '—'}
+                                            </span>
+                                            <span
+                                              className="td-sub"
+                                              style={{
+                                                fontFamily: 'monospace',
+                                                fontSize: '10.5px',
+                                                color: '#475569',
+                                                marginTop: 0,
+                                                whiteSpace: 'normal'
+                                              }}
+                                            >
+                                              Lon: {lngGms || '—'}
+                                            </span>
+                                          </div>
+                                        ) : (
+                                          <span className="td-sub" style={{ fontSize: '10.5px', color: '#94a3b8' }}>
+                                            Coordenadas não informadas
+                                          </span>
+                                        )}
                                       </td>
                                     );
                                   }
@@ -2102,11 +2138,11 @@ export default function App() {
                                           {vinculos.slice(0, 2).map((v, vi) => {
                                             const damName = resolveDamName(v.barragemId, db.barragens, v.barragemNome);
                                             return (
-                                              <div key={v.id || vi} style={{ display: 'flex', alignItems: 'center', gap: '5px', overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                                              <div key={v.id || vi} style={{ display: 'flex', flexWrap: 'wrap', alignItems: 'center', gap: '5px' }}>
                                                 <span style={{ fontFamily: 'monospace', fontWeight: 600, color: '#0f766e', background: '#f0fdf4', padding: '0 4px', borderRadius: '3px', border: '1px solid #bbf7d0', flexShrink: 0 }}>
                                                   {v.art ? `ART: ${v.art}` : 'S/ ART'}
                                                 </span>
-                                                <span style={{ color: '#475569', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                                                <span style={{ color: '#475569', overflowWrap: 'anywhere', wordBreak: 'break-word' }}>
                                                   ➔ {damName}
                                                 </span>
                                               </div>

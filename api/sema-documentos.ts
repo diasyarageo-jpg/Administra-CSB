@@ -16,6 +16,15 @@ import {
   recordSemaServerAudit,
   validateTargetEntityAccess
 } from '../src/server/semaAudit';
+import {
+  SemaAttrFilterClause,
+  SemaCoordPoint,
+  describeSemaLayerXml,
+  escapeCqlLiteral,
+  executeSemaGetFeature,
+  getSemaCapabilities,
+  queryGeoportalCacheFallback
+} from '../src/server/semaGeoserver';
 
 interface VercelLikeRequest extends IncomingMessage {
   query?: Record<string, string | string[]>;
@@ -49,25 +58,6 @@ interface CamadaStatus {
   mensagem: string;
 }
 
-interface CoordPoint {
-  lat: number;
-  lng: number;
-  label?: string;
-}
-
-const WFS_URL = 'https://geo.sema.mt.gov.br/geoserver/wfs';
-const WMS_OWS_URL = 'https://geo.sema.mt.gov.br/geoserver/ows';
-const GEOSERVER_AUTHKEY =
-  (process.env.SEMA_GEOSERVER_AUTHKEY || process.env.GEOSERVER_AUTHKEY || '').trim() ||
-  '541085de-9a2e-454e-bdba-eb3d57a2f492';
-
-const SEMA_REQUEST_HEADERS: Record<string, string> = {
-  'User-Agent': 'Administra-CSB/1.0 (SEMA-MT; +https://geo.sema.mt.gov.br)',
-  Accept: 'application/json, application/xml, text/xml, */*'
-};
-
-const CACHE_TTL_MS = 10 * 60 * 1000;
-
 const TARGET_LAYERS = [
   { name: 'Geoportal:CAR_ATP', grupo: 'carImoveis' },
   { name: 'Geoportal:MVW_REQUERIMENTO_ATP', grupo: 'carImoveis' },
@@ -82,34 +72,6 @@ const TARGET_LAYERS = [
   { name: 'Geoportal:TDAD_FISCALIZACAO_AUTO_DE_INFRACAO', grupo: 'autosInfracao' },
   { name: 'Geoportal:TDAD_FISCALIZACAO_TERMO_DE_EMBARGO', grupo: 'termosEmbargo' }
 ] as const;
-
-interface CapabilitiesCache {
-  fetchedAt: number;
-  wfsLayers: Map<string, { name: string; title: string }>;
-  wmsLayers: Map<string, { name: string; title: string }>;
-}
-
-interface SchemaCacheEntry {
-  fetchedAt: number;
-  fields: Map<string, string>;
-  geomFields: Set<string>;
-}
-
-let capabilitiesCache: CapabilitiesCache | null = null;
-const schemaCache = new Map<string, SchemaCacheEntry>();
-
-async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, {
-      signal: controller.signal,
-      headers: SEMA_REQUEST_HEADERS
-    });
-  } finally {
-    clearTimeout(timer);
-  }
-}
 
 async function mapWithConcurrency<T, R>(
   items: readonly T[],
@@ -128,25 +90,6 @@ async function mapWithConcurrency<T, R>(
   return results;
 }
 
-function isTimeoutError(err: any): boolean {
-  return Boolean(
-    err?.name === 'AbortError' ||
-      String(err?.message || '').toLowerCase().includes('abort') ||
-      String(err?.message || '').toLowerCase().includes('timeout') ||
-      err?.code === 'ETIMEDOUT'
-  );
-}
-
-function decodeXmlEntities(text: string): string {
-  return text
-    .replace(/&amp;/g, '&')
-    .replace(/&lt;/g, '<')
-    .replace(/&gt;/g, '>')
-    .replace(/&quot;/g, '"')
-    .replace(/&#39;/g, "'")
-    .trim();
-}
-
 function cleanTextValue(val: any): string | undefined {
   if (val === undefined || val === null) return undefined;
   const s = String(val).trim();
@@ -163,10 +106,6 @@ function sanitizeSearchInput(val: string, maxLen: number): string {
     .replace(/\s+/g, ' ')
     .trim()
     .slice(0, maxLen);
-}
-
-function escapeCqlLiteral(val: string): string {
-  return val.replace(/'/g, "''");
 }
 
 function normalizeForCompare(val: string): string {
@@ -231,195 +170,13 @@ async function readJsonBody(req: VercelLikeRequest): Promise<Record<string, any>
   });
 }
 
-async function getCapabilities(): Promise<{
-  ok: boolean;
-  wfsLayers: Map<string, { name: string; title: string }>;
-  wmsLayers: Map<string, { name: string; title: string }>;
-  isTimeout?: boolean;
-  errorMsg?: string;
-}> {
-  if (capabilitiesCache && Date.now() - capabilitiesCache.fetchedAt < CACHE_TTL_MS) {
-    return {
-      ok: true,
-      wfsLayers: capabilitiesCache.wfsLayers,
-      wmsLayers: capabilitiesCache.wmsLayers
-    };
-  }
-
-  const wfsParams = new URLSearchParams({
-    service: 'WFS',
-    version: '2.0.0',
-    request: 'GetCapabilities',
-    authkey: GEOSERVER_AUTHKEY
-  });
-
-  const wmsParams = new URLSearchParams({
-    service: 'wms',
-    version: '1.3.0',
-    request: 'GetCapabilities',
-    authkey: GEOSERVER_AUTHKEY
-  });
-
-  try {
-    const [wfsRes, wmsRes] = await Promise.all([
-      fetchWithTimeout(`${WFS_URL}?${wfsParams.toString()}`, 12000),
-      fetchWithTimeout(`${WMS_OWS_URL}?${wmsParams.toString()}`, 12000).catch(() => null)
-    ]);
-
-    if (!wfsRes.ok) {
-      return {
-        ok: false,
-        wfsLayers: new Map(),
-        wmsLayers: new Map(),
-        errorMsg: `Serviço público da SEMA-MT retornou HTTP ${wfsRes.status}.`
-      };
-    }
-
-    const wfsXml = await wfsRes.text();
-    const wfsLayers = new Map<string, { name: string; title: string }>();
-
-    const ftMatches = wfsXml.matchAll(/<FeatureType(?:\s[^>]*)?>([\s\S]*?)<\/FeatureType>/gi);
-    for (const match of ftMatches) {
-      const block = match[1] || '';
-      const nameMatch = block.match(/<(?:[\w-]+:)?Name>([^<]+)<\/(?:[\w-]+:)?Name>/i);
-      if (!nameMatch) continue;
-      const name = decodeXmlEntities(nameMatch[1]);
-      const titleMatch = block.match(/<(?:[\w-]+:)?Title>([^<]*)<\/(?:[\w-]+:)?Title>/i);
-      const title = titleMatch ? decodeXmlEntities(titleMatch[1]) : name;
-      wfsLayers.set(name, { name, title });
-    }
-
-    const wmsLayers = new Map<string, { name: string; title: string }>();
-    if (wmsRes && wmsRes.ok) {
-      const wmsXml = await wmsRes.text();
-      const layerMatches = wmsXml.matchAll(/<Layer(?:\s[^>]*)?>\s*<Name>([^<]+)<\/Name>\s*(?:<Title>([^<]*)<\/Title>)?/gi);
-      for (const m of layerMatches) {
-        const name = decodeXmlEntities(m[1]);
-        const title = m[2] ? decodeXmlEntities(m[2]) : name;
-        wmsLayers.set(name, { name, title });
-      }
-    }
-
-    capabilitiesCache = {
-      fetchedAt: Date.now(),
-      wfsLayers,
-      wmsLayers
-    };
-
-    return { ok: true, wfsLayers, wmsLayers };
-  } catch (err: any) {
-    return {
-      ok: false,
-      wfsLayers: new Map(),
-      wmsLayers: new Map(),
-      isTimeout: isTimeoutError(err),
-      errorMsg: isTimeoutError(err)
-        ? 'Tempo limite esgotado ao conectar com a base pública da SEMA-MT.'
-        : 'Falha de comunicação ao conectar com a base pública da SEMA-MT.'
-    };
-  }
-}
-
-async function describeLayerFieldsXml(layerName: string): Promise<{
-  ok: boolean;
-  fields: Map<string, string>;
-  geomFields: Set<string>;
-  errorMsg?: string;
-}> {
-  const cached = schemaCache.get(layerName);
-  if (cached && Date.now() - cached.fetchedAt < CACHE_TTL_MS) {
-    return { ok: true, fields: cached.fields, geomFields: cached.geomFields };
-  }
-
-  const params = new URLSearchParams({
-    service: 'WFS',
-    version: '2.0.0',
-    request: 'DescribeFeatureType',
-    typeNames: layerName,
-    authkey: GEOSERVER_AUTHKEY
-  });
-
-  try {
-    const res = await fetchWithTimeout(`${WFS_URL}?${params.toString()}`, 10000);
-    if (!res.ok) {
-      return {
-        ok: false,
-        fields: new Map(),
-        geomFields: new Set(),
-        errorMsg: `Estrutura da base retornou HTTP ${res.status}.`
-      };
-    }
-
-    const xml = await res.text();
-    if (/ExceptionReport/i.test(xml)) {
-      return {
-        ok: false,
-        fields: new Map(),
-        geomFields: new Set(),
-        errorMsg: 'Base pública da SEMA-MT temporariamente indisponível para leitura de campos.'
-      };
-    }
-
-    const fields = new Map<string, string>();
-    const geomFields = new Set<string>();
-    const localName = layerName.includes(':') ? layerName.split(':')[1] : layerName;
-    const elementTags = xml.matchAll(/<(?:xsd:)?element\b([^>]+)\/?>/gi);
-
-    for (const tagMatch of elementTags) {
-      const attrs = tagMatch[1] || '';
-      const nameAttr = attrs.match(/\bname\s*=\s*"([^"]+)"/i);
-      const typeAttr = attrs.match(/\btype\s*=\s*"([^"]+)"/i);
-      if (!nameAttr || !typeAttr) continue;
-
-      const fieldName = nameAttr[1].trim();
-      const fieldType = typeAttr[1].trim();
-
-      if (fieldName === localName && /Type$/i.test(fieldType)) {
-        continue;
-      }
-      fields.set(fieldName, fieldType);
-
-      const lowerType = fieldType.toLowerCase();
-      if (
-        lowerType.startsWith('gml:') ||
-        lowerType.includes('geometry') ||
-        lowerType.includes('surface') ||
-        lowerType.includes('polygon') ||
-        lowerType.includes('point') ||
-        lowerType.includes('curve') ||
-        lowerType.includes('linestring')
-      ) {
-        geomFields.add(fieldName);
-      }
-    }
-
-    if (fields.size === 0) {
-      return {
-        ok: false,
-        fields,
-        geomFields,
-        errorMsg: 'Base consultada sem atributos disponíveis no momento.'
-      };
-    }
-
-    schemaCache.set(layerName, { fetchedAt: Date.now(), fields, geomFields });
-    return { ok: true, fields, geomFields };
-  } catch (err: any) {
-    return {
-      ok: false,
-      fields: new Map(),
-      geomFields: new Set(),
-      errorMsg: isTimeoutError(err)
-        ? 'Tempo limite esgotado ao verificar campos da base SEMA-MT.'
-        : 'Falha de comunicação ao verificar campos da base SEMA-MT.'
-    };
-  }
-}
-
 interface FilterBuildResult {
   supported: boolean;
   attrCqlFilter: string;
+  attrClauses: SemaAttrFilterClause[];
   spatialCqlFilter: string;
+  spatialGeomField?: string;
+  spatialPoints: SemaCoordPoint[];
   fieldsUsed: string[];
   confirmedDocFields: string[];
   ownerTextFields: string[];
@@ -437,12 +194,13 @@ function buildSchemaFilterForLayer(
     cleanDoc: string;
     carTokens: string[];
     procList: string[];
-    coordenadas: CoordPoint[];
+    coordenadas: SemaCoordPoint[];
     cleanNome: string;
     buscaExploratoria: boolean;
   }
 ): FilterBuildResult {
   const orAttrClauses: string[] = [];
+  const attrClauses: SemaAttrFilterClause[] = [];
   const fieldsUsed: string[] = [];
   const seenFields = new Set<string>();
   const addFieldUsed = (f: string) => {
@@ -458,9 +216,6 @@ function buildSchemaFilterForLayer(
   const procFields = resolveConfirmedFields(fields, SEMA_FIELD_CANDIDATES.filtroProcesso);
   const nameFields = resolveConfirmedFields(fields, SEMA_FIELD_CANDIDATES.filtroNome);
 
-  // 1. CPF / CNPJ:
-  //    a) Campo dedicado de documento -> igualdade exata (com ou sem máscara)
-  //    b) Campo nominal de proprietários (ex.: CAR_ATP.NOMESPROPRIETARIOS = "XXX544001XX - NOME; 24148375000161 - EMPRESA")
   if (criteria.cleanDoc) {
     if (confirmedDocFields.length > 0) {
       const formatted = formatCpfCnpjMask(criteria.cleanDoc);
@@ -469,8 +224,11 @@ function buildSchemaFilterForLayer(
       for (const field of confirmedDocFields) {
         if (escFmt !== escClean) {
           orAttrClauses.push(`(${field} = '${escClean}' OR ${field} = '${escFmt}')`);
+          attrClauses.push({ type: 'eq', field, value: criteria.cleanDoc });
+          attrClauses.push({ type: 'eq', field, value: formatted });
         } else {
           orAttrClauses.push(`${field} = '${escClean}'`);
+          attrClauses.push({ type: 'eq', field, value: criteria.cleanDoc });
         }
         addFieldUsed(field);
       }
@@ -478,20 +236,26 @@ function buildSchemaFilterForLayer(
 
     if (ownerTextFields.length > 0) {
       const escClean = escapeCqlLiteral(criteria.cleanDoc);
-      const escFmt = escapeCqlLiteral(formatCpfCnpjMask(criteria.cleanDoc));
+      const formatted = formatCpfCnpjMask(criteria.cleanDoc);
+      const escFmt = escapeCqlLiteral(formatted);
       for (const field of ownerTextFields) {
         if (criteria.cleanDoc.length === 14) {
           orAttrClauses.push(`${field} ILIKE '%${escClean}%'`);
+          attrClauses.push({ type: 'ilike', field, value: criteria.cleanDoc });
           if (escFmt !== escClean) {
             orAttrClauses.push(`${field} ILIKE '%${escFmt}%'`);
+            attrClauses.push({ type: 'ilike', field, value: formatted });
           }
           addFieldUsed(field);
         } else if (criteria.cleanDoc.length === 11) {
           const mid6 = criteria.cleanDoc.slice(3, 9);
           orAttrClauses.push(`${field} ILIKE '%XXX${mid6}XX%'`);
           orAttrClauses.push(`${field} ILIKE '%${escClean}%'`);
+          attrClauses.push({ type: 'ilike', field, value: `XXX${mid6}XX` });
+          attrClauses.push({ type: 'ilike', field, value: criteria.cleanDoc });
           if (escFmt !== escClean) {
             orAttrClauses.push(`${field} ILIKE '%${escFmt}%'`);
+            attrClauses.push({ type: 'ilike', field, value: formatted });
           }
           addFieldUsed(field);
         }
@@ -499,45 +263,48 @@ function buildSchemaFilterForLayer(
     }
   }
 
-  // 2. Número(s) do CAR / MT / Protocolo vinculados
   if (criteria.carTokens.length > 0 && carFields.length > 0) {
     for (const tok of criteria.carTokens) {
       const escTok = escapeCqlLiteral(tok);
       for (const f of carFields) {
         orAttrClauses.push(`${f} ILIKE '%${escTok}%'`);
+        attrClauses.push({ type: 'ilike', field: f, value: tok });
         addFieldUsed(f);
       }
     }
   }
 
-  // 3. Número(s) de Processo / Protocolo
   if (criteria.procList.length > 0 && procFields.length > 0) {
     for (const proc of criteria.procList) {
       const escProc = escapeCqlLiteral(proc);
       for (const f of procFields) {
         orAttrClauses.push(`${f} ILIKE '%${escProc}%'`);
+        attrClauses.push({ type: 'ilike', field: f, value: proc });
         addFieldUsed(f);
       }
     }
   }
 
-  // 4. Busca textual exploratória por Nome
   if (criteria.buscaExploratoria && criteria.cleanNome && nameFields.length > 0) {
     const escNome = escapeCqlLiteral(criteria.cleanNome);
     for (const f of nameFields) {
       orAttrClauses.push(`${f} ILIKE '%${escNome}%'`);
+      attrClauses.push({ type: 'ilike', field: f, value: criteria.cleanNome });
       addFieldUsed(f);
     }
   }
 
-  // 5. Cruzamento geográfico por coordenadas das barragens vinculadas (para imóveis CAR)
   let spatialCqlFilter = '';
+  let spatialGeomField: string | undefined;
+  let spatialPoints: SemaCoordPoint[] = [];
   const primaryGeomField = Array.from(geomFields)[0];
   if (grupo === 'carImoveis' && primaryGeomField && criteria.coordenadas.length > 0) {
     const spatialParts = criteria.coordenadas.map(
       c => `INTERSECTS(${primaryGeomField},POINT(${c.lng} ${c.lat}))`
     );
     spatialCqlFilter = spatialParts.join(' OR ');
+    spatialGeomField = primaryGeomField;
+    spatialPoints = criteria.coordenadas;
     addFieldUsed(primaryGeomField);
   }
 
@@ -547,7 +314,9 @@ function buildSchemaFilterForLayer(
     return {
       supported: false,
       attrCqlFilter: '',
+      attrClauses: [],
       spatialCqlFilter: '',
+      spatialPoints: [],
       fieldsUsed: [],
       confirmedDocFields,
       ownerTextFields,
@@ -561,7 +330,10 @@ function buildSchemaFilterForLayer(
   return {
     supported: true,
     attrCqlFilter,
+    attrClauses,
     spatialCqlFilter,
+    spatialGeomField,
+    spatialPoints,
     fieldsUsed,
     confirmedDocFields,
     ownerTextFields,
@@ -615,7 +387,6 @@ function evaluateFeatureMatch(
     return { matches: true, confirmatory: true };
   }
 
-  // 1. Correspondência exata em campo de documento
   if (criteria.cleanDoc && filterBuild.confirmedDocFields.length > 0) {
     for (const field of filterBuild.confirmedDocFields) {
       const raw = rawProps[field];
@@ -627,7 +398,6 @@ function evaluateFeatureMatch(
     }
   }
 
-  // 2. Correspondência em campo composto de proprietários (ex.: NOMESPROPRIETARIOS)
   if (criteria.cleanDoc && filterBuild.ownerTextFields.length > 0) {
     for (const field of filterBuild.ownerTextFields) {
       const raw = rawProps[field];
@@ -655,7 +425,6 @@ function evaluateFeatureMatch(
     }
   }
 
-  // 3. Correspondência por CAR/MT ou SICAR
   if (criteria.carTokens.length > 0 && filterBuild.carFields.length > 0) {
     for (const field of filterBuild.carFields) {
       const raw = rawProps[field];
@@ -670,7 +439,6 @@ function evaluateFeatureMatch(
     }
   }
 
-  // 4. Correspondência por Processo
   if (criteria.procList.length > 0 && filterBuild.procFields.length > 0) {
     for (const field of filterBuild.procFields) {
       const raw = rawProps[field];
@@ -684,7 +452,6 @@ function evaluateFeatureMatch(
     }
   }
 
-  // 5. Busca exploratória por nome
   if (criteria.buscaExploratoria && criteria.cleanNome && filterBuild.nameFields.length > 0) {
     const normQuery = normalizeForCompare(criteria.cleanNome);
     for (const field of filterBuild.nameFields) {
@@ -963,86 +730,6 @@ function mapFeatureToDocumentItem(
   };
 }
 
-async function executeGetFeatureRequest(
-  layerName: string,
-  cqlFilter: string,
-  propertyNames: string[],
-  includeSrs4326: boolean
-): Promise<{
-  ok: boolean;
-  features: any[];
-  isTimeout?: boolean;
-  isFilterIncompatible?: boolean;
-  httpStatus?: number;
-}> {
-  const params = new URLSearchParams({
-    service: 'WFS',
-    version: '2.0.0',
-    request: 'GetFeature',
-    typeNames: layerName,
-    outputFormat: 'application/json',
-    count: '25',
-    cql_filter: cqlFilter,
-    authkey: GEOSERVER_AUTHKEY
-  });
-
-  if (includeSrs4326) {
-    params.set('srsName', 'EPSG:4326');
-  }
-  if (propertyNames.length > 0) {
-    params.set('propertyName', propertyNames.join(','));
-  }
-
-  const requestUrl = `${WFS_URL}?${params.toString()}`;
-  let lastHttpStatus: number | undefined;
-  let lastTimeout = false;
-
-  for (let attempt = 0; attempt < 2; attempt++) {
-    try {
-      lastTimeout = false;
-      const resp = await fetchWithTimeout(requestUrl, 14000);
-      lastHttpStatus = resp.status;
-
-      if ((resp.status === 429 || resp.status >= 500) && attempt === 0) {
-        await new Promise(resolve => setTimeout(resolve, 350));
-        continue;
-      }
-
-      const text = await resp.text();
-
-      if (!resp.ok || /ExceptionReport/i.test(text)) {
-        const isFilterIncompatible =
-          resp.status === 400 || /cql|filter|property|column|syntax|parse/i.test(text);
-        return {
-          ok: false,
-          features: [],
-          isFilterIncompatible,
-          httpStatus: resp.status
-        };
-      }
-
-      const data = JSON.parse(text);
-      const features = Array.isArray(data?.features) ? data.features : [];
-      return { ok: true, features };
-    } catch (err: any) {
-      if (isTimeoutError(err)) {
-        lastTimeout = true;
-      }
-      if (attempt === 0) {
-        await new Promise(resolve => setTimeout(resolve, 250));
-        continue;
-      }
-    }
-  }
-
-  return {
-    ok: false,
-    features: [],
-    isTimeout: lastTimeout,
-    httpStatus: lastHttpStatus
-  };
-}
-
 export default async function handler(
   req: VercelLikeRequest,
   res: VercelLikeResponse
@@ -1192,7 +879,7 @@ export default async function handler(
   }
   const procList = Array.from(procSet).slice(0, 8);
 
-  const coordList: CoordPoint[] = [];
+  const coordList: SemaCoordPoint[] = [];
   const coordSeen = new Set<string>();
   for (const c of rawCoords) {
     if (!c || typeof c !== 'object') continue;
@@ -1237,16 +924,9 @@ export default async function handler(
     return;
   }
 
-  const capResult = await getCapabilities();
-  if (!capResult.ok) {
-    res.status(capResult.isTimeout ? 504 : 502)!.json!({
-      error: capResult.errorMsg || 'Falha ao consultar a base pública da SEMA-MT.',
-      consultadoEm: new Date().toISOString()
-    });
-    return;
-  }
-
   const consultadoEm = new Date().toISOString();
+  const capResult = await getSemaCapabilities();
+  const hasConfirmedCatalog = capResult.ok && capResult.wfsLayers.size > 0;
 
   const resultado = {
     carImoveis: [] as any[],
@@ -1257,187 +937,300 @@ export default async function handler(
     outros: [] as any[]
   };
 
-  const layerResults = await mapWithConcurrency(
-    TARGET_LAYERS,
-    4,
-    async target => {
-      const capWfs = capResult.wfsLayers.get(target.name);
-      const capWms = capResult.wmsLayers.get(target.name);
-      const layerTitle = capWfs?.title || capWms?.title || target.name;
+  let camadasConsultadas: CamadaStatus[] = [];
+  let geoserverDirectFailed = false;
+  let anyTimeout = Boolean(capResult.isTimeout);
 
-      if (!capWfs) {
+  if (hasConfirmedCatalog || !capResult.isTimeout) {
+    const layerResults = await mapWithConcurrency(
+      TARGET_LAYERS,
+      4,
+      async target => {
+        const capWfs = capResult.wfsLayers.get(target.name);
+        const capWms = capResult.wmsLayers.get(target.name);
+        const layerTitle = capWfs?.title || capWms?.title || target.name;
+
+        if (hasConfirmedCatalog && !capWfs) {
+          return {
+            status: {
+              camada: target.name,
+              titulo: layerTitle,
+              grupo: target.grupo,
+              status: 'indisponivel' as CamadaStatusCode,
+              suportado: false,
+              registrosEncontrados: 0,
+              mensagem: 'Base não disponível no momento.'
+            },
+            items: [] as any[]
+          };
+        }
+
+        const schemaRes = await describeSemaLayerXml(target.name);
+        if (!schemaRes.ok) {
+          return {
+            status: {
+              camada: target.name,
+              titulo: layerTitle,
+              grupo: target.grupo,
+              status: (schemaRes.isTimeout || schemaRes.httpStatus === 403
+                ? 'erro_comunicacao'
+                : 'indisponivel') as CamadaStatusCode,
+              suportado: false,
+              registrosEncontrados: 0,
+              mensagem: schemaRes.errorMsg || 'Não foi possível consultar esta base no momento.'
+            },
+            items: [] as any[],
+            isTimeout: Boolean(schemaRes.isTimeout)
+          };
+        }
+
+        const filterBuild = buildSchemaFilterForLayer(schemaRes.fields, schemaRes.geomFields, target.grupo, {
+          cleanDoc,
+          carTokens,
+          procList,
+          coordenadas: coordList,
+          cleanNome,
+          buscaExploratoria
+        });
+
+        if (!filterBuild.supported) {
+          return {
+            status: {
+              camada: target.name,
+              titulo: layerTitle,
+              grupo: target.grupo,
+              status: 'nao_suportado' as CamadaStatusCode,
+              suportado: false,
+              registrosEncontrados: 0,
+              mensagem: filterBuild.unsupportedReason || 'Critério não aplicável a esta base.'
+            },
+            items: [] as any[]
+          };
+        }
+
+        const propertyNames = Array.from(schemaRes.fields.keys()).filter(
+          fieldName => !schemaRes.geomFields.has(fieldName)
+        );
+
+        const queryTasks: Array<
+          Promise<{ isSpatial: boolean; res: Awaited<ReturnType<typeof executeSemaGetFeature>> }>
+        > = [];
+
+        if (filterBuild.attrCqlFilter) {
+          queryTasks.push(
+            executeSemaGetFeature({
+              layerName: target.name,
+              cqlFilter: filterBuild.attrCqlFilter,
+              propertyNames,
+              includeSrs4326: false,
+              maxFeatures: 25,
+              attrClauses: filterBuild.attrClauses
+            }).then(res => ({
+              isSpatial: false,
+              res
+            }))
+          );
+        }
+
+        if (filterBuild.spatialCqlFilter) {
+          queryTasks.push(
+            executeSemaGetFeature({
+              layerName: target.name,
+              cqlFilter: filterBuild.spatialCqlFilter,
+              propertyNames,
+              includeSrs4326: true,
+              maxFeatures: 25,
+              spatialGeomField: filterBuild.spatialGeomField,
+              spatialPoints: filterBuild.spatialPoints
+            }).then(res => ({
+              isSpatial: true,
+              res
+            }))
+          );
+        }
+
+        const responses = await Promise.all(queryTasks);
+        const anyOk = responses.some(r => r.res.ok);
+
+        if (!anyOk) {
+          const firstErr = responses[0]?.res;
+          const isFilterIncompatible = Boolean(firstErr?.isFilterIncompatible);
+          const isTimeout = Boolean(firstErr?.isTimeout);
+          const httpSuffix = firstErr?.httpStatus ? ` (HTTP ${firstErr.httpStatus})` : '';
+          return {
+            status: {
+              camada: target.name,
+              titulo: layerTitle,
+              grupo: target.grupo,
+              status: (isFilterIncompatible ? 'filtro_incompativel' : 'erro_comunicacao') as CamadaStatusCode,
+              suportado: !isFilterIncompatible,
+              registrosEncontrados: 0,
+              camposPesquisados: filterBuild.fieldsUsed,
+              mensagem: isFilterIncompatible
+                ? 'Critério de busca não compatível com esta base.'
+                : isTimeout
+                ? 'Tempo limite esgotado ao consultar esta base.'
+                : `Falha de comunicação ao consultar esta base${httpSuffix}.`
+            },
+            items: [] as any[],
+            isTimeout
+          };
+        }
+
+        const seenIds = new Set<string>();
+        const items: any[] = [];
+
+        for (const { isSpatial, res: qRes } of responses) {
+          if (!qRes.ok) continue;
+          for (const f of qRes.features) {
+            const rawProps = f?.properties && typeof f.properties === 'object' ? f.properties : {};
+            const matchEval = evaluateFeatureMatch(rawProps, isSpatial, filterBuild, {
+              cleanDoc,
+              carTokens,
+              procList,
+              cleanNome,
+              buscaExploratoria
+            });
+
+            if (!matchEval.matches) continue;
+
+            const item = mapFeatureToDocumentItem(
+              f,
+              target.name,
+              layerTitle,
+              target.grupo,
+              schemaRes.fields,
+              schemaRes.geomFields,
+              filterBuild.confirmedDocFields,
+              !matchEval.confirmatory,
+              consultadoEm
+            );
+
+            if (item.id) {
+              if (seenIds.has(item.id)) continue;
+              seenIds.add(item.id);
+            }
+            items.push(item);
+          }
+        }
+
         return {
           status: {
             camada: target.name,
             titulo: layerTitle,
             grupo: target.grupo,
-            status: 'indisponivel' as CamadaStatusCode,
-            suportado: false,
-            registrosEncontrados: 0,
-            mensagem: 'Base não disponível no momento.'
+            status: (items.length > 0 ? 'consultada' : 'sem_resultados') as CamadaStatusCode,
+            suportado: true,
+            registrosEncontrados: items.length,
+            camposPesquisados: filterBuild.fieldsUsed,
+            camposConfirmados: propertyNames,
+            mensagem:
+              items.length > 0
+                ? `${items.length} registro(s) encontrado(s).`
+                : 'Nenhum registro encontrado para os critérios informados.'
           },
-          items: [] as any[]
+          items
         };
       }
+    );
 
-      const schemaRes = await describeLayerFieldsXml(target.name);
-      if (!schemaRes.ok) {
-        return {
-          status: {
-            camada: target.name,
-            titulo: layerTitle,
-            grupo: target.grupo,
-            status: 'indisponivel' as CamadaStatusCode,
-            suportado: false,
-            registrosEncontrados: 0,
-            mensagem: schemaRes.errorMsg || 'Não foi possível consultar esta base no momento.'
-          },
-          items: [] as any[]
-        };
-      }
+    for (const r of layerResults) {
+      camadasConsultadas.push(r.status);
+      if (r.isTimeout) anyTimeout = true;
+      if (r.status.grupo === 'carImoveis') resultado.carImoveis.push(...r.items);
+      else if (r.status.grupo === 'licencas') resultado.licencas.push(...r.items);
+      else if (r.status.grupo === 'notificacoes') resultado.notificacoes.push(...r.items);
+      else if (r.status.grupo === 'autosInfracao') resultado.autosInfracao.push(...r.items);
+      else if (r.status.grupo === 'termosEmbargo') resultado.termosEmbargo.push(...r.items);
+      else resultado.outros.push(...r.items);
+    }
+  } else {
+    geoserverDirectFailed = true;
+    camadasConsultadas = TARGET_LAYERS.map(target => ({
+      camada: target.name,
+      titulo: target.name,
+      grupo: target.grupo,
+      status: 'erro_comunicacao' as CamadaStatusCode,
+      suportado: false,
+      registrosEncontrados: 0,
+      mensagem: capResult.errorMsg || 'Serviço público da SEMA-MT temporariamente inacessível.'
+    }));
+  }
 
-      const filterBuild = buildSchemaFilterForLayer(schemaRes.fields, schemaRes.geomFields, target.grupo, {
+  const consultadasDirectCount = camadasConsultadas.filter(
+    c => c.status === 'consultada' || c.status === 'sem_resultados'
+  ).length;
+
+  let origemDados: 'geoserver_wfs' | 'cache_local' = 'geoserver_wfs';
+
+  if (consultadasDirectCount === 0) {
+    geoserverDirectFailed = true;
+    const cacheFallback = await queryGeoportalCacheFallback(
+      authCtx.supabaseAdmin,
+      {
         cleanDoc,
         carTokens,
         procList,
-        coordenadas: coordList,
         cleanNome,
         buscaExploratoria
-      });
+      },
+      consultadoEm
+    );
 
-      if (!filterBuild.supported) {
-        return {
-          status: {
-            camada: target.name,
-            titulo: layerTitle,
-            grupo: target.grupo,
-            status: 'nao_suportado' as CamadaStatusCode,
-            suportado: false,
-            registrosEncontrados: 0,
-            mensagem: filterBuild.unsupportedReason || 'Critério não aplicável a esta base.'
-          },
-          items: [] as any[]
-        };
-      }
+    if (cacheFallback.used && cacheFallback.totalCount > 0) {
+      origemDados = 'cache_local';
+      resultado.carImoveis.push(...cacheFallback.itemsByGroup.carImoveis);
+      resultado.licencas.push(...cacheFallback.itemsByGroup.licencas);
+      resultado.notificacoes.push(...cacheFallback.itemsByGroup.notificacoes);
+      resultado.autosInfracao.push(...cacheFallback.itemsByGroup.autosInfracao);
+      resultado.termosEmbargo.push(...cacheFallback.itemsByGroup.termosEmbargo);
+      resultado.outros.push(...cacheFallback.itemsByGroup.outros);
 
-      const propertyNames = Array.from(schemaRes.fields.keys()).filter(
-        fieldName => !schemaRes.geomFields.has(fieldName)
-      );
-
-      const queryTasks: Array<Promise<{ isSpatial: boolean; res: Awaited<ReturnType<typeof executeGetFeatureRequest>> }>> = [];
-
-      if (filterBuild.attrCqlFilter) {
-        queryTasks.push(
-          executeGetFeatureRequest(target.name, filterBuild.attrCqlFilter, propertyNames, false).then(res => ({
-            isSpatial: false,
-            res
-          }))
-        );
-      }
-
-      if (filterBuild.spatialCqlFilter) {
-        queryTasks.push(
-          executeGetFeatureRequest(target.name, filterBuild.spatialCqlFilter, propertyNames, true).then(res => ({
-            isSpatial: true,
-            res
-          }))
-        );
-      }
-
-      const responses = await Promise.all(queryTasks);
-      const anyOk = responses.some(r => r.res.ok);
-
-      if (!anyOk) {
-        const firstErr = responses[0]?.res;
-        const isFilterIncompatible = Boolean(firstErr?.isFilterIncompatible);
-        const isTimeout = Boolean(firstErr?.isTimeout);
-        const httpSuffix = firstErr?.httpStatus ? ` (HTTP ${firstErr.httpStatus})` : '';
-        return {
-          status: {
-            camada: target.name,
-            titulo: layerTitle,
-            grupo: target.grupo,
-            status: (isFilterIncompatible ? 'filtro_incompativel' : 'erro_comunicacao') as CamadaStatusCode,
-            suportado: !isFilterIncompatible,
-            registrosEncontrados: 0,
-            camposPesquisados: filterBuild.fieldsUsed,
-            mensagem: isFilterIncompatible
-              ? 'Critério de busca não compatível com esta base.'
-              : isTimeout
-              ? 'Tempo limite esgotado ao consultar esta base.'
-              : `Falha de comunicação ao consultar esta base${httpSuffix}.`
-          },
-          items: [] as any[]
-        };
-      }
-
-      const seenIds = new Set<string>();
-      const items: any[] = [];
-
-      for (const { isSpatial, res: qRes } of responses) {
-        if (!qRes.ok) continue;
-        for (const f of qRes.features) {
-          const rawProps = f?.properties && typeof f.properties === 'object' ? f.properties : {};
-          const matchEval = evaluateFeatureMatch(rawProps, isSpatial, filterBuild, {
-            cleanDoc,
-            carTokens,
-            procList,
-            cleanNome,
-            buscaExploratoria
-          });
-
-          if (!matchEval.matches) continue;
-
-          const item = mapFeatureToDocumentItem(
-            f,
-            target.name,
-            layerTitle,
-            target.grupo,
-            schemaRes.fields,
-            schemaRes.geomFields,
-            filterBuild.confirmedDocFields,
-            !matchEval.confirmatory,
-            consultadoEm
-          );
-
-          if (item.id) {
-            if (seenIds.has(item.id)) continue;
-            seenIds.add(item.id);
-          }
-          items.push(item);
+      const countsByLayer = new Map<string, number>();
+      for (const list of [
+        cacheFallback.itemsByGroup.carImoveis,
+        cacheFallback.itemsByGroup.licencas,
+        cacheFallback.itemsByGroup.notificacoes,
+        cacheFallback.itemsByGroup.autosInfracao,
+        cacheFallback.itemsByGroup.termosEmbargo,
+        cacheFallback.itemsByGroup.outros
+      ]) {
+        for (const it of list) {
+          const k = String(it.camadaOrigem || '');
+          countsByLayer.set(k, (countsByLayer.get(k) || 0) + 1);
         }
       }
 
-      return {
-        status: {
-          camada: target.name,
-          titulo: layerTitle,
-          grupo: target.grupo,
-          status: (items.length > 0 ? 'consultada' : 'sem_resultados') as CamadaStatusCode,
-          suportado: true,
-          registrosEncontrados: items.length,
-          camposPesquisados: filterBuild.fieldsUsed,
-          camposConfirmados: propertyNames,
-          mensagem:
-            items.length > 0
-              ? `${items.length} registro(s) encontrado(s).`
-              : 'Nenhum registro encontrado para os critérios informados.'
-        },
-        items
-      };
+      camadasConsultadas = camadasConsultadas.map(c => {
+        const count = countsByLayer.get(c.camada) || 0;
+        if (count > 0) {
+          return {
+            ...c,
+            status: 'consultada',
+            suportado: true,
+            registrosEncontrados: count,
+            mensagem: `${count} registro(s) recuperado(s) do cache local sincronizado da SEMA-MT.`
+          };
+        }
+        return c;
+      });
+    } else if (!capResult.ok && capResult.isTimeout) {
+      res.status(504)!.json!({
+        error: capResult.errorMsg || 'Tempo limite esgotado ao conectar com a base pública da SEMA-MT.',
+        camadasConsultadas,
+        consultadoEm
+      });
+      return;
+    } else if (!capResult.ok && geoserverDirectFailed && camadasConsultadas.every(c => c.status === 'erro_comunicacao')) {
+      res.status(anyTimeout ? 504 : 502)!.json!({
+        error:
+          capResult.errorMsg ||
+          'Base pública da SEMA-MT bloqueou ou não respondeu à consulta externa neste momento.',
+        camadasConsultadas,
+        consultadoEm
+      });
+      return;
     }
-  );
-
-  const camadasConsultadas: CamadaStatus[] = [];
-
-  for (const r of layerResults) {
-    camadasConsultadas.push(r.status);
-    if (r.status.grupo === 'carImoveis') resultado.carImoveis.push(...r.items);
-    else if (r.status.grupo === 'licencas') resultado.licencas.push(...r.items);
-    else if (r.status.grupo === 'notificacoes') resultado.notificacoes.push(...r.items);
-    else if (r.status.grupo === 'autosInfracao') resultado.autosInfracao.push(...r.items);
-    else if (r.status.grupo === 'termosEmbargo') resultado.termosEmbargo.push(...r.items);
-    else resultado.outros.push(...r.items);
   }
 
   resultado.carImoveis = deduplicateCarImoveisByCar(resultado.carImoveis);
@@ -1472,7 +1265,10 @@ export default async function handler(
           criterioValor: auditCritVal,
           camada: publicItem.camadaOrigem || 'Geoportal:CAR_ATP',
           featureId: String(publicItem.id || publicItem.numeroDocumento || 'sema_item'),
-          car: _auditCar || publicItem.carFederal || (publicItem.camadaOrigem?.includes('CAR') ? publicItem.numeroDocumento : undefined),
+          car:
+            _auditCar ||
+            publicItem.carFederal ||
+            (publicItem.camadaOrigem?.includes('CAR') ? publicItem.numeroDocumento : undefined),
           rawProps: _auditRawProps || publicItem.propriedadesBrutas || {},
           docStatus: publicItem.cpfCnpjStatus || 'ausente',
           docDigits: _auditDocDigits,
@@ -1536,7 +1332,10 @@ export default async function handler(
 
   let mensagemStatus = '';
   if (totalRegistros > 0) {
-    mensagemStatus = `${totalRegistros} registro(s) encontrado(s) na base pública da SEMA-MT.`;
+    mensagemStatus =
+      origemDados === 'cache_local'
+        ? `${totalRegistros} registro(s) recuperado(s) do cache sincronizado da SEMA-MT (serviço externo temporariamente indisponível).`
+        : `${totalRegistros} registro(s) encontrado(s) na base pública da SEMA-MT.`;
     if (buscaExploratoria && !hasConfirmatoryCriteria) {
       mensagemStatus += ' Resultados obtidos por correspondência textual de nome.';
     }
@@ -1550,6 +1349,7 @@ export default async function handler(
 
   res.status(200)!.json!({
     sucesso: consultadasCount > 0 || (naoSuportadasCount > 0 && falhasCount === 0),
+    origemDados,
     criteriosUtilizados: {
       temCpfCnpj: Boolean(cleanDoc),
       car: rawCarStr || undefined,

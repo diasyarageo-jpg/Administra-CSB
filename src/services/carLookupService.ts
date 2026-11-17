@@ -15,6 +15,7 @@ import {
   CarGeoJsonFeature,
   CarLookupApiResponse,
   CarLookupResult,
+  SemaDocumentoItem,
   SemaDocumentosGroupedResult,
   GeoportalSyncResult
 } from '../types/carLookup';
@@ -80,6 +81,79 @@ function buildHttpFallbackErrorMessage(status: number, rawText: string, defaultL
     }
   }
   return `${defaultLabel} (HTTP ${status}).`;
+}
+
+function isProxyHtmlBlock(status: number, rawText: string, data: any): boolean {
+  if (status === 403 && !data && /<html/i.test(String(rawText || ''))) return true;
+  if (status === 403 && !data) return true;
+  return false;
+}
+
+function mapMappedCarFeatureToSemaItem(
+  feat: CarFeatureMapped,
+  consultadoEm: string
+): SemaDocumentoItem {
+  return {
+    id: feat.id || feat.car || feat.carFederal || '',
+    auditoriaId: feat.auditoriaId,
+    tipo: feat.atividade || 'CAR / Imóvel Rural',
+    numeroDocumento: feat.car || feat.carFederal || '',
+    nomeDocumento: feat.empreendimento || '',
+    dataDocumento: '',
+    status: feat.situacaoCar,
+    razaoSocial: feat.empreendedor,
+    municipio: feat.municipio || (feat.municipioCodigo ? `Código IBGE ${feat.municipioCodigo}` : undefined),
+    municipioCodigo: feat.municipioCodigo,
+    camadaOrigem: feat.camadaOrigem || 'Geoportal:CAR_ATP',
+    camadaTitulo: feat.camadaOrigem || 'Geoportal:CAR_ATP',
+    carFederal: feat.carFederal,
+    areaHa: feat.areaHa ? `${feat.areaHa} ha` : undefined,
+    atividade: feat.atividade,
+    camposConfirmadosEsquema: feat.camposConfirmadosEsquema,
+    cpfCnpjCompletoDisponivel: feat.cpfCnpjCompletoDisponivel,
+    cpfCnpjCampoOrigem: feat.cpfCnpjCampoOrigem,
+    cpfCnpjStatus: feat.cpfCnpjStatus,
+    consultadoEm,
+    propriedadesBrutas: feat.propriedadesBrutas || {}
+  };
+}
+
+function mapSemaCacheRowToDocumentoItem(row: any, fallbackTimestamp: string): SemaDocumentoItem {
+  const areaVal =
+    row?.area_ha !== undefined && row?.area_ha !== null && !isNaN(Number(row.area_ha))
+      ? `${Number(row.area_ha).toLocaleString('pt-BR', { maximumFractionDigits: 2 })} ha`
+      : undefined;
+  const camada = String(row?.camada || 'Geoportal:CAR_ATP');
+  const carNum = row?.numero_estadual || row?.car_federal || '';
+
+  return {
+    id: String(row?.id || carNum || 'sema_cache'),
+    tipo: 'CAR / Imóvel Rural',
+    numeroDocumento: String(carNum),
+    nomeDocumento: String(row?.nome_propriedade || ''),
+    dataDocumento: '',
+    numeroProcesso: row?.numero_processo ? String(row.numero_processo) : undefined,
+    status: row?.situacao_car ? String(row.situacao_car) : undefined,
+    razaoSocial: row?.nome_proprietario ? String(row.nome_proprietario) : undefined,
+    municipio: row?.municipio_nome ? String(row.municipio_nome) : undefined,
+    camadaOrigem: camada,
+    camadaTitulo: `${camada} (Cache sincronizado)`,
+    carFederal: row?.car_federal ? String(row.car_federal) : undefined,
+    areaHa: areaVal,
+    linkDocumento: row?.link_documento ? String(row.link_documento) : undefined,
+    cpfCnpjCompletoDisponivel: false,
+    cpfCnpjStatus: 'ausente',
+    consultadoEm: row?.sincronizado_em ? String(row.sincronizado_em) : fallbackTimestamp,
+    propriedadesBrutas: {
+      ...(row?.numero_estadual ? { NUMEROESTADUAL: row.numero_estadual } : {}),
+      ...(row?.car_federal ? { CAR_FEDERAL: row.car_federal } : {}),
+      ...(row?.nome_propriedade ? { NOMEPROPRIEDADE: row.nome_propriedade } : {}),
+      ...(row?.nome_proprietario ? { NOMESPROPRIETARIOS: row.nome_proprietario } : {}),
+      ...(row?.municipio_nome ? { MUNICIPIO: row.municipio_nome } : {}),
+      ...(row?.situacao_car ? { SITUACAO: row.situacao_car } : {}),
+      ...(row?.numero_processo ? { PROTOCOLO: row.numero_processo } : {})
+    }
+  };
 }
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -319,23 +393,55 @@ export async function consultarCarPorCoordenada(
       params.set('entidadeAlvoId', targetContext.entidadeAlvoId);
     }
 
-    const doFetch = async (forceRefresh: boolean) => {
+    const doFetchGet = async (forceRefresh: boolean) => {
       const authHeaders = await getOptionalAuthHeaders(forceRefresh);
       return await fetch(`/api/car-lookup?${params.toString()}`, {
         method: 'GET',
         headers: {
           Accept: 'application/json',
+          'X-Requested-With': 'XMLHttpRequest',
           ...authHeaders
         }
       });
     };
 
-    let res = await doFetch(false);
+    const doFetchPost = async (forceRefresh: boolean) => {
+      const authHeaders = await getOptionalAuthHeaders(forceRefresh);
+      return await fetch('/api/car-lookup', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          'X-Requested-With': 'XMLHttpRequest',
+          ...authHeaders
+        },
+        body: JSON.stringify({
+          lat: decLat,
+          lng: decLng,
+          ...(targetContext?.entidadeAlvoTipo
+            ? { entidadeAlvoTipo: targetContext.entidadeAlvoTipo }
+            : {}),
+          ...(targetContext?.entidadeAlvoId
+            ? { entidadeAlvoId: targetContext.entidadeAlvoId }
+            : {})
+        })
+      });
+    };
+
+    let res = await doFetchGet(false);
     if (res.status === 401 && isSupabaseConfigured()) {
-      res = await doFetch(true);
+      res = await doFetchGet(true);
     }
 
-    const { data: parsedData, rawText } = await parseApiJsonOrText<CarLookupApiResponse>(res);
+    let { data: parsedData, rawText } = await parseApiJsonOrText<CarLookupApiResponse>(res);
+    if (isProxyHtmlBlock(res.status, rawText, parsedData) || res.status === 405) {
+      res = await doFetchPost(false);
+      if (res.status === 401 && isSupabaseConfigured()) {
+        res = await doFetchPost(true);
+      }
+      ({ data: parsedData, rawText } = await parseApiJsonOrText<CarLookupApiResponse>(res));
+    }
+
     const data: CarLookupApiResponse = parsedData || {
       encontrado: false,
       feicoes: [],
@@ -476,34 +582,46 @@ export async function consultarDocumentosSema(
       cleanDoc || cars.length > 0 || processos.length > 0 || coordenadas.length > 0 || nome
     );
 
-    const doFetch = async (forceRefresh: boolean): Promise<Response> => {
+    const doFetchPost = async (forceRefresh: boolean): Promise<Response> => {
       const authHeaders = await getOptionalAuthHeaders(forceRefresh);
-      if (usePost) {
-        return await fetch('/api/sema-documentos', {
-          method: 'POST',
-          headers: {
-            'Content-Type': 'application/json',
-            Accept: 'application/json',
-            ...authHeaders
-          },
-          body: JSON.stringify({
-            ...(cleanDoc ? { cpfCnpj: cleanDoc } : {}),
-            ...(car ? { car } : {}),
-            ...(cars.length > 0 ? { cars } : {}),
-            ...(processo ? { processo } : {}),
-            ...(processos.length > 0 ? { processos } : {}),
-            ...(coordenadas.length > 0 ? { coordenadas } : {}),
-            ...(nome ? { nome } : {}),
-            ...(useExploratoryName ? { buscaExploratoria: true } : {}),
-            ...(entidadeAlvoTipo ? { entidadeAlvoTipo } : {}),
-            ...(entidadeAlvoId ? { entidadeAlvoId } : {})
-          })
-        });
-      }
+      return await fetch('/api/sema-documentos', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Accept: 'application/json',
+          'X-Requested-With': 'XMLHttpRequest',
+          ...authHeaders
+        },
+        body: JSON.stringify({
+          ...(cleanDoc ? { cpfCnpj: cleanDoc } : {}),
+          ...(car ? { car } : {}),
+          ...(cars.length > 0 ? { cars } : {}),
+          ...(processo ? { processo } : {}),
+          ...(processos.length > 0 ? { processos } : {}),
+          ...(coordenadas.length > 0 ? { coordenadas } : {}),
+          ...(nome ? { nome } : {}),
+          ...(useExploratoryName ? { buscaExploratoria: true } : {}),
+          ...(entidadeAlvoTipo ? { entidadeAlvoTipo } : {}),
+          ...(entidadeAlvoId ? { entidadeAlvoId } : {})
+        })
+      });
+    };
 
+    const canUseSafeGet = Boolean(
+      car || cars.length > 0 || processo || processos.length > 0 || useExploratoryName
+    );
+
+    const doFetchSafeGet = async (forceRefresh: boolean): Promise<Response> => {
+      const authHeaders = await getOptionalAuthHeaders(forceRefresh);
       const params = new URLSearchParams();
       if (processo) params.set('processo', processo);
+      if (processos.length > 0) params.set('processos', processos.slice(0, 8).join(','));
       if (car) params.set('car', car);
+      if (cars.length > 0) params.set('cars', cars.slice(0, 10).join(','));
+      if (useExploratoryName && nome) {
+        params.set('nome', nome);
+        params.set('buscaExploratoria', 'true');
+      }
       if (entidadeAlvoTipo) params.set('entidadeAlvoTipo', entidadeAlvoTipo);
       if (entidadeAlvoId) params.set('entidadeAlvoId', entidadeAlvoId);
 
@@ -511,17 +629,122 @@ export async function consultarDocumentosSema(
         method: 'GET',
         headers: {
           Accept: 'application/json',
+          'X-Requested-With': 'XMLHttpRequest',
           ...authHeaders
         }
       });
     };
 
-    let res = await doFetch(false);
+    let res = usePost ? await doFetchPost(false) : await doFetchSafeGet(false);
     if (res.status === 401 && isSupabaseConfigured()) {
-      res = await doFetch(true);
+      res = usePost ? await doFetchPost(true) : await doFetchSafeGet(true);
     }
 
-    const { data, rawText } = await parseApiJsonOrText<any>(res);
+    let { data, rawText } = await parseApiJsonOrText<any>(res);
+
+    // Fallback 1: se POST /api/sema-documentos for bloqueado por proxy/WAF (HTTP 403 HTML ou 405),
+    // tenta GET seguro (sem CPF/CNPJ na URL) para CAR/Processo/Nome e /api/car-lookup para coordenadas.
+    if (usePost && (isProxyHtmlBlock(res.status, rawText, data) || res.status === 405 || res.status === 404)) {
+      if (canUseSafeGet) {
+        res = await doFetchSafeGet(false);
+        if (res.status === 401 && isSupabaseConfigured()) {
+          res = await doFetchSafeGet(true);
+        }
+        ({ data, rawText } = await parseApiJsonOrText<any>(res));
+      }
+
+      if ((!res.ok || !data || data.error) && coordenadas.length > 0) {
+        const coordFeatures: SemaDocumentoItem[] = [];
+        for (const c of coordenadas.slice(0, 3)) {
+          const coordRes = await consultarCarPorCoordenada(c.lat, c.lng, {
+            entidadeAlvoTipo,
+            entidadeAlvoId
+          });
+          if (coordRes.sucesso && coordRes.feicoes.length > 0) {
+            for (const f of coordRes.feicoes) {
+              coordFeatures.push(mapMappedCarFeatureToSemaItem(f, coordRes.consultadoEm));
+            }
+          }
+        }
+        if (coordFeatures.length > 0) {
+          return {
+            sucesso: true,
+            criteriosUtilizados: {
+              temCpfCnpj: Boolean(cleanDoc),
+              car: car || undefined,
+              cars: cars.length > 0 ? cars : undefined,
+              processo: processo || undefined,
+              processos: processos.length > 0 ? processos : undefined,
+              coordenadasCount: coordenadas.length,
+              nomeExploratorio: useExploratoryName ? nome : undefined,
+              buscaExploratoria: useExploratoryName
+            },
+            carImoveis: coordFeatures,
+            licencas: [],
+            notificacoes: [],
+            autosInfracao: [],
+            termosEmbargo: [],
+            outros: [],
+            totalRegistros: coordFeatures.length,
+            consultadoEm: new Date().toISOString(),
+            mensagemStatus: `${coordFeatures.length} imóvel(is) CAR localizado(s) por coordenada na SEMA-MT.`,
+            camadasConsultadas: []
+          };
+        }
+      }
+    }
+
+    // Fallback 2: se /api/sema-documentos continuar bloqueado (403 HTML / 502 / 504),
+    // consulta o cache sincronizado no Supabase via RPC autenticada (consultar_cruzamento_sema_integrado).
+    if ((!res.ok || !data || data.error) && isSupabaseConfigured() && supabase) {
+      const allCarArgs = Array.from(new Set([car, ...cars].map(c => c.trim()).filter(Boolean)));
+      if (allCarArgs.length > 0 || cleanDoc) {
+        try {
+          const { data: rpcData, error: rpcErr } = await supabase.rpc(
+            'consultar_cruzamento_sema_integrado',
+            {
+              p_cars: allCarArgs,
+              p_cpf_cnpj: cleanDoc || null
+            }
+          );
+          if (!rpcErr && rpcData) {
+            const cacheRows = Array.isArray(rpcData.sema_cache) ? rpcData.sema_cache : [];
+            if (cacheRows.length > 0) {
+              const nowIso = new Date().toISOString();
+              const cacheItems = cacheRows.map((row: any) =>
+                mapSemaCacheRowToDocumentoItem(row, nowIso)
+              );
+              return {
+                sucesso: true,
+                criteriosUtilizados: {
+                  temCpfCnpj: Boolean(cleanDoc),
+                  car: car || undefined,
+                  cars: cars.length > 0 ? cars : undefined,
+                  processo: processo || undefined,
+                  processos: processos.length > 0 ? processos : undefined,
+                  coordenadasCount: coordenadas.length,
+                  nomeExploratorio: useExploratoryName ? nome : undefined,
+                  buscaExploratoria: useExploratoryName
+                },
+                carImoveis: cacheItems,
+                licencas: [],
+                notificacoes: [],
+                autosInfracao: [],
+                termosEmbargo: [],
+                outros: [],
+                totalRegistros: cacheItems.length,
+                consultadoEm: nowIso,
+                mensagemStatus: `${cacheItems.length} registro(s) recuperado(s) do cache sincronizado da SEMA-MT.`,
+                camadasConsultadas: []
+              };
+            }
+          }
+        } catch {
+          // Segue para retorno do erro original se RPC falhar
+        }
+      }
+    }
+
     if (!res.ok || !data || data.error) {
       const errMsg =
         data?.error ||
@@ -552,7 +775,7 @@ export async function consultarDocumentosSema(
         consultadoEm: data?.consultadoEm || new Date().toISOString(),
         mensagemStatus: errMsg,
         erroGeral: errMsg,
-        camadasConsultadas: []
+        camadasConsultadas: Array.isArray(data?.camadasConsultadas) ? data.camadasConsultadas : []
       };
     }
 

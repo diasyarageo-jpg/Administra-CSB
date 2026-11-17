@@ -6,6 +6,7 @@ import {
 } from '../services/notificaDataService';
 import { PaginationBar, PageSizeOption, paginateList } from './PaginationBar';
 import { UserRole } from '../types/auth';
+import { parseCoordAdvanced } from '../services/coordService';
 
 export interface IndexedItem<T> {
   record: T;
@@ -401,7 +402,7 @@ export const ConciliacaoCadastrosView: React.FC<ConciliacaoCadastrosViewProps> =
                         onClick={() => onViewRecord('empreendedores', record, originalIndex)}
                         title="Clique para visualizar os dados completos do empreendedor"
                       >
-                        <td className="td-main">
+                        <td className="td-main" style={{ minWidth: '150px', maxWidth: '240px' }}>
                           <div>{record.nome || 'Sem nome'}</div>
                           {(record.nomeFantasia || record.tipoPessoa) && (
                             <span className="td-sub">
@@ -565,7 +566,7 @@ export const ConciliacaoCadastrosView: React.FC<ConciliacaoCadastrosViewProps> =
                         onClick={() => onViewRecord('barragens', record, originalIndex)}
                         title="Clique para visualizar os dados completos da barragem"
                       >
-                        <td className="td-main">
+                        <td className="td-main" style={{ minWidth: '150px', maxWidth: '240px' }}>
                           <div>{record.nome || 'Barragem sem nome'}</div>
                           {(record.snisb || record.processo) && (
                             <span className="td-sub">
@@ -587,18 +588,30 @@ export const ConciliacaoCadastrosView: React.FC<ConciliacaoCadastrosViewProps> =
                           {record.municipio ? `${record.municipio}${record.uf ? `/${record.uf}` : ''}` : record.uf || '—'}
                         </td>
                         <td>
-                          {record.latitude || record.longitude ? (
-                            <span style={{ fontFamily: 'monospace', fontSize: '11px' }}>
-                              {[record.latitude, record.longitude].filter(Boolean).join(', ')}
-                            </span>
-                          ) : (
-                            <span style={{ color: '#94a3b8' }}>—</span>
-                          )}
+                          {(() => {
+                            const fmt = (raw: any, isLng: boolean) => {
+                              const s = String(raw ?? '').trim();
+                              if (!s) return '';
+                              const p = parseCoordAdvanced(s, isLng);
+                              return p.valido && p.gms ? p.gms : s;
+                            };
+                            const latGms = fmt(record.latitude, false);
+                            const lngGms = fmt(record.longitude, true);
+                            if (!latGms && !lngGms) {
+                              return <span style={{ color: '#94a3b8' }}>—</span>;
+                            }
+                            return (
+                              <div style={{ display: 'flex', flexDirection: 'column', gap: '2px', fontFamily: 'monospace', fontSize: '11px' }}>
+                                <span style={{ whiteSpace: 'normal' }}>Lat: {latGms || '—'}</span>
+                                <span style={{ whiteSpace: 'normal' }}>Lon: {lngGms || '—'}</span>
+                              </div>
+                            );
+                          })()}
                         </td>
                         <td style={{ whiteSpace: 'normal', maxWidth: '260px' }}>
                           {suggestedEmpreendedorId ? (
                             <div style={{ display: 'flex', flexDirection: 'column', gap: '2px' }}>
-                              <span className="badge blue" style={{ width: 'fit-content' }}>
+                              <span className="badge blue" style={{ width: 'fit-content', whiteSpace: 'normal', lineHeight: 1.3 }}>
                                 Correspondência: {suggestedEmpreendedorName}
                               </span>
                               <span className="micro muted">Texto sem ID formal — abra para confirmar vínculo</span>

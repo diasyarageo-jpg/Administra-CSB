@@ -9,6 +9,7 @@ import {
   aceitarCamposSemaParaMestre,
   aceitarDadoSemaParaMestre,
   clearPersistedSemaLookup,
+  consultarDocumentosSema,
   getPersistedSemaLookup,
   isSemaMasterFieldAllowed,
   isValidSemaAuditoriaId,
@@ -17,6 +18,7 @@ import {
   setPersistedSemaLookup
 } from '../src/services/carLookupService';
 import { setTestSupabaseAdminForSemaAudit } from '../src/server/semaAudit';
+import { resetSemaGeoserverCachesForTest } from '../src/server/semaGeoserver';
 import {
   buildBarragemFieldComparisons,
   buildSemaAuditPayloadForBarragem,
@@ -800,4 +802,132 @@ test('Cenário 14: Bloqueia aceite sem auditoriaId UUID válido e rejeita cpf_cn
   });
   assert.equal(missingAuditBatch.success, false);
   assert.match(String(missingAuditBatch.error), /auditoria/i);
+});
+
+test('Cenário 15: Resiliência contra HTTP 403 no GetCapabilities, GET cql_filter (POST XML fallback) e proxy POST->GET', async () => {
+  const originalFetch = globalThis.fetch;
+  resetSemaGeoserverCachesForTest();
+  setTestSupabaseAdminForSemaAudit(null);
+
+  try {
+    // 1. GeoServer bloqueando GetCapabilities (403) e GET GetFeature com cql_filter (403),
+    // mas aceitando DescribeFeatureType e POST XML WFS 1.1.0
+    globalThis.fetch = (async (input: any, init?: RequestInit) => {
+      const urlStr = String(input);
+      const method = String(init?.method || 'GET').toUpperCase();
+
+      if (urlStr.includes('request=GetCapabilities')) {
+        return new Response('<html><body>403 Forbidden</body></html>', { status: 403 });
+      }
+      if (urlStr.includes('request=DescribeFeatureType')) {
+        if (urlStr.includes('Geoportal%3ACAR_ATP') || urlStr.includes('Geoportal:CAR_ATP')) {
+          return new Response(
+            `<xsd:schema>
+              <xsd:element name="the_geom" type="gml:MultiSurfacePropertyType"/>
+              <xsd:element name="NUMEROESTADUAL" type="xsd:string"/>
+              <xsd:element name="NOMEPROPRIEDADE" type="xsd:string"/>
+              <xsd:element name="MUNICIPIO" type="xsd:string"/>
+            </xsd:schema>`,
+            { status: 200 }
+          );
+        }
+        return new Response('', { status: 404 });
+      }
+      if (urlStr.includes('request=GetFeature')) {
+        if (method === 'GET' || String(init?.headers && (init.headers as any)['Content-Type']).includes('x-www-form-urlencoded')) {
+          return new Response('<html><body>403 WAF Blocked CQL</body></html>', { status: 403 });
+        }
+        if (method === 'POST' && String(init?.body || '').includes('<wfs:GetFeature')) {
+          return new Response(
+            JSON.stringify({
+              type: 'FeatureCollection',
+              features: [
+                {
+                  type: 'Feature',
+                  id: 'CAR_ATP.403',
+                  properties: {
+                    NUMEROESTADUAL: 'MT55555/2024',
+                    NOMEPROPRIEDADE: 'Fazenda Resiliente',
+                    MUNICIPIO: 'Sorriso'
+                  }
+                }
+              ]
+            }),
+            { status: 200 }
+          );
+        }
+      }
+      return new Response('', { status: 404 });
+    }) as typeof fetch;
+
+    const reqResilient = createMockReq({
+      method: 'POST',
+      url: '/api/sema-documentos',
+      body: { car: 'MT55555/2024' }
+    });
+    const resResilient = createMockRes();
+    await semaDocumentosHandler(reqResilient, resResilient);
+
+    assert.equal(resResilient.getStatus(), 200);
+    const body = resResilient.getBody();
+    assert.equal(body.sucesso, true);
+    assert.equal(body.carImoveis.length, 1);
+    assert.equal(body.carImoveis[0].numeroDocumento, 'MT55555/2024');
+    assert.equal(body.carImoveis[0].nomeDocumento, 'Fazenda Resiliente');
+
+    // 2. Cliente: se POST /api/sema-documentos retornar 403 HTML do proxy, faz fallback para GET seguro
+    const seenUrls: string[] = [];
+    globalThis.fetch = (async (input: any, init?: RequestInit) => {
+      const urlStr = String(input);
+      const method = String(init?.method || 'GET').toUpperCase();
+      seenUrls.push(`${method} ${urlStr}`);
+
+      if (urlStr.startsWith('/api/sema-documentos') && method === 'POST') {
+        return new Response('<html><body>403 Forbidden by Proxy</body></html>', { status: 403 });
+      }
+      if (urlStr.startsWith('/api/sema-documentos') && method === 'GET') {
+        assert.equal(urlStr.includes('cpfCnpj'), false, 'Fallback GET nunca deve conter cpfCnpj na URL');
+        return new Response(
+          JSON.stringify({
+            sucesso: true,
+            carImoveis: [
+              {
+                id: 'CAR_ATP.777',
+                tipo: 'CAR / Imóvel Rural',
+                numeroDocumento: 'MT77777/2024',
+                nomeDocumento: 'Fazenda Via Get Fallback',
+                dataDocumento: '',
+                camadaOrigem: 'Geoportal:CAR_ATP'
+              }
+            ],
+            licencas: [],
+            notificacoes: [],
+            autosInfracao: [],
+            termosEmbargo: [],
+            outros: [],
+            totalRegistros: 1,
+            consultadoEm: '2026-11-16T12:00:00.000Z',
+            mensagemStatus: '1 registro(s) encontrado(s).',
+            camadasConsultadas: []
+          }),
+          { status: 200 }
+        );
+      }
+      return new Response('', { status: 404 });
+    }) as typeof fetch;
+
+    const clientRes = await consultarDocumentosSema({
+      cpfCnpj: '12345678901',
+      car: 'MT77777/2024',
+      cars: ['MT77777/2024']
+    });
+    assert.equal(clientRes.sucesso, true);
+    assert.equal(clientRes.carImoveis.length, 1);
+    assert.equal(clientRes.carImoveis[0].numeroDocumento, 'MT77777/2024');
+    assert.equal(seenUrls.some(u => u.startsWith('POST /api/sema-documentos')), true);
+    assert.equal(seenUrls.some(u => u.startsWith('GET /api/sema-documentos')), true);
+  } finally {
+    resetSemaGeoserverCachesForTest();
+    globalThis.fetch = originalFetch;
+  }
 });

@@ -18,6 +18,11 @@ function registerApiMiddlewares(
   for (const [route, file] of Object.entries(endpoints)) {
     middlewares.use(route, async (req, res) => {
       try {
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+        res.setHeader(
+          'Access-Control-Allow-Headers',
+          'Content-Type, Authorization, X-Requested-With, Accept'
+        );
         if ((req.method || '').toUpperCase() === 'OPTIONS') {
           res.statusCode = 204;
           res.end();
@@ -27,8 +32,10 @@ function registerApiMiddlewares(
         const handler = mod.default || mod;
         await handler(req, res);
       } catch (err: any) {
-        res.statusCode = 500;
-        res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        if (!res.headersSent) {
+          res.statusCode = 500;
+          res.setHeader('Content-Type', 'application/json; charset=utf-8');
+        }
         res.end(
           JSON.stringify({
             error: err?.message || `Erro ao processar ${route} no servidor.`

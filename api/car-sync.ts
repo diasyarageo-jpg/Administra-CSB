@@ -9,6 +9,12 @@ import {
   collectConfirmedPropertyNames,
   sanitizeSemaProperties
 } from '../src/config/carCampos';
+import {
+  describeSemaLayerXml,
+  executeSemaPagedGetFeature,
+  getSemaCapabilities,
+  sanitizeSemaServerText
+} from '../src/server/semaGeoserver';
 
 interface VercelLikeRequest extends IncomingMessage {
   query?: Record<string, string | string[]>;
@@ -31,16 +37,6 @@ interface LayerXmlSchema {
   errorMsg?: string;
 }
 
-const WFS_URL = 'https://geo.sema.mt.gov.br/geoserver/wfs';
-const GEOSERVER_AUTHKEY =
-  (process.env.SEMA_GEOSERVER_AUTHKEY || process.env.GEOSERVER_AUTHKEY || '').trim() ||
-  '541085de-9a2e-454e-bdba-eb3d57a2f492';
-
-const SEMA_REQUEST_HEADERS: Record<string, string> = {
-  'User-Agent': 'Administra-CSB/1.0 (SEMA-MT; +https://geo.sema.mt.gov.br)',
-  Accept: 'application/json, application/xml, text/xml, */*'
-};
-
 const TARGET_SYNC_LAYERS = [
   'Geoportal:CAR_ATP',
   'Geoportal:MVW_REQUERIMENTO_ATP',
@@ -52,19 +48,6 @@ const GLOBAL_STATE_KEY = '__GLOBAL__';
 const PAGE_SIZE = 200;
 const MAX_EXECUTION_MS = 40_000;
 const LOCK_STALE_MS = 10 * 60 * 1000;
-
-async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Response> {
-  const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
-  try {
-    return await fetch(url, {
-      signal: controller.signal,
-      headers: SEMA_REQUEST_HEADERS
-    });
-  } finally {
-    clearTimeout(timer);
-  }
-}
 
 function timingSafeBearerEquals(authHeader: string, expectedSecret: string): boolean {
   if (!expectedSecret) return false;
@@ -104,9 +87,7 @@ function isMissingSchemaOrColumnError(err: any): boolean {
 }
 
 function sanitizeServerMessage(raw: string): string {
-  return String(raw || '')
-    .replace(new RegExp(GEOSERVER_AUTHKEY, 'gi'), '[REDACTED]')
-    .trim();
+  return sanitizeSemaServerText(raw);
 }
 
 /**
@@ -291,106 +272,21 @@ async function verificarTabelasCache(
 }
 
 async function getConfirmedWfsLayers(): Promise<Set<string>> {
-  const params = new URLSearchParams({
-    service: 'WFS',
-    version: '2.0.0',
-    request: 'GetCapabilities',
-    authkey: GEOSERVER_AUTHKEY
-  });
-  const res = await fetchWithTimeout(`${WFS_URL}?${params.toString()}`, 12000);
-  if (!res.ok) {
-    throw new Error(`WFS GetCapabilities retornou HTTP ${res.status}.`);
+  const cap = await getSemaCapabilities();
+  if (cap.ok && cap.wfsLayers.size > 0) {
+    return new Set(cap.wfsLayers.keys());
   }
-  const xml = await res.text();
-  const names = new Set<string>();
-  const matches = xml.matchAll(/<(?:[\w-]+:)?Name>([^<]+)<\/(?:[\w-]+:)?Name>/gi);
-  for (const m of matches) {
-    names.add(m[1].trim());
-  }
-  return names;
+  return new Set(TARGET_SYNC_LAYERS);
 }
 
 async function describeLayerSchemaXml(layerName: string): Promise<LayerXmlSchema> {
-  const params = new URLSearchParams({
-    service: 'WFS',
-    version: '2.0.0',
-    request: 'DescribeFeatureType',
-    typeNames: layerName,
-    authkey: GEOSERVER_AUTHKEY
-  });
-
-  try {
-    const res = await fetchWithTimeout(`${WFS_URL}?${params.toString()}`, 10000);
-    if (!res.ok) {
-      return {
-        ok: false,
-        fields: new Map(),
-        geomFields: new Set(),
-        errorMsg: `DescribeFeatureType XML retornou HTTP ${res.status}.`
-      };
-    }
-
-    const xml = await res.text();
-    if (/ExceptionReport/i.test(xml)) {
-      return {
-        ok: false,
-        fields: new Map(),
-        geomFields: new Set(),
-        errorMsg: 'GeoServer retornou ExceptionReport no DescribeFeatureType XML.'
-      };
-    }
-
-    const fields = new Map<string, string>();
-    const geomFields = new Set<string>();
-    const localName = layerName.includes(':') ? layerName.split(':')[1] : layerName;
-    const elementTags = xml.matchAll(/<(?:xsd:)?element\b([^>]+)\/?>/gi);
-
-    for (const tagMatch of elementTags) {
-      const attrs = tagMatch[1] || '';
-      const nameAttr = attrs.match(/\bname\s*=\s*"([^"]+)"/i);
-      const typeAttr = attrs.match(/\btype\s*=\s*"([^"]+)"/i);
-      if (!nameAttr || !typeAttr) continue;
-
-      const fieldName = nameAttr[1].trim();
-      const fieldType = typeAttr[1].trim();
-      if (fieldName === localName && /Type$/i.test(fieldType)) {
-        continue;
-      }
-
-      fields.set(fieldName, fieldType);
-
-      const lowerType = fieldType.toLowerCase();
-      if (
-        lowerType.startsWith('gml:') ||
-        lowerType.includes('geometry') ||
-        lowerType.includes('surface') ||
-        lowerType.includes('polygon') ||
-        lowerType.includes('point') ||
-        lowerType.includes('curve') ||
-        lowerType.includes('linestring')
-      ) {
-        geomFields.add(fieldName);
-      }
-    }
-
-    if (fields.size === 0) {
-      return {
-        ok: false,
-        fields,
-        geomFields,
-        errorMsg: 'Esquema XML sem atributos reconhecidos.'
-      };
-    }
-
-    return { ok: true, fields, geomFields };
-  } catch {
-    return {
-      ok: false,
-      fields: new Map(),
-      geomFields: new Set(),
-      errorMsg: 'Falha ao consultar DescribeFeatureType XML.'
-    };
-  }
+  const res = await describeSemaLayerXml(layerName);
+  return {
+    ok: res.ok,
+    fields: res.fields,
+    geomFields: res.geomFields,
+    errorMsg: res.errorMsg
+  };
 }
 
 async function acquireDbSyncLock(
@@ -683,43 +579,21 @@ async function executarSincronizacaoPaginada(
           break;
         }
 
-        const params = new URLSearchParams({
-          service: 'WFS',
-          version: '2.0.0',
-          request: 'GetFeature',
-          typeNames: camada,
-          outputFormat: 'application/json',
-          count: String(PAGE_SIZE),
-          startIndex: String(startIndex),
-          authkey: GEOSERVER_AUTHKEY
+        const pageRes = await executeSemaPagedGetFeature({
+          layerName: camada,
+          pageSize: PAGE_SIZE,
+          startIndex,
+          sortField,
+          propertyNames
         });
 
-        if (sortField) {
-          params.set('sortBy', `${sortField} ASC`);
-        }
-        if (propertyNames.length > 0) {
-          params.set('propertyName', propertyNames.join(','));
-        }
-
-        const response = await fetchWithTimeout(`${WFS_URL}?${params.toString()}`, 15000);
-        const bodyText = await response.text();
-
-        if (!response.ok || /ExceptionReport/i.test(bodyText)) {
+        if (!pageRes.ok) {
           layerErrored = true;
-          layerErrorMsg = `GeoServer retornou HTTP ${response.status} em startIndex=${startIndex}.`;
+          layerErrorMsg = pageRes.errorMsg || `GeoServer retornou HTTP ${pageRes.httpStatus || 502} em startIndex=${startIndex}.`;
           break;
         }
 
-        let data: any;
-        try {
-          data = JSON.parse(bodyText);
-        } catch {
-          layerErrored = true;
-          layerErrorMsg = `Resposta GeoJSON inválida em startIndex=${startIndex}.`;
-          break;
-        }
-
-        const features = Array.isArray(data?.features) ? data.features : [];
+        const features = pageRes.features;
         if (features.length === 0) {
           layerExhausted = true;
           break;
