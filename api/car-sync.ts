@@ -33,9 +33,13 @@ interface LayerXmlSchema {
 
 const WFS_URL = 'https://geo.sema.mt.gov.br/geoserver/wfs';
 const GEOSERVER_AUTHKEY =
-  process.env.SEMA_GEOSERVER_AUTHKEY ||
-  process.env.GEOSERVER_AUTHKEY ||
+  (process.env.SEMA_GEOSERVER_AUTHKEY || process.env.GEOSERVER_AUTHKEY || '').trim() ||
   '541085de-9a2e-454e-bdba-eb3d57a2f492';
+
+const SEMA_REQUEST_HEADERS: Record<string, string> = {
+  'User-Agent': 'Administra-CSB/1.0 (SEMA-MT; +https://geo.sema.mt.gov.br)',
+  Accept: 'application/json, application/xml, text/xml, */*'
+};
 
 const TARGET_SYNC_LAYERS = [
   'Geoportal:CAR_ATP',
@@ -53,7 +57,10 @@ async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Respons
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, { signal: controller.signal });
+    return await fetch(url, {
+      signal: controller.signal,
+      headers: SEMA_REQUEST_HEADERS
+    });
   } finally {
     clearTimeout(timer);
   }
@@ -146,11 +153,41 @@ async function authorizeManualSync(req: VercelLikeRequest): Promise<
       };
     }
 
-    const { data: profile, error: profErr } = await supabaseAdmin
+    let profile: any = null;
+    let profErr: any = null;
+
+    const primaryRes = await supabaseAdmin
       .from('usuarios')
       .select('id, papel, situacao, status, auth_user_id')
       .eq('auth_user_id', userData.user.id)
       .maybeSingle();
+
+    profile = primaryRes.data;
+    profErr = primaryRes.error;
+
+    if (profErr && isMissingSchemaOrColumnError(profErr)) {
+      const fallbackColRes = await supabaseAdmin
+        .from('usuarios')
+        .select('id, papel, situacao, auth_user_id')
+        .eq('auth_user_id', userData.user.id)
+        .maybeSingle();
+      profile = fallbackColRes.data;
+      profErr = fallbackColRes.error;
+    }
+
+    if (!profile && !profErr && userData.user.email) {
+      const cleanEmail = String(userData.user.email).trim();
+      if (cleanEmail) {
+        const byEmailRes = await supabaseAdmin
+          .from('usuarios')
+          .select('id, papel, situacao, auth_user_id')
+          .ilike('email', cleanEmail)
+          .maybeSingle();
+        if (byEmailRes.data && !byEmailRes.error) {
+          profile = byEmailRes.data;
+        }
+      }
+    }
 
     if (profErr) {
       if (isMissingSchemaOrColumnError(profErr)) {
@@ -158,7 +195,7 @@ async function authorizeManualSync(req: VercelLikeRequest): Promise<
           authorized: false,
           httpStatus: 503,
           error:
-            'Dependência ausente no banco de dados: tabela public.usuarios ou colunas (auth_user_id, papel, situacao, status) não encontradas. Aplique a migração 20261029_auth_rbac_isolated_login.sql.'
+            'Dependência ausente no banco de dados: tabela public.usuarios ou colunas (auth_user_id, papel, situacao) não encontradas. Aplique a migração 20261029_auth_rbac_isolated_login.sql.'
         };
       }
       return {
@@ -176,12 +213,19 @@ async function authorizeManualSync(req: VercelLikeRequest): Promise<
       };
     }
 
-    const isActive = profile.situacao
-      ? profile.situacao === 'Ativo'
-      : profile.status === 'Ativo';
-    const allowedRoles = ['Administrador', 'Analista'];
+    const rawSituacao = String(profile.situacao ?? profile.status ?? '')
+      .trim()
+      .toLowerCase();
+    const isActive = rawSituacao === 'ativo';
+    const rawPapel = String(profile.papel || '')
+      .normalize('NFD')
+      .replace(/[\u0300-\u036f]/g, '')
+      .trim()
+      .toLowerCase();
+    const isAllowedRole =
+      rawPapel === 'administrador' || rawPapel === 'admin' || rawPapel === 'analista';
 
-    if (!isActive || !allowedRoles.includes(String(profile.papel || ''))) {
+    if (!isActive || !isAllowedRole) {
       return {
         authorized: false,
         httpStatus: 403,
@@ -1044,6 +1088,12 @@ export default async function handler(
       res.end(JSON.stringify(data));
       return res;
     };
+  }
+
+  if ((req.method || '').toUpperCase() === 'OPTIONS') {
+    res.statusCode = 204;
+    res.end();
+    return;
   }
 
   const rawAuth = req.headers['authorization'];

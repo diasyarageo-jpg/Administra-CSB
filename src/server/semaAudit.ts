@@ -85,6 +85,19 @@ export function parseSemaAuditTargetContext(raw: {
   };
 }
 
+function normalizeRoleLabel(rawRole: unknown): string {
+  const norm = String(rawRole || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLowerCase();
+  if (norm === 'administrador' || norm === 'admin') return 'Administrador';
+  if (norm === 'analista') return 'Analista';
+  if (norm === 'usuario') return 'Usuário';
+  if (norm === 'visualizador') return 'Visualizador';
+  return String(rawRole || '').trim();
+}
+
 export async function authorizeSemaLookupRequest(
   req: IncomingMessage & { headers?: Record<string, string | string[] | undefined> }
 ): Promise<SemaAuthContext> {
@@ -130,11 +143,54 @@ export async function authorizeSemaLookupRequest(
       };
     }
 
-    const { data: profile, error: profErr } = await supabaseAdmin
+    let profile: any = null;
+    let profErr: any = null;
+
+    const primaryRes = await supabaseAdmin
       .from('usuarios')
       .select('id, papel, situacao, status, auth_user_id')
       .eq('auth_user_id', userData.user.id)
       .maybeSingle();
+
+    profile = primaryRes.data;
+    profErr = primaryRes.error;
+
+    // Compatibilidade com bases onde a coluna `status` ainda não foi criada
+    if (profErr) {
+      const fallbackColRes = await supabaseAdmin
+        .from('usuarios')
+        .select('id, papel, situacao, auth_user_id')
+        .eq('auth_user_id', userData.user.id)
+        .maybeSingle();
+      profile = fallbackColRes.data;
+      profErr = fallbackColRes.error;
+    }
+
+    // Fallback por e-mail institucional quando auth_user_id ainda estiver nulo no cadastro
+    if (!profile && !profErr && userData.user.email) {
+      const cleanEmail = String(userData.user.email).trim();
+      if (cleanEmail) {
+        const emailQuery = supabaseAdmin
+          .from('usuarios')
+          .select('id, papel, situacao, auth_user_id');
+        if (typeof (emailQuery as any).ilike === 'function') {
+          const byEmailRes = await (emailQuery as any).ilike('email', cleanEmail).maybeSingle();
+          if (byEmailRes?.data && !byEmailRes?.error) {
+            profile = byEmailRes.data;
+            if (!profile.auth_user_id && profile.id) {
+              try {
+                await supabaseAdmin
+                  .from('usuarios')
+                  .update({ auth_user_id: userData.user.id, updated_at: new Date().toISOString() })
+                  .eq('id', profile.id);
+              } catch {
+                // Vinculação automática é melhor-esforço
+              }
+            }
+          }
+        }
+      }
+    }
 
     if (profErr || !profile) {
       return {
@@ -148,8 +204,11 @@ export async function authorizeSemaLookupRequest(
       };
     }
 
-    const isActive = profile.situacao ? profile.situacao === 'Ativo' : profile.status === 'Ativo';
-    const role = String(profile.papel || '');
+    const rawSituacao = String(profile.situacao ?? profile.status ?? '')
+      .trim()
+      .toLowerCase();
+    const isActive = rawSituacao === 'ativo';
+    const role = normalizeRoleLabel(profile.papel);
     const allowedRoles = ['Administrador', 'Analista', 'Usuário', 'Visualizador'];
 
     if (!isActive || !allowedRoles.includes(role)) {

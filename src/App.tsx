@@ -38,6 +38,11 @@ import { BarragensMinimap } from './components/BarragensMinimap';
 import { GeoportalSyncModal } from './components/GeoportalSyncModal';
 import { EmpreendedorDocumentosSemaModal } from './components/EmpreendedorDocumentosSemaModal';
 import { VisualizacaoModal } from './components/VisualizacaoModal';
+import {
+  ConciliacaoCadastrosView,
+  computeConciliacaoPendencias
+} from './components/ConciliacaoCadastrosView';
+import { parseCoordAdvanced } from './services/coordService';
 
 // ============================================================================
 // NOTIFICA CSB — AVISO DE TRANSIÇÃO E ARQUITETURA DE DADOS
@@ -399,6 +404,23 @@ export default function App() {
     summaries: MigrationSummary[];
   } | null>(null);
   const [confirmLocalClear, setConfirmLocalClear] = useState(false);
+  const [externalIntegrations, setExternalIntegrations] = useState<
+    Array<{
+      sistema: 'Notifica' | 'Classifica' | 'Fiscaliza';
+      descricao: string;
+      configurado: boolean;
+      variaveis: Array<{
+        nome: string;
+        rotulo: string;
+        tipo: 'url' | 'secret';
+        configurada: boolean;
+        formatoValido: boolean;
+      }>;
+    }>
+  >([]);
+  const [loadingIntegrations, setLoadingIntegrations] = useState(false);
+  const [integrationsError, setIntegrationsError] = useState<string | null>(null);
+  const [integrationsCheckedAt, setIntegrationsCheckedAt] = useState<string | null>(null);
 
   // Identificação responsiva da tela (mobile / tablet / desktop)
   const [screenType, setScreenType] = useState<'mobile' | 'tablet' | 'desktop'>(() => {
@@ -428,6 +450,39 @@ export default function App() {
   useEffect(() => {
     setListPage(1);
   }, [activeView, searchTerms, usuarioSituacaoFilter]);
+
+  const fetchExternalIntegrationsStatus = async () => {
+    setLoadingIntegrations(true);
+    setIntegrationsError(null);
+    try {
+      const headers: Record<string, string> = { Accept: 'application/json' };
+      if (isSupabaseConfigured() && supabase) {
+        const { data } = await supabase.auth.getSession();
+        const token = data?.session?.access_token;
+        if (token) {
+          headers.Authorization = `Bearer ${token}`;
+        }
+      }
+      const res = await fetch('/api/integracoes-status', { method: 'GET', headers });
+      const payload = await res.json().catch(() => null);
+      if (!res.ok || !payload?.sistemas) {
+        setIntegrationsError(payload?.error || `Falha ao verificar integrações (HTTP ${res.status}).`);
+        return;
+      }
+      setExternalIntegrations(payload.sistemas);
+      setIntegrationsCheckedAt(payload.verificadoEm || new Date().toISOString());
+    } catch (err: any) {
+      setIntegrationsError(err?.message || 'Erro de comunicação ao verificar variáveis de integração.');
+    } finally {
+      setLoadingIntegrations(false);
+    }
+  };
+
+  useEffect(() => {
+    if (activeView === 'integracao') {
+      fetchExternalIntegrationsStatus();
+    }
+  }, [activeView]);
 
   // Inicialização do Supabase Auth e verificação de sessão (sem carregar dados operacionais antes do login)
   useEffect(() => {
@@ -1101,7 +1156,11 @@ export default function App() {
     }
   };
 
-  const pendingReviewsCount = db.revisoes.filter((item: any) => item.situacao === 'Pendente').length;
+  const conciliacaoPendencias = computeConciliacaoPendencias(db.empreendedores, db.barragens);
+  const pendingReviewsCount =
+    db.revisoes.filter((item: any) => item.situacao === 'Pendente').length +
+    conciliacaoPendencias.empreendedoresSemBarragens.length +
+    conciliacaoPendencias.barragensSemEmpreendedor.length;
 
   // Se o Supabase estiver configurado e o usuário NÃO estiver autenticado ou seu perfil não for Ativo:
   // Renderiza EXCLUSIVAMENTE a página de login isolada (sem carregar dados ou telas do sistema)
@@ -1914,7 +1973,37 @@ export default function App() {
                                     value = resolveDamEmpreendimento(record.empreendimento, linkedEmp?.empreendimentos || []).displayName;
                                   }
                                   if (activeView === 'barragens' && field === 'municipio') {
-                                    value = record.municipio ? `${record.municipio}${record.municipioIbge ? ` (${record.municipioIbge})` : ''}` : '—';
+                                    const municipioText = record.municipio
+                                      ? `${record.municipio}${record.municipioIbge ? ` (${record.municipioIbge})` : ''}`
+                                      : '—';
+                                    const formatCoordGms = (rawCoord: any, isLng: boolean): string => {
+                                      const trimmed = String(rawCoord ?? '').trim();
+                                      if (!trimmed) return '';
+                                      const parsed = parseCoordAdvanced(trimmed, isLng);
+                                      return parsed.valido && parsed.gms ? parsed.gms : trimmed;
+                                    };
+                                    const latGms = formatCoordGms(record.latitude, false);
+                                    const lngGms = formatCoordGms(record.longitude, true);
+                                    const coordsGms =
+                                      latGms && lngGms
+                                        ? `${latGms} · ${lngGms}`
+                                        : latGms || lngGms || 'Coordenadas não informadas';
+
+                                    return (
+                                      <td key={field}>
+                                        <div>{municipioText}</div>
+                                        <span
+                                          className="td-sub"
+                                          style={{
+                                            fontFamily: 'monospace',
+                                            fontSize: '11px',
+                                            color: latGms || lngGms ? '#475569' : '#94a3b8'
+                                          }}
+                                        >
+                                          {coordsGms}
+                                        </span>
+                                      </td>
+                                    );
                                   }
                                   if (activeView === 'empreendedores' && field === 'municipio') {
                                     value = record.municipio ? `${record.municipio}${record.uf ? `/${record.uf}` : ''}` : '—';
@@ -2598,39 +2687,24 @@ export default function App() {
 
           {/* CONCILIAÇÃO DE CADASTROS */}
           {activeView === 'revisoes' && (
-            <div>
-              <div className="pagehead">
-                <div>
-                  <div className="eyebrow">Qualidade cadastral</div>
-                  <h2>Conciliação de cadastros</h2>
-                  <p>Área prevista para comparar registros de origens diferentes e registrar uma decisão explícita.</p>
-                </div>
-                <div className="actions">
-                  <button
-                    className="btn light"
-                    onClick={() => showToast('A entrada de registros será habilitada na etapa de integração.')}
-                  >
-                    Adicionar comparação
-                  </button>
-                </div>
-              </div>
-
-              <div className="notice slate" style={{ marginBottom: '14px' }}>
-                Não há sistemas conectados nem registros importados. Nenhuma comparação ou cadastro demonstrativo foi criado.
-              </div>
-
-              <div className="panel">
-                <div className="panel-head">
-                  <h3>Revisões pendentes e concluídas</h3>
-                  <span className="badge gray">{db.revisoes.length} registros</span>
-                </div>
-                <div className="empty">
-                  <div className="empty-icon">⇄</div>
-                  <b>Nenhuma revisão cadastrada</b>
-                  <p>Quando houver registros de fontes distintas, a comparação deverá exibir origem e diferenças sem apagar os dados originais.</p>
-                </div>
-              </div>
-            </div>
+            <ConciliacaoCadastrosView
+              empreendedores={db.empreendedores}
+              barragens={db.barragens}
+              revisoes={db.revisoes}
+              userRole={userRole}
+              currentAuthUserId={currentAuthUser?.id}
+              onViewRecord={(key, record, originalIndex) =>
+                setViewingRecord({ key, record, index: originalIndex })
+              }
+              onEditRecord={(key, originalIndex) =>
+                handleOpenRecordModal(key, originalIndex)
+              }
+              onArchiveRecord={(key, originalIndex) =>
+                handleArchiveRecord(key, originalIndex)
+              }
+              onConsultarSemaEmpreendedor={record => setEmpreendedorSemaModal(record)}
+              onOpenGeoportalSync={() => setShowGeoportalSyncModal(true)}
+            />
           )}
 
           {/* DOCUMENTOS (CATÁLOGO CENTRAL) */}
@@ -2852,6 +2926,127 @@ export default function App() {
                         Limpar dados locais do navegador
                       </button>
                     </div>
+                  </div>
+                </div>
+              </div>
+
+              {/* INTEGRAÇÃO COM OS DEMAIS SISTEMAS (NOTIFICA, CLASSIFICA, FISCALIZA) */}
+              <div className="panel" style={{ marginBottom: '20px' }}>
+                <div className="panel-head">
+                  <div>
+                    <h3>Credenciais de Integração dos Demais Sistemas</h3>
+                    <small style={{ color: '#64748b' }}>
+                      Leitura dinâmica das variáveis de servidor para Notifica, Classifica e Fiscaliza (sem expor chaves no código ou no navegador).
+                    </small>
+                  </div>
+                  <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
+                    <button
+                      type="button"
+                      className="btn light small"
+                      onClick={() => {
+                        const pendingVars = externalIntegrations
+                          .flatMap(sys => sys.variaveis)
+                          .filter(v => !v.configurada || !v.formatoValido)
+                          .map(v => `${v.nome}=`);
+                        const fallbackVars = [
+                          'NOTIFICA_SUPABASE_URL=',
+                          'NOTIFICA_SUPABASE_SERVICE_ROLE_KEY=',
+                          'CLASSIFICA_SUPABASE_URL=',
+                          'CLASSIFICA_SUPABASE_SERVICE_ROLE_KEY=',
+                          'FISCALIZA_SUPABASE_URL=',
+                          'FISCALIZA_SUPABASE_SERVICE_ROLE_KEY='
+                        ];
+                        const content = (pendingVars.length > 0 ? pendingVars : fallbackVars).join('\n');
+                        if (navigator.clipboard?.writeText) {
+                          navigator.clipboard.writeText(content).then(
+                            () => showToast('Nomes das variáveis copiados (preencha os valores no Vercel / .env).'),
+                            () => showToast('Não foi possível copiar para a área de transferência.')
+                          );
+                        }
+                      }}
+                    >
+                      Copiar nomes (.env)
+                    </button>
+                    <button
+                      type="button"
+                      className="btn light small"
+                      disabled={loadingIntegrations}
+                      onClick={() => fetchExternalIntegrationsStatus()}
+                    >
+                      {loadingIntegrations ? 'Verificando...' : 'Verificar variáveis no servidor'}
+                    </button>
+                  </div>
+                </div>
+                <div className="panel-body">
+                  <div className="notice slate" style={{ marginBottom: '14px', fontSize: '11px' }}>
+                    Por segurança, as chaves de acesso (<code>service_role</code>) dos sistemas consumidores são configuradas exclusivamente nas variáveis de ambiente do servidor (<code>.env</code> / Vercel) e nunca são exibidas ou gravadas no navegador.
+                    {integrationsCheckedAt && (
+                      <span style={{ display: 'block', marginTop: '4px', color: '#475569' }}>
+                        Última verificação no servidor: {new Date(integrationsCheckedAt).toLocaleString('pt-BR')}
+                      </span>
+                    )}
+                  </div>
+
+                  {integrationsError && (
+                    <div className="notice amber" style={{ marginBottom: '14px', fontSize: '11px' }}>
+                      {integrationsError}
+                    </div>
+                  )}
+
+                  <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(260px, 1fr))', gap: '14px' }}>
+                    {externalIntegrations.map(sys => (
+                      <div
+                        key={sys.sistema}
+                        style={{
+                          padding: '14px',
+                          borderRadius: '10px',
+                          background: '#f8fafc',
+                          border: `1px solid ${sys.configurado ? '#a7f3d0' : '#e2e8f0'}`
+                        }}
+                      >
+                        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px', gap: '8px' }}>
+                          <strong style={{ fontSize: '13px', color: '#0f172a' }}>{sys.sistema}</strong>
+                          <span className={`badge ${sys.configurado ? 'green' : 'amber'}`}>
+                            {sys.configurado ? 'Configurado no servidor' : 'Pendente no ambiente'}
+                          </span>
+                        </div>
+                        <p style={{ margin: '0 0 10px', fontSize: '11px', color: '#64748b' }}>
+                          {sys.descricao}
+                        </p>
+                        <div style={{ display: 'grid', gap: '6px' }}>
+                          {sys.variaveis.map(v => (
+                            <div
+                              key={v.nome}
+                              style={{
+                                display: 'flex',
+                                justifyContent: 'space-between',
+                                alignItems: 'center',
+                                gap: '8px',
+                                padding: '6px 8px',
+                                borderRadius: '6px',
+                                background: '#ffffff',
+                                border: '1px solid #e2e8f0',
+                                fontSize: '11px'
+                              }}
+                            >
+                              <div style={{ minWidth: 0 }}>
+                                <div style={{ fontFamily: 'monospace', fontWeight: 600, color: '#0f172a', wordBreak: 'break-all' }}>
+                                  {v.nome}
+                                </div>
+                                <div style={{ fontSize: '10px', color: '#64748b' }}>{v.rotulo}</div>
+                              </div>
+                              <span className={`badge ${v.configurada && v.formatoValido ? 'green' : v.configurada ? 'red' : 'gray'}`}>
+                                {v.configurada && v.formatoValido
+                                  ? 'Configurada'
+                                  : v.configurada
+                                  ? 'Formato inválido'
+                                  : 'Pendente'}
+                              </span>
+                            </div>
+                          ))}
+                        </div>
+                      </div>
+                    ))}
                   </div>
                 </div>
               </div>

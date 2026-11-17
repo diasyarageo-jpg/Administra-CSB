@@ -32,15 +32,54 @@ getMatoGrossoMunicipios()
 const SEMA_LOOKUP_STORAGE_PREFIX = 'administra:sema_consulta:v1:';
 const semaLookupMemoryStore = new Map<string, unknown>();
 
-async function getOptionalAuthHeaders(): Promise<Record<string, string>> {
+async function getOptionalAuthHeaders(forceRefresh = false): Promise<Record<string, string>> {
   if (!isSupabaseConfigured() || !supabase) return {};
   try {
     const { data } = await supabase.auth.getSession();
-    const token = data?.session?.access_token;
+    let session = data?.session;
+
+    const expiresAtMs = session?.expires_at ? Number(session.expires_at) * 1000 : 0;
+    const isNearExpiry = Boolean(expiresAtMs && expiresAtMs - Date.now() < 60_000);
+
+    if ((forceRefresh || isNearExpiry || !session?.access_token) && session) {
+      const { data: refreshed } = await supabase.auth.refreshSession().catch(() => ({ data: null }));
+      if (refreshed?.session) {
+        session = refreshed.session;
+      }
+    }
+
+    const token = session?.access_token;
     return token ? { Authorization: `Bearer ${token}` } : {};
   } catch {
     return {};
   }
+}
+
+async function parseApiJsonOrText<T = any>(
+  res: Response
+): Promise<{ data: T | null; rawText: string }> {
+  const rawText = await res.text().catch(() => '');
+  if (!rawText) {
+    return { data: null, rawText: '' };
+  }
+  try {
+    return { data: JSON.parse(rawText) as T, rawText };
+  } catch {
+    return { data: null, rawText };
+  }
+}
+
+function buildHttpFallbackErrorMessage(status: number, rawText: string, defaultLabel: string): string {
+  const trimmed = String(rawText || '').trim();
+  if (status === 403) {
+    if (/allowedHosts|Blocked request/i.test(trimmed)) {
+      return `${defaultLabel} (HTTP 403 — host da requisição bloqueado no servidor).`;
+    }
+    if (/<html/i.test(trimmed)) {
+      return `${defaultLabel} (HTTP 403 — acesso bloqueado por proteção/proxy do servidor).`;
+    }
+  }
+  return `${defaultLabel} (HTTP ${status}).`;
 }
 
 const UUID_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
@@ -280,21 +319,29 @@ export async function consultarCarPorCoordenada(
       params.set('entidadeAlvoId', targetContext.entidadeAlvoId);
     }
 
-    const authHeaders = await getOptionalAuthHeaders();
-    const res = await fetch(`/api/car-lookup?${params.toString()}`, {
-      method: 'GET',
-      headers: {
-        Accept: 'application/json',
-        ...authHeaders
-      }
-    });
+    const doFetch = async (forceRefresh: boolean) => {
+      const authHeaders = await getOptionalAuthHeaders(forceRefresh);
+      return await fetch(`/api/car-lookup?${params.toString()}`, {
+        method: 'GET',
+        headers: {
+          Accept: 'application/json',
+          ...authHeaders
+        }
+      });
+    };
 
-    const data: CarLookupApiResponse = await res.json().catch(() => ({
+    let res = await doFetch(false);
+    if (res.status === 401 && isSupabaseConfigured()) {
+      res = await doFetch(true);
+    }
+
+    const { data: parsedData, rawText } = await parseApiJsonOrText<CarLookupApiResponse>(res);
+    const data: CarLookupApiResponse = parsedData || {
       encontrado: false,
       feicoes: [],
       consultadoEm: new Date().toISOString(),
-      error: `Resposta inválida do servidor (HTTP ${res.status}).`
-    }));
+      error: buildHttpFallbackErrorMessage(res.status, rawText, 'Erro ao consultar Geoportal SEMA-MT')
+    };
 
     if (!res.ok || data.error) {
       return {
@@ -312,7 +359,9 @@ export async function consultarCarPorCoordenada(
           ? data.camadasConsultadas
           : undefined,
         consultadoEm: data.consultadoEm || new Date().toISOString(),
-        mensagemErro: data.error || `Erro ao consultar Geoportal (HTTP ${res.status}).`
+        mensagemErro:
+          data.error ||
+          buildHttpFallbackErrorMessage(res.status, rawText, 'Erro ao consultar Geoportal SEMA-MT')
       };
     }
 
@@ -423,52 +472,64 @@ export async function consultarDocumentosSema(
   }
 
   try {
-    let res: Response;
-    const authHeaders = await getOptionalAuthHeaders();
     const usePost = Boolean(
       cleanDoc || cars.length > 0 || processos.length > 0 || coordenadas.length > 0 || nome
     );
 
-    if (usePost) {
-      res = await fetch('/api/sema-documentos', {
-        method: 'POST',
-        headers: {
-          'Content-Type': 'application/json',
-          Accept: 'application/json',
-          ...authHeaders
-        },
-        body: JSON.stringify({
-          ...(cleanDoc ? { cpfCnpj: cleanDoc } : {}),
-          ...(car ? { car } : {}),
-          ...(cars.length > 0 ? { cars } : {}),
-          ...(processo ? { processo } : {}),
-          ...(processos.length > 0 ? { processos } : {}),
-          ...(coordenadas.length > 0 ? { coordenadas } : {}),
-          ...(nome ? { nome } : {}),
-          ...(useExploratoryName ? { buscaExploratoria: true } : {}),
-          ...(entidadeAlvoTipo ? { entidadeAlvoTipo } : {}),
-          ...(entidadeAlvoId ? { entidadeAlvoId } : {})
-        })
-      });
-    } else {
+    const doFetch = async (forceRefresh: boolean): Promise<Response> => {
+      const authHeaders = await getOptionalAuthHeaders(forceRefresh);
+      if (usePost) {
+        return await fetch('/api/sema-documentos', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Accept: 'application/json',
+            ...authHeaders
+          },
+          body: JSON.stringify({
+            ...(cleanDoc ? { cpfCnpj: cleanDoc } : {}),
+            ...(car ? { car } : {}),
+            ...(cars.length > 0 ? { cars } : {}),
+            ...(processo ? { processo } : {}),
+            ...(processos.length > 0 ? { processos } : {}),
+            ...(coordenadas.length > 0 ? { coordenadas } : {}),
+            ...(nome ? { nome } : {}),
+            ...(useExploratoryName ? { buscaExploratoria: true } : {}),
+            ...(entidadeAlvoTipo ? { entidadeAlvoTipo } : {}),
+            ...(entidadeAlvoId ? { entidadeAlvoId } : {})
+          })
+        });
+      }
+
       const params = new URLSearchParams();
       if (processo) params.set('processo', processo);
       if (car) params.set('car', car);
       if (entidadeAlvoTipo) params.set('entidadeAlvoTipo', entidadeAlvoTipo);
       if (entidadeAlvoId) params.set('entidadeAlvoId', entidadeAlvoId);
 
-      res = await fetch(`/api/sema-documentos?${params.toString()}`, {
+      return await fetch(`/api/sema-documentos?${params.toString()}`, {
         method: 'GET',
         headers: {
           Accept: 'application/json',
           ...authHeaders
         }
       });
+    };
+
+    let res = await doFetch(false);
+    if (res.status === 401 && isSupabaseConfigured()) {
+      res = await doFetch(true);
     }
 
-    const data = await res.json().catch(() => null);
+    const { data, rawText } = await parseApiJsonOrText<any>(res);
     if (!res.ok || !data || data.error) {
-      const errMsg = data?.error || `Falha ao consultar a base pública da SEMA-MT (HTTP ${res.status}).`;
+      const errMsg =
+        data?.error ||
+        buildHttpFallbackErrorMessage(
+          res.status,
+          rawText,
+          'Falha ao consultar a base pública da SEMA-MT'
+        );
       return {
         sucesso: false,
         criteriosUtilizados: {

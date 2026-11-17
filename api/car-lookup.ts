@@ -46,11 +46,15 @@ interface CamadaStatus {
 
 const WFS_URL = 'https://geo.sema.mt.gov.br/geoserver/wfs';
 const GEOSERVER_AUTHKEY =
-  process.env.SEMA_GEOSERVER_AUTHKEY ||
-  process.env.GEOSERVER_AUTHKEY ||
+  (process.env.SEMA_GEOSERVER_AUTHKEY || process.env.GEOSERVER_AUTHKEY || '').trim() ||
   '541085de-9a2e-454e-bdba-eb3d57a2f492';
 const CAR_LAYER = 'Geoportal:CAR_ATP';
 const CAR_REQUERIDO_LAYER = 'Geoportal:MVW_REQUERIMENTO_ATP';
+
+const SEMA_REQUEST_HEADERS: Record<string, string> = {
+  'User-Agent': 'Administra-CSB/1.0 (SEMA-MT; +https://geo.sema.mt.gov.br)',
+  Accept: 'application/json, application/xml, text/xml, */*'
+};
 
 const CACHE_TTL_MS = 10 * 60 * 1000;
 
@@ -72,7 +76,10 @@ async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Respons
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, { signal: controller.signal });
+    return await fetch(url, {
+      signal: controller.signal,
+      headers: SEMA_REQUEST_HEADERS
+    });
   } finally {
     clearTimeout(timer);
   }
@@ -347,7 +354,8 @@ async function queryLayerSpatial(
       const response = await fetchWithTimeout(url, 15000);
       lastHttpStatus = response.status;
 
-      if (response.status >= 500) {
+      if ((response.status === 429 || response.status >= 500) && attempt === 0) {
+        await new Promise(resolve => setTimeout(resolve, 350));
         continue;
       }
 
@@ -473,6 +481,11 @@ export default async function handler(
       res.end(JSON.stringify(data));
       return res;
     };
+  }
+
+  if ((req.method || '').toUpperCase() === 'OPTIONS') {
+    res.status(204)!.end();
+    return;
   }
 
   if (req.method && req.method !== 'GET') {

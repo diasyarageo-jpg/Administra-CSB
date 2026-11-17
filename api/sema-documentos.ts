@@ -58,9 +58,13 @@ interface CoordPoint {
 const WFS_URL = 'https://geo.sema.mt.gov.br/geoserver/wfs';
 const WMS_OWS_URL = 'https://geo.sema.mt.gov.br/geoserver/ows';
 const GEOSERVER_AUTHKEY =
-  process.env.SEMA_GEOSERVER_AUTHKEY ||
-  process.env.GEOSERVER_AUTHKEY ||
+  (process.env.SEMA_GEOSERVER_AUTHKEY || process.env.GEOSERVER_AUTHKEY || '').trim() ||
   '541085de-9a2e-454e-bdba-eb3d57a2f492';
+
+const SEMA_REQUEST_HEADERS: Record<string, string> = {
+  'User-Agent': 'Administra-CSB/1.0 (SEMA-MT; +https://geo.sema.mt.gov.br)',
+  Accept: 'application/json, application/xml, text/xml, */*'
+};
 
 const CACHE_TTL_MS = 10 * 60 * 1000;
 
@@ -98,10 +102,30 @@ async function fetchWithTimeout(url: string, timeoutMs: number): Promise<Respons
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), timeoutMs);
   try {
-    return await fetch(url, { signal: controller.signal });
+    return await fetch(url, {
+      signal: controller.signal,
+      headers: SEMA_REQUEST_HEADERS
+    });
   } finally {
     clearTimeout(timer);
   }
+}
+
+async function mapWithConcurrency<T, R>(
+  items: readonly T[],
+  limit: number,
+  worker: (item: T, index: number) => Promise<R>
+): Promise<R[]> {
+  const results = new Array<R>(items.length);
+  let nextIdx = 0;
+  const runners = Array.from({ length: Math.min(limit, Math.max(1, items.length)) }, async () => {
+    while (nextIdx < items.length) {
+      const current = nextIdx++;
+      results[current] = await worker(items[current], current);
+    }
+  });
+  await Promise.all(runners);
+  return results;
 }
 
 function isTimeoutError(err: any): boolean {
@@ -969,31 +993,54 @@ async function executeGetFeatureRequest(
     params.set('propertyName', propertyNames.join(','));
   }
 
-  try {
-    const resp = await fetchWithTimeout(`${WFS_URL}?${params.toString()}`, 14000);
-    const text = await resp.text();
+  const requestUrl = `${WFS_URL}?${params.toString()}`;
+  let lastHttpStatus: number | undefined;
+  let lastTimeout = false;
 
-    if (!resp.ok || /ExceptionReport/i.test(text)) {
-      const isFilterIncompatible =
-        resp.status === 400 || /cql|filter|property|column|syntax|parse/i.test(text);
-      return {
-        ok: false,
-        features: [],
-        isFilterIncompatible,
-        httpStatus: resp.status
-      };
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      lastTimeout = false;
+      const resp = await fetchWithTimeout(requestUrl, 14000);
+      lastHttpStatus = resp.status;
+
+      if ((resp.status === 429 || resp.status >= 500) && attempt === 0) {
+        await new Promise(resolve => setTimeout(resolve, 350));
+        continue;
+      }
+
+      const text = await resp.text();
+
+      if (!resp.ok || /ExceptionReport/i.test(text)) {
+        const isFilterIncompatible =
+          resp.status === 400 || /cql|filter|property|column|syntax|parse/i.test(text);
+        return {
+          ok: false,
+          features: [],
+          isFilterIncompatible,
+          httpStatus: resp.status
+        };
+      }
+
+      const data = JSON.parse(text);
+      const features = Array.isArray(data?.features) ? data.features : [];
+      return { ok: true, features };
+    } catch (err: any) {
+      if (isTimeoutError(err)) {
+        lastTimeout = true;
+      }
+      if (attempt === 0) {
+        await new Promise(resolve => setTimeout(resolve, 250));
+        continue;
+      }
     }
-
-    const data = JSON.parse(text);
-    const features = Array.isArray(data?.features) ? data.features : [];
-    return { ok: true, features };
-  } catch (err: any) {
-    return {
-      ok: false,
-      features: [],
-      isTimeout: isTimeoutError(err)
-    };
   }
+
+  return {
+    ok: false,
+    features: [],
+    isTimeout: lastTimeout,
+    httpStatus: lastHttpStatus
+  };
 }
 
 export default async function handler(
@@ -1015,6 +1062,10 @@ export default async function handler(
   }
 
   const method = (req.method || 'GET').toUpperCase();
+  if (method === 'OPTIONS') {
+    res.status(204)!.end();
+    return;
+  }
   if (method !== 'GET' && method !== 'POST') {
     res.status(405)!.json!({
       error: 'Método não permitido.'
@@ -1206,8 +1257,10 @@ export default async function handler(
     outros: [] as any[]
   };
 
-  const layerResults = await Promise.all(
-    TARGET_LAYERS.map(async target => {
+  const layerResults = await mapWithConcurrency(
+    TARGET_LAYERS,
+    4,
+    async target => {
       const capWfs = capResult.wfsLayers.get(target.name);
       const capWms = capResult.wmsLayers.get(target.name);
       const layerTitle = capWfs?.title || capWms?.title || target.name;
@@ -1298,6 +1351,7 @@ export default async function handler(
         const firstErr = responses[0]?.res;
         const isFilterIncompatible = Boolean(firstErr?.isFilterIncompatible);
         const isTimeout = Boolean(firstErr?.isTimeout);
+        const httpSuffix = firstErr?.httpStatus ? ` (HTTP ${firstErr.httpStatus})` : '';
         return {
           status: {
             camada: target.name,
@@ -1311,7 +1365,7 @@ export default async function handler(
               ? 'Critério de busca não compatível com esta base.'
               : isTimeout
               ? 'Tempo limite esgotado ao consultar esta base.'
-              : 'Falha de comunicação ao consultar esta base.'
+              : `Falha de comunicação ao consultar esta base${httpSuffix}.`
           },
           items: [] as any[]
         };
@@ -1371,7 +1425,7 @@ export default async function handler(
         },
         items
       };
-    })
+    }
   );
 
   const camadasConsultadas: CamadaStatus[] = [];
