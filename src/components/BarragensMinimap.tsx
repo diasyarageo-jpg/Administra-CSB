@@ -406,6 +406,7 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
   selectedDamId
 }) => {
   const mapContainerRef = useRef<HTMLDivElement | null>(null);
+  const selectedPanelRef = useRef<HTMLDivElement | null>(null);
   const mapInstanceRef = useRef<L.Map | null>(null);
   const markersLayerRef = useRef<L.LayerGroup | null>(null);
   const baseTileLayerRef = useRef<L.TileLayer | null>(null);
@@ -413,11 +414,14 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
   const stateBorderLayerRef = useRef<L.GeoJSON | null>(null);
   const municipalLayerRef = useRef<L.GeoJSON | null>(null);
   const searchPinMarkerRef = useRef<L.Marker | null>(null);
+  const isRebuildingLayersRef = useRef<boolean>(false);
+  const lastOpenedPopupDamIdRef = useRef<string | null>(null);
 
   // Inicie o mapa sempre na camada de "satélite"
   const [activeLayer, setActiveLayer] = useState<'satellite' | 'streets' | 'topo'>('satellite');
   const [selectedDam, setSelectedDam] = useState<ParsedDam | null>(null);
   const [isExpanded, setIsExpanded] = useState<boolean>(true);
+  const [mapZoom, setMapZoom] = useState<number>(6);
   const [catalogoDocs, setCatalogoDocs] = useState<DocumentoCatalogoItem[]>(propDocumentos || []);
   const [showMunicipalities, setShowMunicipalities] = useState<boolean>(true);
   const [showOuterMask, setShowOuterMask] = useState<boolean>(true);
@@ -696,6 +700,12 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
     });
   }, [mappedDams, searchNome, filterMunicipio, filterEmpreendedor, filterAnalista, activeSystems, advFilters]);
 
+  const handleCloseSelectedDam = () => {
+    setSelectedDam(null);
+    lastOpenedPopupDamIdRef.current = null;
+    mapInstanceRef.current?.closePopup();
+  };
+
   // Sincroniza seleção externa via selectedDamId
   useEffect(() => {
     if (selectedDamId) {
@@ -703,6 +713,35 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
       if (match) setSelectedDam(match);
     }
   }, [selectedDamId, mappedDams]);
+
+  // Fecha o quadro de informações apenas ao clicar fora do mapa/quadro ou pressionar Escape
+  useEffect(() => {
+    if (!selectedDam) return;
+
+    const handleDocumentClick = (event: MouseEvent) => {
+      const target = event.target as HTMLElement | null;
+      if (!target) return;
+
+      if (selectedPanelRef.current?.contains(target)) return;
+      if (target.closest('.leaflet-popup')) return;
+      if (mapContainerRef.current?.contains(target)) return;
+
+      handleCloseSelectedDam();
+    };
+
+    const handleKeyDown = (event: KeyboardEvent) => {
+      if (event.key === 'Escape') {
+        handleCloseSelectedDam();
+      }
+    };
+
+    document.addEventListener('click', handleDocumentClick);
+    document.addEventListener('keydown', handleKeyDown);
+    return () => {
+      document.removeEventListener('click', handleDocumentClick);
+      document.removeEventListener('keydown', handleKeyDown);
+    };
+  }, [selectedDam]);
 
   // Inicializa mapa Leaflet sempre na camada de Satélite
   useEffect(() => {
@@ -714,7 +753,16 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
         zoom: 6,
         minZoom: 4,
         maxZoom: 18,
-        scrollWheelZoom: true
+        scrollWheelZoom: true,
+        preferCanvas: true
+      });
+
+      map.on('zoomend', () => {
+        setMapZoom(Math.round(map.getZoom()));
+      });
+
+      map.on('click', () => {
+        handleCloseSelectedDam();
       });
 
       // 1. Camada Base: Sempre Satélite por padrão
@@ -728,20 +776,20 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
       // 2. Máscara Externa: Escurece suavemente tudo fora de Mato Grosso
       const maskLayer = L.geoJSON(MT_OUTER_MASK_GEOJSON as any, {
         style: {
-          fillColor: '#000000',
-          fillOpacity: 0.45,
+          fillColor: '#020617',
+          fillOpacity: 0.48,
           stroke: false
         },
         interactive: false
       }).addTo(map);
       outerMaskLayerRef.current = maskLayer;
 
-      // 3. Limite Estadual de Mato Grosso do IBGE destacado
+      // 3. Limite Estadual de Mato Grosso do IBGE em traço limpo
       const stateLayer = L.geoJSON(MT_STATE_GEOJSON as any, {
         style: {
           color: '#38bdf8',
-          weight: 2.5,
-          opacity: 0.95,
+          weight: 1.5,
+          opacity: 0.72,
           fillColor: 'transparent',
           fillOpacity: 0
         },
@@ -749,12 +797,12 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
       }).addTo(map);
       stateBorderLayerRef.current = stateLayer;
 
-      // 4. Grupo de Limites Municipais de Mato Grosso
+      // 4. Grupo de Limites Municipais de Mato Grosso (linhas finas e discretas)
       const munGroup = L.geoJSON(null, {
         style: {
-          color: '#ffffff',
-          weight: 1,
-          opacity: 0.5, // 50% de transparência
+          color: '#e2e8f0',
+          weight: 0.75,
+          opacity: 0.24,
           fillColor: 'transparent',
           fillOpacity: 0
         },
@@ -766,10 +814,16 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
             feature.properties?.id;
           if (munNome) {
             layer.bindTooltip(
-              `<div style="font-family: Inter, system-ui, sans-serif; font-size: 10px; font-weight: 700; color: #0f172a; padding: 2px 4px;">📍 Município: ${munNome}</div>`,
-              { sticky: true, opacity: 0.9 }
+              `<div style="font-family: 'Plus Jakarta Sans', Inter, system-ui, sans-serif; font-size: 10px; font-weight: 700; color: #0f172a; padding: 2px 4px;">${munNome}</div>`,
+              { sticky: true, opacity: 0.92, className: 'minimap-clean-tooltip' }
             );
           }
+          layer.on('mouseover', () => {
+            (layer as L.Path).setStyle({ weight: 1.25, opacity: 0.58 });
+          });
+          layer.on('mouseout', () => {
+            (layer as L.Path).setStyle({ weight: 0.75, opacity: 0.24 });
+          });
         }
       }).addTo(map);
       municipalLayerRef.current = munGroup;
@@ -863,58 +917,63 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
     }
   }, [activeLayer]);
 
-  // Atualiza marcadores das barragens no mapa com informações de documentos filtrados por sistemas
+  // Atualiza marcadores das barragens no mapa com pontos cartográficos limpos e proporcionais ao zoom
   useEffect(() => {
     const map = mapInstanceRef.current;
     const group = markersLayerRef.current;
     if (!map || !group) return;
 
+    isRebuildingLayersRef.current = true;
     group.clearLayers();
 
+    const baseRadius =
+      mapZoom <= 5
+        ? 3.5
+        : mapZoom === 6
+        ? 4.5
+        : mapZoom === 7
+        ? 5.5
+        : mapZoom <= 9
+        ? 6.5
+        : 7.5;
+
     const bounds = L.latLngBounds([]);
+    const selectedMarkers: L.CircleMarker[] = [];
 
     filteredMappedDams.forEach(dam => {
-      const isSelected = selectedDam?.raw.id === dam.raw.id || selectedDamId === dam.raw.id;
+      const damIdKey = String(dam.raw.id ?? `${dam.lat}_${dam.lon}`);
+      const isSelected =
+        (selectedDam && String(selectedDam.raw.id ?? `${selectedDam.lat}_${selectedDam.lon}`) === damIdKey) ||
+        (selectedDamId !== undefined && String(selectedDamId) === String(dam.raw.id));
       const color =
         dam.situacao === 'Ativa'
-          ? '#059669'
+          ? '#10b981'
           : dam.situacao === 'Inativa'
           ? '#64748b'
-          : '#d97706';
+          : '#f59e0b';
 
-      const size = isSelected ? 34 : 26;
+      const markerRadius = isSelected ? baseRadius + 2.5 : baseRadius;
 
-      const customIcon = L.divIcon({
-        className: 'custom-dam-marker',
-        html: `
-          <div style="
-            width: ${size}px;
-            height: ${size}px;
-            background: ${color};
-            border: ${isSelected ? '3px solid #ffffff' : '2px solid #ffffff'};
-            border-radius: 50% 50% 50% 0;
-            transform: rotate(-45deg);
-            box-shadow: 0 4px 10px rgba(0,0,0,0.5);
-            display: flex;
-            align-items: center;
-            justify-content: center;
-            cursor: pointer;
-            transition: transform 0.15s ease;
-          ">
-            <span style="
-              transform: rotate(45deg);
-              color: white;
-              font-size: ${isSelected ? 13 : 10}px;
-              font-weight: 900;
-              line-height: 1;
-            ">▤</span>
-          </div>
-        `,
-        iconSize: [size, size],
-        iconAnchor: [size / 2, size]
+      if (isSelected) {
+        L.circleMarker([dam.lat, dam.lon], {
+          radius: markerRadius + 5,
+          color: '#ffffff',
+          weight: 1.5,
+          opacity: 0.85,
+          fillColor: color,
+          fillOpacity: 0.25,
+          interactive: false
+        }).addTo(group);
+      }
+
+      const marker = L.circleMarker([dam.lat, dam.lon], {
+        radius: markerRadius,
+        color: '#ffffff',
+        weight: isSelected ? 2.25 : 1.25,
+        opacity: isSelected ? 1 : 0.92,
+        fillColor: color,
+        fillOpacity: isSelected ? 1 : 0.88
       });
-
-      const marker = L.marker([dam.lat, dam.lon], { icon: customIcon });
 
       // Filtra documentos pelos sistemas ativos
       const visibleDocs = dam.documentos.filter(d => {
@@ -929,17 +988,18 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
       const docsListHtml =
         visibleDocs.length > 0
           ? visibleDocs
+              .slice(0, 4)
               .map(
                 d => `
-                <div style="margin-top: 4px; padding: 3px 6px; background: rgba(15, 23, 42, 0.05); border-left: 3px solid ${d.color}; border-radius: 3px;">
+                <div style="margin-top: 4px; padding: 3px 6px; background: rgba(15, 23, 42, 0.04); border-left: 3px solid ${d.color}; border-radius: 3px;">
                   <div style="display: flex; align-items: baseline; justify-content: space-between; gap: 6px;">
-                    <strong style="color: ${d.color}; font-size: 10.5px;">${d.tipo}</strong>
-                    <span style="color: #64748b; font-size: 9.5px;">${formatDateBr(d.data)}</span>
+                    <strong style="color: ${d.color}; font-size: 10px;">${d.tipo}</strong>
+                    <span style="color: #64748b; font-size: 9px;">${formatDateBr(d.data)}</span>
                   </div>
                   <div style="color: #334155; font-size: 10px; font-weight: 600;">
                     ${d.numero ? `nº ${d.numero}` : d.titulo}
                   </div>
-                  <div style="display: flex; align-items: center; gap: 4px; font-size: 9px; color: #64748b; margin-top: 2px;">
+                  <div style="display: flex; align-items: center; gap: 4px; font-size: 9px; color: #64748b; margin-top: 1px;">
                     <span style="background: #e2e8f0; padding: 1px 4px; border-radius: 3px; font-weight: 700;">${d.origemSistema}</span>
                     <span>• ${d.situacao}</span>
                   </div>
@@ -949,53 +1009,111 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
               .join('')
           : '<div style="font-size: 10px; color: #94a3b8; font-style: italic; margin-top: 4px;">Nenhum documento ativo pelos sistemas selecionados</div>';
 
-      marker.bindTooltip(
-        `
-        <div style="font-family: Inter, system-ui, sans-serif; font-size: 11px; padding: 3px 4px; line-height: 1.35; max-width: 280px;">
-          <strong style="color: #0f172a; font-size: 12.5px; display: block; border-bottom: 1px solid #e2e8f0; padding-bottom: 3px; margin-bottom: 4px;">
+      const infoCardHtml = `
+        <div style="font-family: 'Plus Jakarta Sans', Inter, system-ui, sans-serif; font-size: 11px; padding: 2px 3px; line-height: 1.35; max-width: 265px;">
+          <strong style="color: #0f172a; font-size: 12px; display: block; border-bottom: 1px solid #e2e8f0; padding-bottom: 3px; margin-bottom: 4px; padding-right: 16px;">
             ${dam.nome}
           </strong>
-          <span style="color: #475569; display: block;">📍 ${dam.municipio}</span>
+          <span style="color: #475569; display: block;">${dam.municipio} / MT</span>
           <span style="color: #64748b; font-size: 10px; display: block;">Empreendedor: <b>${dam.empreendedorNome}</b></span>
+          <span style="color: #64748b; font-size: 10px; display: block;">GMS: <code>${decimalToGMS(dam.lat, false)} · ${decimalToGMS(dam.lon, true)}</code></span>
           <div style="margin-top: 3px;">
-            <span style="display: inline-block; padding: 1px 6px; border-radius: 4px; background: ${color}20; color: ${color}; font-weight: 700; font-size: 9px;">
+            <span style="display: inline-block; padding: 1px 6px; border-radius: 99px; background: ${color}1f; color: ${color}; font-weight: 700; font-size: 9px;">
               ${dam.situacao}
             </span>
           </div>
-
-          <div style="margin-top: 8px; border-top: 1px dashed #cbd5e1; padding-top: 6px;">
-            <div style="display: flex; align-items: center; justify-content: space-between; margin-bottom: 2px;">
-              <span style="font-weight: 800; font-size: 10.5px; color: #0284c7;">
-                📑 Documentos (${visibleDocs.length})
-              </span>
-              <span style="font-size: 9px; color: #64748b;">(mais recente → mais antigo)</span>
-            </div>
+          <div style="margin-top: 6px; border-top: 1px dashed #cbd5e1; padding-top: 5px;">
+            <span style="font-weight: 800; font-size: 10px; color: #0284c7; display: block; margin-bottom: 2px;">
+              Documentos (${visibleDocs.length})
+            </span>
             ${docsListHtml}
           </div>
         </div>
-        `,
-        {
-          direction: 'top',
-          offset: [0, -size + 4],
-          opacity: 0.98
-        }
-      );
+      `;
 
-      marker.on('click', () => {
+      marker.bindPopup(infoCardHtml, {
+        closeButton: true,
+        autoClose: true,
+        closeOnClick: false,
+        autoPan: false,
+        maxWidth: 290,
+        minWidth: 220,
+        offset: [0, -(markerRadius + 2)],
+        className: 'minimap-clean-popup'
+      });
+
+      if (!isSelected) {
+        marker.bindTooltip(infoCardHtml, {
+          direction: 'top',
+          offset: [0, -(markerRadius + 4)],
+          opacity: 0.98,
+          className: 'minimap-clean-tooltip'
+        });
+      }
+
+      marker.on('mouseover', () => {
+        if (marker.isPopupOpen()) {
+          marker.closeTooltip();
+        }
+        marker.setRadius(markerRadius + 2.5);
+        marker.setStyle({ weight: 2.25, fillOpacity: 1 });
+      });
+
+      marker.on('mouseout', () => {
+        marker.setRadius(markerRadius);
+        marker.setStyle({ weight: isSelected ? 2.25 : 1.25, fillOpacity: isSelected ? 1 : 0.88 });
+      });
+
+      marker.on('popupopen', () => {
+        marker.closeTooltip();
+      });
+
+      marker.on('popupclose', () => {
+        if (!isRebuildingLayersRef.current) {
+          setSelectedDam(curr => {
+            if (!curr) return null;
+            const currKey = String(curr.raw.id ?? `${curr.lat}_${curr.lon}`);
+            return currKey === damIdKey ? null : curr;
+          });
+          if (lastOpenedPopupDamIdRef.current === damIdKey) {
+            lastOpenedPopupDamIdRef.current = null;
+          }
+        }
+      });
+
+      marker.on('click', e => {
+        L.DomEvent.stopPropagation(e);
+        lastOpenedPopupDamIdRef.current = damIdKey;
         setSelectedDam(dam);
         map.panTo([dam.lat, dam.lon], { animate: true });
       });
 
       marker.addTo(group);
+      if (isSelected) {
+        selectedMarkers.push(marker);
+      }
       bounds.extend([dam.lat, dam.lon]);
     });
 
+    selectedMarkers.forEach(m => {
+      m.bringToFront();
+      m.openPopup();
+    });
+    isRebuildingLayersRef.current = false;
+  }, [filteredMappedDams, selectedDam?.raw.id, selectedDamId, activeSystems, mapZoom]);
+
+  // Ajusta o enquadramento apenas quando mudam os filtros ou a lista de barragens
+  useEffect(() => {
+    const map = mapInstanceRef.current;
+    if (!map) return;
+
     if (filteredMappedDams.length > 0 && !searchPinMarkerRef.current) {
-      map.fitBounds(bounds, { padding: [40, 40], maxZoom: 12 });
+      const bounds = L.latLngBounds(filteredMappedDams.map(d => [d.lat, d.lon]));
+      map.fitBounds(bounds, { padding: [36, 36], maxZoom: 12 });
     } else if (filteredMappedDams.length === 0 && !searchPinMarkerRef.current) {
       map.setView([-12.68, -55.9], 6);
     }
-  }, [filteredMappedDams, selectedDam?.raw.id, selectedDamId, activeSystems]);
+  }, [filteredMappedDams]);
 
   // Redimensionamento do mapa quando expande/recolhe
   useEffect(() => {
@@ -1403,7 +1521,7 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
                   background: showMunicipalities ? '#f1f5f9' : '#ffffff'
                 }}
               >
-                {showMunicipalities ? '✓ Municípios (50%)' : '○ Municípios'}
+                {showMunicipalities ? '✓ Municípios' : '○ Municípios'}
               </button>
 
               <button
@@ -1846,6 +1964,7 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
           >
             {selectedDam ? (
               <div
+                ref={selectedPanelRef}
                 style={{
                   background: '#f8fafc',
                   border: '1px solid #e2e8f0',
@@ -1921,7 +2040,7 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
                     <button
                       type="button"
                       className="iconbtn"
-                      onClick={() => setSelectedDam(null)}
+                      onClick={handleCloseSelectedDam}
                       title="Fechar resumo"
                     >
                       ✕
@@ -2072,26 +2191,27 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
                   style={{
                     display: 'flex',
                     alignItems: 'center',
-                    gap: '16px',
+                    flexWrap: 'wrap',
+                    gap: '12px 16px',
                     fontSize: '11px',
                     color: '#64748b'
                   }}
                 >
                   <span style={{ fontWeight: 600, color: '#334155' }}>Legenda:</span>
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
-                    <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#059669' }} /> Ativa
+                    <span style={{ width: '9px', height: '9px', borderRadius: '50%', background: '#10b981', border: '1.5px solid #ffffff', boxShadow: '0 0 0 1px #cbd5e1' }} /> Ativa
                   </span>
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
-                    <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#d97706' }} /> Em análise / Alerta
+                    <span style={{ width: '9px', height: '9px', borderRadius: '50%', background: '#f59e0b', border: '1.5px solid #ffffff', boxShadow: '0 0 0 1px #cbd5e1' }} /> Em análise / Alerta
                   </span>
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
-                    <span style={{ width: '8px', height: '8px', borderRadius: '50%', background: '#64748b' }} /> Inativa
-                  </span>
-                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px', marginLeft: '6px' }}>
-                    <span style={{ width: '12px', height: '3px', background: '#38bdf8', borderRadius: '2px' }} /> Limite MT (IBGE)
+                    <span style={{ width: '9px', height: '9px', borderRadius: '50%', background: '#64748b', border: '1.5px solid #ffffff', boxShadow: '0 0 0 1px #cbd5e1' }} /> Inativa
                   </span>
                   <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
-                    <span style={{ width: '12px', height: '1px', background: '#ffffff', opacity: 0.5, borderBottom: '1px solid #ffffff' }} /> Municípios MT (50%)
+                    <span style={{ width: '12px', height: '2px', background: '#38bdf8', borderRadius: '2px' }} /> Limite MT
+                  </span>
+                  <span style={{ display: 'inline-flex', alignItems: 'center', gap: '5px' }}>
+                    <span style={{ width: '12px', height: '1px', background: '#cbd5e1' }} /> Municípios MT
                   </span>
                 </div>
 

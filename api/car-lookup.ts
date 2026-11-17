@@ -147,6 +147,88 @@ function inspectConfirmedCpfCnpj(
   };
 }
 
+function haversineDistanceMeters(
+  lat1: number,
+  lng1: number,
+  lat2: number,
+  lng2: number
+): number {
+  const toRad = (deg: number) => (deg * Math.PI) / 180;
+  const R = 6371000;
+  const dLat = toRad(lat2 - lat1);
+  const dLng = toRad(lng2 - lng1);
+  const a =
+    Math.sin(dLat / 2) * Math.sin(dLat / 2) +
+    Math.cos(toRad(lat1)) * Math.cos(toRad(lat2)) * Math.sin(dLng / 2) * Math.sin(dLng / 2);
+  const c = 2 * Math.atan2(Math.sqrt(a), Math.sqrt(1 - a));
+  return R * c;
+}
+
+function collectGeometryVertices(geom: any, acc: Array<[number, number]>): void {
+  if (!geom || !geom.coordinates) return;
+  const pushPair = (coord: any) => {
+    if (Array.isArray(coord) && coord.length >= 2) {
+      const lng = Number(coord[0]);
+      const lat = Number(coord[1]);
+      if (Number.isFinite(lat) && Number.isFinite(lng)) {
+        acc.push([lng, lat]);
+      }
+    }
+  };
+  const walk = (node: any) => {
+    if (!Array.isArray(node)) return;
+    if (node.length >= 2 && typeof node[0] === 'number' && typeof node[1] === 'number') {
+      pushPair(node);
+      return;
+    }
+    for (const child of node) {
+      walk(child);
+    }
+  };
+  walk(geom.coordinates);
+}
+
+export function estimateGeometryDistanceMeters(
+  geom: any,
+  lat: number,
+  lng: number
+): number | null {
+  if (!geom || typeof geom !== 'object') return null;
+  const pts: Array<[number, number]> = [];
+  collectGeometryVertices(geom, pts);
+  if (pts.length === 0) return null;
+
+  let minDist = Infinity;
+  let sumLat = 0;
+  let sumLng = 0;
+  for (const [vLng, vLat] of pts) {
+    sumLat += vLat;
+    sumLng += vLng;
+    const d = haversineDistanceMeters(lat, lng, vLat, vLng);
+    if (d < minDist) minDist = d;
+  }
+  const centroidDist = haversineDistanceMeters(lat, lng, sumLat / pts.length, sumLng / pts.length);
+  const best = Math.min(minDist, centroidDist);
+  return Number.isFinite(best) ? Math.round(best) : null;
+}
+
+function buildProximityBboxCql(
+  geomField: string,
+  lat: number,
+  lng: number,
+  raioMetros: number
+): string {
+  const safeLat = Math.max(-85, Math.min(85, lat));
+  const deltaLat = raioMetros / 111320;
+  const cosLat = Math.max(0.2, Math.cos((safeLat * Math.PI) / 180));
+  const deltaLng = raioMetros / (111320 * cosLat);
+  const minLng = (lng - deltaLng).toFixed(6);
+  const minLat = (lat - deltaLat).toFixed(6);
+  const maxLng = (lng + deltaLng).toFixed(6);
+  const maxLat = (lat + deltaLat).toFixed(6);
+  return `BBOX(${geomField},${minLng},${minLat},${maxLng},${maxLat},'EPSG:4326')`;
+}
+
 async function queryLayerSpatial(
   layerName: string,
   layerTitle: string | undefined,
@@ -156,7 +238,11 @@ async function queryLayerSpatial(
   confirmedOwnerFields: string[],
   lat: number,
   lng: number,
-  maxFeatures: number
+  maxFeatures: number,
+  options?: {
+    incluirProximidade?: boolean;
+    raioMetros?: number;
+  }
 ): Promise<{
   status: CamadaStatus;
   features: any[];
@@ -164,7 +250,8 @@ async function queryLayerSpatial(
 }> {
   const cqlFilter = `INTERSECTS(${geomField},POINT(${lng} ${lat}))`;
 
-  const res = await executeSemaGetFeature({
+  let criterioUsado: 'INTERSECTS' | 'BBOX_PROXIMIDADE' = 'INTERSECTS';
+  let res = await executeSemaGetFeature({
     layerName,
     cqlFilter,
     propertyNames: [],
@@ -196,10 +283,36 @@ async function queryLayerSpatial(
     };
   }
 
-  const features = res.features.slice(0, maxFeatures).map((f: any) => {
+  let rawFeatures = res.features;
+  const raioMetros = Math.min(5000, Math.max(250, Number(options?.raioMetros || 1500)));
+  if (
+    rawFeatures.length === 0 &&
+    options?.incluirProximidade &&
+    layerName === CAR_LAYER
+  ) {
+    const bboxCql = buildProximityBboxCql(geomField, lat, lng, raioMetros);
+    const proxRes = await executeSemaGetFeature({
+      layerName,
+      cqlFilter: bboxCql,
+      propertyNames: [],
+      includeSrs4326: true,
+      maxFeatures
+    });
+    if (proxRes.ok && proxRes.features.length > 0) {
+      criterioUsado = 'BBOX_PROXIMIDADE';
+      rawFeatures = proxRes.features;
+    }
+  }
+
+  const consultadoEm = new Date().toISOString();
+  const mappedFeatures = rawFeatures.slice(0, maxFeatures).map((f: any) => {
     const rawProps = f.properties && typeof f.properties === 'object' ? f.properties : {};
     const docInspection = inspectConfirmedCpfCnpj(rawProps, confirmedDocFields, confirmedOwnerFields);
     const { docDigits, ...publicDocInspection } = docInspection;
+    const distMetros =
+      criterioUsado === 'INTERSECTS'
+        ? 0
+        : estimateGeometryDistanceMeters(f.geometry, lat, lng) ?? raioMetros;
     return {
       type: f.type || 'Feature',
       id: f.id,
@@ -210,27 +323,45 @@ async function queryLayerSpatial(
         camposConfirmados: confirmedNonGeomFields,
         ...publicDocInspection
       },
+      _spatialMeta: {
+        criterioEspacial: criterioUsado,
+        distanciaMetros: distMetros,
+        ...(criterioUsado === 'BBOX_PROXIMIDADE' ? { raioPesquisadoMetros: raioMetros } : {}),
+        camada: layerName,
+        fonte: 'SEMA-MT Geoportal (WFS Público)',
+        consultadoEm,
+        evidenciaNota:
+          'Evidência espacial apenas — a coordenada pode representar sede, vertedouro ou outra área do processo e não confirma vínculo automaticamente.'
+      },
       _auditDocDigits: docDigits,
       _rawProperties: rawProps,
       properties: preserveSemaProperties(rawProps, confirmedDocFields)
     };
   });
 
+  if (criterioUsado === 'BBOX_PROXIMIDADE') {
+    mappedFeatures.sort(
+      (a, b) => (a._spatialMeta?.distanciaMetros ?? 999999) - (b._spatialMeta?.distanciaMetros ?? 999999)
+    );
+  }
+
   return {
     status: {
       camada: layerName,
       titulo: layerTitle,
-      status: features.length > 0 ? 'consultada' : 'sem_resultados',
+      status: mappedFeatures.length > 0 ? 'consultada' : 'sem_resultados',
       suportado: true,
-      registrosEncontrados: features.length,
+      registrosEncontrados: mappedFeatures.length,
       camposPesquisados: [geomField],
       camposConfirmados: confirmedNonGeomFields,
       mensagem:
-        features.length > 0
-          ? `${features.length} imóvel(is) localizado(s) para a coordenada.`
+        mappedFeatures.length > 0
+          ? criterioUsado === 'BBOX_PROXIMIDADE'
+            ? `${mappedFeatures.length} imóvel(is) próximo(s) localizado(s) por BBOX (raio ~${raioMetros}m) para análise de evidência.`
+            : `${mappedFeatures.length} imóvel(is) localizado(s) por interseção direta para a coordenada.`
           : 'Consulta concluída sem imóveis para esta coordenada.'
     },
-    features,
+    features: mappedFeatures,
     isTimeout: false
   };
 }
@@ -276,6 +407,8 @@ export default async function handler(
   let rawLng: any = req.query?.lng;
   let rawTargetTipo: any = req.query?.entidadeAlvoTipo;
   let rawTargetId: any = req.query?.entidadeAlvoId;
+  let rawIncluirProximidade: any = req.query?.incluirProximidade;
+  let rawRaioMetros: any = req.query?.raioMetros;
 
   if (method === 'POST') {
     try {
@@ -284,6 +417,8 @@ export default async function handler(
       if (body.lng !== undefined) rawLng = body.lng;
       if (body.entidadeAlvoTipo !== undefined) rawTargetTipo = body.entidadeAlvoTipo;
       if (body.entidadeAlvoId !== undefined) rawTargetId = body.entidadeAlvoId;
+      if (body.incluirProximidade !== undefined) rawIncluirProximidade = body.incluirProximidade;
+      if (body.raioMetros !== undefined) rawRaioMetros = body.raioMetros;
     } catch (err: any) {
       res.status(400)!.json!({
         error: err?.message || 'Dados inválidos na requisição.'
@@ -291,7 +426,11 @@ export default async function handler(
       return;
     }
   } else if (
-    (rawLat === undefined || rawLng === undefined || rawTargetTipo === undefined || rawTargetId === undefined) &&
+    (rawLat === undefined ||
+      rawLng === undefined ||
+      rawTargetTipo === undefined ||
+      rawTargetId === undefined ||
+      rawIncluirProximidade === undefined) &&
     req.url
   ) {
     try {
@@ -300,8 +439,20 @@ export default async function handler(
       if (rawLng === undefined) rawLng = parsedUrl.searchParams.get('lng');
       if (rawTargetTipo === undefined) rawTargetTipo = parsedUrl.searchParams.get('entidadeAlvoTipo');
       if (rawTargetId === undefined) rawTargetId = parsedUrl.searchParams.get('entidadeAlvoId');
+      if (rawIncluirProximidade === undefined) {
+        rawIncluirProximidade = parsedUrl.searchParams.get('incluirProximidade');
+      }
+      if (rawRaioMetros === undefined) rawRaioMetros = parsedUrl.searchParams.get('raioMetros');
     } catch {}
   }
+
+  const incluirProximidade =
+    rawIncluirProximidade === true ||
+    rawIncluirProximidade === 'true' ||
+    rawIncluirProximidade === '1';
+  const raioMetrosParsed = Number(rawRaioMetros);
+  const raioMetros =
+    Number.isFinite(raioMetrosParsed) && raioMetrosParsed > 0 ? raioMetrosParsed : 1500;
 
   const targetCtx = parseSemaAuditTargetContext({
     entidadeAlvoTipo: rawTargetTipo,
@@ -410,7 +561,11 @@ export default async function handler(
         confirmedOwnerFields,
         lat,
         lng,
-        remaining
+        remaining,
+        {
+          incluirProximidade,
+          raioMetros
+        }
       );
 
       camadasConsultadas.push(queryRes.status);

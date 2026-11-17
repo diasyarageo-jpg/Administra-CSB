@@ -31,6 +31,16 @@ export interface FeatureSchemaMeta {
   cpfCnpjStatus: 'completo' | 'mascarado' | 'ausente';
 }
 
+export interface SpatialEvidenceMeta {
+  criterioEspacial: 'INTERSECTS' | 'BBOX_PROXIMIDADE';
+  distanciaMetros: number;
+  raioPesquisadoMetros?: number;
+  camada?: string;
+  fonte?: string;
+  consultadoEm?: string;
+  evidenciaNota?: string;
+}
+
 export interface CarGeoJsonFeature {
   type: string;
   id?: string;
@@ -39,6 +49,7 @@ export interface CarGeoJsonFeature {
   camadaOrigem?: string;
   auditoriaId?: string;
   _schemaMeta?: FeatureSchemaMeta;
+  _spatialMeta?: SpatialEvidenceMeta;
   properties: Record<string, any>;
 }
 
@@ -59,6 +70,10 @@ export interface CarFeatureMapped {
   apfNumero: string;
   numeroArt: string;
   modulosFiscais: string;
+  criterioEspacial?: 'INTERSECTS' | 'BBOX_PROXIMIDADE';
+  distanciaMetros?: number;
+  fonteEspacial?: string;
+  evidenciaNota?: string;
   camposConfirmadosEsquema?: string[];
   cpfCnpjCompletoDisponivel?: boolean;
   cpfCnpjCampoOrigem?: string;
@@ -112,6 +127,9 @@ export interface SemaDocumentoItem {
   carFederal?: string;
   areaHa?: string;
   atividade?: string;
+  criterioEspacial?: 'INTERSECTS' | 'BBOX_PROXIMIDADE';
+  distanciaMetros?: number;
+  observacaoEspacial?: string;
   correspondenciaExploratoria?: boolean;
   camposConfirmadosEsquema?: string[];
   cpfCnpjCompletoDisponivel?: boolean;

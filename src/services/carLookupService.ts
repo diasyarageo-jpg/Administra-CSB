@@ -109,6 +109,9 @@ function mapMappedCarFeatureToSemaItem(
     carFederal: feat.carFederal,
     areaHa: feat.areaHa ? `${feat.areaHa} ha` : undefined,
     atividade: feat.atividade,
+    criterioEspacial: feat.criterioEspacial,
+    distanciaMetros: feat.distanciaMetros,
+    observacaoEspacial: feat.evidenciaNota,
     camposConfirmadosEsquema: feat.camposConfirmadosEsquema,
     cpfCnpjCompletoDisponivel: feat.cpfCnpjCompletoDisponivel,
     cpfCnpjCampoOrigem: feat.cpfCnpjCampoOrigem,
@@ -310,6 +313,7 @@ export function mapPropertiesToCarFeature(feature: CarGeoJsonFeature): CarFeatur
   }
 
   const schemaMeta = feature?._schemaMeta;
+  const spatialMeta = feature?._spatialMeta;
 
   return {
     id: feature?.id ? String(feature.id) : undefined,
@@ -328,6 +332,10 @@ export function mapPropertiesToCarFeature(feature: CarGeoJsonFeature): CarFeatur
     apfNumero: extractFirstMatchingField(props, CAR_CAMPOS.apfNumero),
     numeroArt: extractFirstMatchingField(props, CAR_CAMPOS.numeroArt),
     modulosFiscais: extractFirstMatchingField(props, CAR_CAMPOS.modulosFiscais),
+    criterioEspacial: spatialMeta?.criterioEspacial,
+    distanciaMetros: spatialMeta?.distanciaMetros,
+    fonteEspacial: spatialMeta?.fonte,
+    evidenciaNota: spatialMeta?.evidenciaNota,
     camposConfirmadosEsquema: Array.isArray(schemaMeta?.camposConfirmados)
       ? schemaMeta.camposConfirmados
       : undefined,
@@ -347,6 +355,8 @@ export async function consultarCarPorCoordenada(
   targetContext?: {
     entidadeAlvoTipo?: 'barragem' | 'empreendedor' | 'car';
     entidadeAlvoId?: string;
+    incluirProximidade?: boolean;
+    raioMetros?: number;
   }
 ): Promise<CarLookupResult> {
   const latRes = parseCoordAdvanced(latInput, false);
@@ -392,6 +402,12 @@ export async function consultarCarPorCoordenada(
     if (targetContext?.entidadeAlvoId) {
       params.set('entidadeAlvoId', targetContext.entidadeAlvoId);
     }
+    if (targetContext?.incluirProximidade) {
+      params.set('incluirProximidade', 'true');
+    }
+    if (targetContext?.raioMetros) {
+      params.set('raioMetros', String(targetContext.raioMetros));
+    }
 
     const doFetchGet = async (forceRefresh: boolean) => {
       const authHeaders = await getOptionalAuthHeaders(forceRefresh);
@@ -423,7 +439,9 @@ export async function consultarCarPorCoordenada(
             : {}),
           ...(targetContext?.entidadeAlvoId
             ? { entidadeAlvoId: targetContext.entidadeAlvoId }
-            : {})
+            : {}),
+          ...(targetContext?.incluirProximidade ? { incluirProximidade: true } : {}),
+          ...(targetContext?.raioMetros ? { raioMetros: targetContext.raioMetros } : {})
         })
       });
     };

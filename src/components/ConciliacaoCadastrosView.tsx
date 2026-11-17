@@ -2,8 +2,14 @@ import React, { useMemo, useState, useEffect } from 'react';
 import {
   BarragemRecord,
   EmpreendedorRecord,
+  PortariaRecord,
+  ResponsavelTecnicoRecord,
   getEmpreendedorVinculos
 } from '../services/notificaDataService';
+import {
+  BarragemDocumentoEmitidoItem,
+  carregarDocumentosEmitidosPorBarragens
+} from '../services/documentosService';
 import { PaginationBar, PageSizeOption, paginateList } from './PaginationBar';
 import { UserRole } from '../types/auth';
 import { parseCoordAdvanced } from '../services/coordService';
@@ -21,6 +27,18 @@ import {
   AdvancedFilterField,
   AdvancedFilterToggleButton
 } from './AdvancedFilterPanel';
+import {
+  CONCILIACAO_ACAO_LABELS,
+  CONCILIACAO_CLASSIFICACAO_LABELS,
+  RtParecerPendencia,
+  analisarPareceresRtPendentes,
+  detectarMultiplasBarragensMesmoCar,
+  parseRevisaoConciliacaoDetalhes
+} from '../utils/conciliacaoEngine';
+import {
+  ConciliacaoAssistidaModal,
+  ConciliacaoDecisaoSubmission
+} from './ConciliacaoAssistidaModal';
 
 export interface IndexedItem<T> {
   record: T;
@@ -146,38 +164,48 @@ export function computeConciliacaoPendencias(
 interface ConciliacaoCadastrosViewProps {
   empreendedores: EmpreendedorRecord[];
   barragens: BarragemRecord[];
+  rts?: ResponsavelTecnicoRecord[];
+  portarias?: PortariaRecord[];
   revisoes: any[];
   userRole: UserRole;
   currentAuthUserId?: string;
+  currentAuthUserName?: string;
   onViewRecord: (key: 'empreendedores' | 'barragens', record: any, originalIndex: number) => void;
   onEditRecord: (key: 'empreendedores' | 'barragens', originalIndex: number) => void;
   onArchiveRecord: (key: 'empreendedores' | 'barragens', originalIndex: number) => void;
   onConsultarSemaEmpreendedor: (record: EmpreendedorRecord) => void;
   onOpenGeoportalSync?: () => void;
+  onRegistrarConciliacao?: (
+    submission: ConciliacaoDecisaoSubmission
+  ) => Promise<{ success: boolean; error?: string }>;
 }
 
-type ConciliacaoTab = 'todos' | 'empreendedores' | 'barragens' | 'revisoes';
+type ConciliacaoTab = 'todos' | 'empreendedores' | 'barragens' | 'rts_parecer' | 'revisoes';
 type SituacaoFiltro = 'todos' | 'ativos' | 'inativos';
 
 function getSituacaoBadgeClass(situacao?: string): string {
   const s = normalizeMatchText(situacao);
-  if (s === 'ativo' || s === 'confirmado' || s === 'regular') return 'green';
+  if (s === 'ativo' || s === 'confirmado' || s === 'regular' || s === 'conciliado') return 'green';
   if (s === 'inativo' || s === 'arquivado') return 'gray';
-  if (s === 'recusado') return 'red';
+  if (s === 'recusado' || s === 'rejeitado') return 'red';
   return 'amber';
 }
 
 export const ConciliacaoCadastrosView: React.FC<ConciliacaoCadastrosViewProps> = ({
   empreendedores,
   barragens,
+  rts = [],
+  portarias = [],
   revisoes,
   userRole,
   currentAuthUserId,
+  currentAuthUserName,
   onViewRecord,
   onEditRecord,
   onArchiveRecord,
   onConsultarSemaEmpreendedor,
-  onOpenGeoportalSync
+  onOpenGeoportalSync,
+  onRegistrarConciliacao
 }) => {
   const [activeTab, setActiveTab] = useState<ConciliacaoTab>('todos');
   const [searchTerm, setSearchTerm] = useState('');
@@ -188,10 +216,51 @@ export const ConciliacaoCadastrosView: React.FC<ConciliacaoCadastrosViewProps> =
   const [empPageSize, setEmpPageSize] = useState<PageSizeOption>(20);
   const [damPage, setDamPage] = useState<number>(1);
   const [damPageSize, setDamPageSize] = useState<PageSizeOption>(20);
+  const [docsPorBarragem, setDocsPorBarragem] = useState<
+    Record<string, BarragemDocumentoEmitidoItem[]>
+  >({});
+  const [docsLoaded, setDocsLoaded] = useState<boolean>(false);
+  const [investigandoBarragem, setInvestigandoBarragem] =
+    useState<BarragemSemEmpreendedorItem | null>(null);
+  const [investigandoRtPendencia, setInvestigandoRtPendencia] =
+    useState<RtParecerPendencia | null>(null);
+  const [expandedRevId, setExpandedRevId] = useState<string | null>(null);
 
   const { empreendedoresSemBarragens, barragensSemEmpreendedor } = useMemo(
     () => computeConciliacaoPendencias(empreendedores, barragens),
     [empreendedores, barragens]
+  );
+
+  useEffect(() => {
+    let active = true;
+    if (!barragens || barragens.length === 0) {
+      setDocsPorBarragem({});
+      setDocsLoaded(true);
+      return;
+    }
+    carregarDocumentosEmitidosPorBarragens(barragens, { portarias })
+      .then(map => {
+        if (active) {
+          setDocsPorBarragem(map || {});
+          setDocsLoaded(true);
+        }
+      })
+      .catch(() => {
+        if (active) setDocsLoaded(true);
+      });
+    return () => {
+      active = false;
+    };
+  }, [barragens, portarias]);
+
+  const pareceresRtPendentes = useMemo(
+    () =>
+      analisarPareceresRtPendentes({
+        barragens,
+        rts,
+        documentosPorBarragem: docsPorBarragem
+      }),
+    [barragens, rts, docsPorBarragem]
   );
 
   useEffect(() => {
@@ -265,6 +334,16 @@ export const ConciliacaoCadastrosView: React.FC<ConciliacaoCadastrosViewProps> =
     });
   }, [barragensSemEmpreendedor, normalizedSearch, situacaoFiltro, advFilters]);
 
+  const filteredRtPendencias = useMemo(() => {
+    if (!normalizedSearch) return pareceresRtPendentes;
+    return pareceresRtPendentes.filter(p => {
+      const haystack = normalizeMatchText(
+        `${p.barragemNome} ${p.processo || ''} ${p.car || ''} ${p.documentoTipo} ${p.documentoNumero || ''} ${p.citacao.rtNome || ''} ${p.citacao.artNumero || ''}`
+      );
+      return haystack.includes(normalizedSearch);
+    });
+  }, [pareceresRtPendentes, normalizedSearch]);
+
   const filteredRevisoes = useMemo(() => {
     return (Array.isArray(revisoes) ? revisoes : []).filter(rev =>
       matchesConciliacaoRevisaoAdvanced(rev, searchTerm, advFilters)
@@ -288,7 +367,10 @@ export const ConciliacaoCadastrosView: React.FC<ConciliacaoCadastrosViewProps> =
 
   const empPagination = paginateList(filteredEmps, empPage, empPageSize);
   const damPagination = paginateList(filteredDams, damPage, damPageSize);
-  const totalPendencias = empreendedoresSemBarragens.length + barragensSemEmpreendedor.length;
+  const totalPendencias =
+    empreendedoresSemBarragens.length +
+    barragensSemEmpreendedor.length +
+    pareceresRtPendentes.length;
 
   return (
     <div>
@@ -339,10 +421,15 @@ export const ConciliacaoCadastrosView: React.FC<ConciliacaoCadastrosViewProps> =
           </div>
           <div className="stat-ico">▤</div>
         </div>
-        <div className="stat">
+        <div
+          className="stat"
+          style={{ cursor: 'pointer', borderColor: activeTab === 'rts_parecer' ? '#047857' : undefined }}
+          onClick={() => setActiveTab('rts_parecer')}
+          title="Conciliar RTs e ARTs citados em Pareceres sem vínculo estruturado"
+        >
           <div>
-            <div className="label">Vínculos sugeridos (nome/doc)</div>
-            <div className="value">{suggestedDamMatchesCount}</div>
+            <div className="label">Pareceres x RT/ART</div>
+            <div className="value">{pareceresRtPendentes.length}</div>
           </div>
           <div className="stat-ico">⇄</div>
         </div>
@@ -378,6 +465,7 @@ export const ConciliacaoCadastrosView: React.FC<ConciliacaoCadastrosViewProps> =
                 ['todos', `Todas as pendências (${totalPendencias})`],
                 ['empreendedores', `Empreendedores (${empreendedoresSemBarragens.length})`],
                 ['barragens', `Barragens (${barragensSemEmpreendedor.length})`],
+                ['rts_parecer', `Pareceres x RT (${pareceresRtPendentes.length})`],
                 ['revisoes', `Revisões (${revisoes.length})`]
               ] as Array<[ConciliacaoTab, string]>
             ).map(([tabKey, label]) => {
@@ -862,6 +950,21 @@ export const ConciliacaoCadastrosView: React.FC<ConciliacaoCadastrosViewProps> =
                           <span style={{ fontFamily: 'monospace', fontSize: '12px' }}>
                             {record.car || '—'}
                           </span>
+                          {(() => {
+                            const carInfo = detectarMultiplasBarragensMesmoCar(record, barragens);
+                            if (!carInfo.avisoMultiplasBarragens) return null;
+                            return (
+                              <div style={{ marginTop: '3px' }}>
+                                <span
+                                  className="badge amber"
+                                  style={{ fontSize: '10px', whiteSpace: 'normal', wordBreak: 'normal', overflowWrap: 'normal' }}
+                                  title={carInfo.mensagem}
+                                >
+                                  {carInfo.totalBarragensNoMesmoCar} barragens neste CAR
+                                </span>
+                              </div>
+                            );
+                          })()}
                         </td>
                         <td>
                           {record.municipio ? `${record.municipio}${record.uf ? `/${record.uf}` : ''}` : record.uf || '—'}
@@ -893,7 +996,7 @@ export const ConciliacaoCadastrosView: React.FC<ConciliacaoCadastrosViewProps> =
                               <span className="badge blue" style={{ width: 'fit-content', whiteSpace: 'normal', wordBreak: 'normal', overflowWrap: 'normal', lineHeight: 1.3 }}>
                                 Correspondência: {suggestedEmpreendedorName}
                               </span>
-                              <span className="micro muted">Texto sem ID formal — abra para confirmar vínculo</span>
+                              <span className="micro muted">Texto sem ID formal — investigue para confirmar</span>
                             </div>
                           ) : brokenReference ? (
                             <span className="badge red">ID vinculado ausente na base</span>
@@ -913,6 +1016,18 @@ export const ConciliacaoCadastrosView: React.FC<ConciliacaoCadastrosViewProps> =
                         </td>
                         <td>
                           <div className="row-actions">
+                            <button
+                              type="button"
+                              className="iconbtn"
+                              style={{ color: '#0369a1', fontWeight: 700 }}
+                              title="Investigar evidências, SEMA/MT e decidir conciliação"
+                              onClick={e => {
+                                e.stopPropagation();
+                                setInvestigandoBarragem(item);
+                              }}
+                            >
+                              Conciliar / Investigar
+                            </button>
                             <button
                               type="button"
                               className="iconbtn"
@@ -980,6 +1095,103 @@ export const ConciliacaoCadastrosView: React.FC<ConciliacaoCadastrosViewProps> =
         </div>
       )}
 
+      {(activeTab === 'rts_parecer' ||
+        (activeTab === 'todos' && pareceresRtPendentes.length > 0)) && (
+        <div className="panel" style={{ marginBottom: '16px' }}>
+          <div className="panel-head">
+            <div>
+              <h3>Conciliação de Pareceres x RTs e ARTs estruturados</h3>
+              <small style={{ color: '#64748b' }}>
+                Compara RT/ART citados em pareceres técnicos/de classificação com os vínculos em <code>responsaveis_tecnicos_barragens</code>. Ausência de RT em Notificações e Ofícios não é tratada como divergência.
+              </small>
+            </div>
+            <span className="badge amber">
+              {docsLoaded ? `${filteredRtPendencias.length} pendências` : 'Analisando documentos...'}
+            </span>
+          </div>
+
+          {filteredRtPendencias.length > 0 ? (
+            <div className="tablewrap">
+              <table>
+                <thead>
+                  <tr>
+                    <th>Barragem / Processo</th>
+                    <th>Parecer de origem</th>
+                    <th>RT / ART citado</th>
+                    <th>Classificação sugerida</th>
+                    <th>Ações</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {filteredRtPendencias.map((pend, idx) => (
+                    <tr
+                      key={pend.id}
+                      className={idx % 2 === 0 ? 'row-even' : 'row-odd'}
+                    >
+                      <td className="td-main" style={{ whiteSpace: 'normal', maxWidth: '240px' }}>
+                        <div>{pend.barragemNome}</div>
+                        <span className="td-sub">
+                          {[pend.processo ? `Proc.: ${pend.processo}` : '', pend.car ? `CAR: ${pend.car}` : '']
+                            .filter(Boolean)
+                            .join(' · ')}
+                        </span>
+                      </td>
+                      <td style={{ whiteSpace: 'normal', maxWidth: '260px', fontSize: '12px' }}>
+                        <div style={{ fontWeight: 600 }}>
+                          {pend.documentoTipo}
+                          {pend.documentoNumero ? ` nº ${pend.documentoNumero}` : ''}
+                        </div>
+                        <div className="td-sub">
+                          {pend.documentoTitulo} ({pend.documentoOrigem})
+                        </div>
+                      </td>
+                      <td style={{ whiteSpace: 'normal', maxWidth: '240px', fontSize: '12px' }}>
+                        <div>
+                          <b>RT:</b> {pend.citacao.rtNome || '—'}
+                        </div>
+                        <div>
+                          <b>ART:</b> {pend.citacao.artNumero || '—'}
+                        </div>
+                        {pend.candidatosRtMestre.length > 0 && (
+                          <div className="td-sub" style={{ color: '#0369a1' }}>
+                            {pend.candidatosRtMestre.length} candidato(s) no cadastro mestre
+                          </div>
+                        )}
+                      </td>
+                      <td>
+                        <span className="badge amber">
+                          {CONCILIACAO_CLASSIFICACAO_LABELS[pend.classificacaoSugerida]}
+                        </span>
+                      </td>
+                      <td>
+                        <div className="row-actions">
+                          <button
+                            type="button"
+                            className="iconbtn"
+                            style={{ color: '#0369a1', fontWeight: 700 }}
+                            onClick={() => setInvestigandoRtPendencia(pend)}
+                          >
+                            Conciliar RT / ART
+                          </button>
+                        </div>
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+            </div>
+          ) : (
+            <div className="empty">
+              <div className="empty-icon">⇄</div>
+              <b>Nenhuma pendência entre Pareceres e RTs</b>
+              <p>
+                Todos os pareceres com citação de RT/ART possuem vínculo correspondente ou não há pareceres pendentes de conciliação.
+              </p>
+            </div>
+          )}
+        </div>
+      )}
+
       {(activeTab === 'revisoes' || (activeTab === 'todos' && revisoes.length > 0)) && (
         <div className="panel">
           <div className="panel-head">
@@ -992,22 +1204,80 @@ export const ConciliacaoCadastrosView: React.FC<ConciliacaoCadastrosViewProps> =
                 <thead>
                   <tr>
                     <th>Entidade / Origem</th>
-                    <th>Descrição</th>
+                    <th>Descrição / Auditoria</th>
                     <th>Situação</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {filteredRevisoes.map((rev: any, i: number) => (
-                    <tr key={rev.id || i} className={i % 2 === 0 ? 'row-even' : 'row-odd'}>
-                      <td className="td-main">{rev.entidade || rev.origem || rev.tipo || 'Revisão'}</td>
-                      <td>{rev.descricao || rev.motivo || rev.detalhes || rev.divergencias || '—'}</td>
-                      <td>
-                        <span className={`badge ${getSituacaoBadgeClass(rev.situacao)}`}>
-                          {rev.situacao || 'Pendente'}
-                        </span>
-                      </td>
-                    </tr>
-                  ))}
+                  {filteredRevisoes.map((rev: any, i: number) => {
+                    const parsed = parseRevisaoConciliacaoDetalhes(rev);
+                    const s = parsed.structured;
+                    const revKey = String(rev.id || i);
+                    const isExpanded = expandedRevId === revKey;
+
+                    return (
+                      <React.Fragment key={revKey}>
+                        <tr
+                          className={`${i % 2 === 0 ? 'row-even' : 'row-odd'} row-interactive`}
+                          onClick={() =>
+                            setExpandedRevId(isExpanded ? null : revKey)
+                          }
+                          title="Clique para expandir detalhes auditados"
+                        >
+                          <td className="td-main" style={{ whiteSpace: 'normal', maxWidth: '260px' }}>
+                            <div>{rev.entidade || rev.identificador || rev.origem || rev.tipo || 'Revisão'}</div>
+                            {s && (
+                              <span className="td-sub">
+                                {CONCILIACAO_CLASSIFICACAO_LABELS[s.classificacao]} ·{' '}
+                                {CONCILIACAO_ACAO_LABELS[s.acao]}
+                              </span>
+                            )}
+                          </td>
+                          <td style={{ whiteSpace: 'normal' }}>
+                            <div>{parsed.resumoTexto}</div>
+                            {s && (
+                              <div className="micro muted" style={{ marginTop: '2px' }}>
+                                Fonte: {s.fonte} · Usuário: {s.usuario} ·{' '}
+                                {new Date(s.dataDecisao).toLocaleString('pt-BR')}
+                              </div>
+                            )}
+                          </td>
+                          <td>
+                            <span className={`badge ${getSituacaoBadgeClass(rev.situacao)}`}>
+                              {rev.situacao || 'Pendente'}
+                            </span>
+                          </td>
+                        </tr>
+                        {isExpanded && s && (
+                          <tr className={i % 2 === 0 ? 'row-even' : 'row-odd'}>
+                            <td colSpan={3} style={{ background: '#f8fafc', fontSize: '11px', lineHeight: 1.5 }}>
+                              <div><b>Valor anterior:</b> {s.valorAnterior}</div>
+                              <div><b>Valor proposto:</b> {s.valorProposto}</div>
+                              <div><b>Justificativa:</b> {s.justificativa}</div>
+                              <div>
+                                <b>Evidências:</b>{' '}
+                                {[
+                                  s.evidencias.processo ? `Proc. ${s.evidencias.processo}` : '',
+                                  s.evidencias.car ? `CAR ${s.evidencias.car}` : '',
+                                  s.evidencias.multiplasBarragensNoCar && s.evidencias.multiplasBarragensNoCar > 1
+                                    ? `${s.evidencias.multiplasBarragensNoCar} barragens no mesmo CAR`
+                                    : '',
+                                  s.evidencias.semaConsultada
+                                    ? `SEMA: ${s.evidencias.semaCriterioEspacial || 'Consultada'} (${s.evidencias.semaCamada || 'Geoportal'})`
+                                    : 'Sem consulta espacial SEMA',
+                                  s.evidencias.semaIndisponivelMotivo
+                                    ? `SEMA indisponível: ${s.evidencias.semaIndisponivelMotivo}`
+                                    : ''
+                                ]
+                                  .filter(Boolean)
+                                  .join(' · ')}
+                              </div>
+                            </td>
+                          </tr>
+                        )}
+                      </React.Fragment>
+                    );
+                  })}
                 </tbody>
               </table>
             </div>
@@ -1020,6 +1290,60 @@ export const ConciliacaoCadastrosView: React.FC<ConciliacaoCadastrosViewProps> =
           )}
         </div>
       )}
+
+      {investigandoBarragem && (
+        <ConciliacaoAssistidaModal
+          mode="barragem_empreendedor"
+          barragemItem={investigandoBarragem}
+          barragemTarget={investigandoBarragem.record}
+          todasBarragens={barragens}
+          empreendedores={empreendedores}
+          rts={rts}
+          portarias={portarias}
+          currentUserName={currentAuthUserName || 'Usuário'}
+          readOnly={userRole === 'Visualizador'}
+          onClose={() => setInvestigandoBarragem(null)}
+          onSubmitDecisao={async submission => {
+            if (!onRegistrarConciliacao) {
+              return {
+                success: false,
+                error: 'Manipulador de gravação de conciliação não conectado.'
+              };
+            }
+            return await onRegistrarConciliacao(submission);
+          }}
+        />
+      )}
+
+      {investigandoRtPendencia && (() => {
+        const dam = barragens.find(
+          b => String(b.id) === String(investigandoRtPendencia.barragemId)
+        );
+        if (!dam) return null;
+        return (
+          <ConciliacaoAssistidaModal
+            mode="barragem_rt_parecer"
+            rtPendencia={investigandoRtPendencia}
+            barragemTarget={dam}
+            todasBarragens={barragens}
+            empreendedores={empreendedores}
+            rts={rts}
+            portarias={portarias}
+            currentUserName={currentAuthUserName || 'Usuário'}
+            readOnly={userRole === 'Visualizador'}
+            onClose={() => setInvestigandoRtPendencia(null)}
+            onSubmitDecisao={async submission => {
+              if (!onRegistrarConciliacao) {
+                return {
+                  success: false,
+                  error: 'Manipulador de gravação de conciliação não conectado.'
+                };
+              }
+              return await onRegistrarConciliacao(submission);
+            }}
+          />
+        );
+      })()}
     </div>
   );
 };
