@@ -21,7 +21,7 @@ import type {
 import type { BarragemDocumentoEmitidoItem } from '../services/documentosService';
 import { parseCoordAdvanced } from '../services/coordService';
 import { supabase, isSupabaseConfigured } from '../services/supabaseClient';
-import { maskCpfCnpjDisplay } from '../config/carCampos';
+import { extractNormalizedCarMatchKeys, maskCpfCnpjDisplay } from '../config/carCampos';
 
 export type AtorPapel =
   | 'proprietario_titular'
@@ -116,11 +116,12 @@ export interface EmpreendedorCandidatoSugestao {
   criterio:
     | 'id_exato'
     | 'cpf_cnpj_exato'
-    | 'nome_exato_sem_doc'
-    | 'nome_semelhante_sem_doc'
     | 'car_em_empreendimento';
   similaridade: number;
   possuiIdentificadorForte: boolean;
+  papelOriginal?: AtorPapel;
+  papeisOrigem?: AtorPapel[];
+  carCoincidente?: string;
   classificacaoSugerida: ConciliacaoClassificacao;
   motivo: string;
 }
@@ -182,8 +183,11 @@ export interface NotificacaoProcessoEntrada {
   empreendedorNome?: string;
   empreendedorDocumento?: string;
   responsavelAreaNome?: string;
+  responsavelAreaDocumento?: string;
   arrendatarioNome?: string;
+  arrendatarioDocumento?: string;
   proprietarioNome?: string;
+  proprietarioDocumento?: string;
   tipoDocumento?: string;
   resumo?: string;
 }
@@ -242,6 +246,24 @@ export function normalizeCarKey(value: unknown): string {
   const s = String(value || '').trim().toUpperCase();
   if (!s || ['NAN', 'NULL', 'UNDEFINED'].includes(s)) return '';
   return s.replace(/[^A-Z0-9]/g, '');
+}
+
+function buildCarMatchSet(value: unknown): Set<string> {
+  const out = new Set<string>();
+  const raw = String(value || '').trim();
+  if (!raw) return out;
+  for (const k of extractNormalizedCarMatchKeys(raw)) {
+    const compact = k.replace(/[^A-Z0-9]/g, '');
+    if (compact.length >= 4) out.add(compact);
+  }
+  const simple = normalizeCarKey(raw);
+  if (
+    simple.length >= 6 &&
+    !['NAOINFORMADO', 'NAOPOSSUI', 'SEMCAR', 'PENDENTE'].includes(simple)
+  ) {
+    out.add(simple);
+  }
+  return out;
 }
 
 function levenshteinDistance(a: string, b: string): number {
@@ -446,26 +468,26 @@ function extractLabeledActorsFromText(
   if (!text) return;
   const patterns: Array<{ regex: RegExp; papel: AtorPapel; note?: string }> = [
     {
-      regex: /(?:notificad[oa]|autuad[oa]|destinat[aá]ri[oa])\s*[:\-–]\s*([^;\n|()]{3,90})/gi,
+      regex: /(?:notificad[oa]|autuad[oa]|destinat[aá]ri[oa])\s*[:\-–]\s*([^;\n|]{3,120})/gi,
       papel: 'notificado',
-      note: 'Pessoa notificada — não presumir como empreendedora ou proprietária.'
+      note: 'Pessoa notificada — manter papel explícito e não presumir empreendedora automaticamente.'
     },
     {
-      regex: /(?:respons[aá]vel\s+pel[ao]\s+[aá]rea|gestor\s+da\s+[aá]rea|prepost[oa])\s*[:\-–]\s*([^;\n|()]{3,90})/gi,
+      regex: /(?:respons[aá]vel\s+pel[ao]\s+[aá]rea|gestor\s+da\s+[aá]rea|prepost[oa])\s*[:\-–]\s*([^;\n|]{3,120})/gi,
       papel: 'responsavel_area',
       note: 'Responsável pela área — papel distinto de proprietário/titular e empreendedor.'
     },
     {
-      regex: /(?:arrendat[aá]ri[oa]|comodat[aá]ri[oa]|ocupante)\s*[:\-–]\s*([^;\n|()]{3,90})/gi,
+      regex: /(?:arrendat[aá]ri[oa]|comodat[aá]ri[oa]|ocupante)\s*[:\-–]\s*([^;\n|]{3,120})/gi,
       papel: 'arrendatario',
       note: 'Arrendatário — não confundir com proprietário/titular do imóvel.'
     },
     {
-      regex: /(?:propriet[aá]ri[oa]|titular(?:\s+do\s+im[oó]vel)?)\s*[:\-–]\s*([^;\n|()]{3,90})/gi,
+      regex: /(?:propriet[aá]ri[oa]|titular(?:\s+do\s+im[oó]vel)?)\s*[:\-–]\s*([^;\n|]{3,120})/gi,
       papel: 'proprietario_titular'
     },
     {
-      regex: /(?:empreendedor(?:a)?)\s*[:\-–]\s*([^;\n|()]{3,90})/gi,
+      regex: /(?:empreendedor(?:a)?)\s*[:\-–]\s*([^;\n|]{3,120})/gi,
       papel: 'empreendedor'
     }
   ];
@@ -473,7 +495,19 @@ function extractLabeledActorsFromText(
   for (const { regex, papel, note } of patterns) {
     let m: RegExpExecArray | null;
     while ((m = regex.exec(text)) !== null) {
-      pushAtorIfValid(list, seen, m[1], papel, origem, undefined, note);
+      const segment = String(m[1] || '').trim();
+      const docMatch =
+        segment.match(/\b\d{2}\.\d{3}\.\d{3}\/\d{4}-\d{2}\b/) ||
+        segment.match(/\b\d{3}\.\d{3}\.\d{3}-\d{2}\b/) ||
+        segment.match(/(?<![\d/.\-xX*])(\d{14}|\d{11})(?![\d/.\-xX*])/);
+      const rawDoc = docMatch?.[0];
+      const cleanName = segment
+        .replace(/\(\s*(?:CPF|CNPJ)?\s*[:\-]?\s*[\d./\-]+\s*\)/gi, '')
+        .replace(/\b(?:CPF|CNPJ)\s*[:\-]?\s*[\d./\-]+\b/gi, '')
+        .replace(/\([^)]*\)/g, '')
+        .replace(/\s+/g, ' ')
+        .trim();
+      pushAtorIfValid(list, seen, cleanName || segment, papel, origem, rawDoc, note);
     }
   }
 }
@@ -549,7 +583,7 @@ export function extrairAtoresDoProcesso(params: {
         notif.responsavelAreaNome,
         'responsavel_area',
         origem,
-        undefined,
+        notif.responsavelAreaDocumento,
         'Responsável pela área citado no processo — papel distinto do empreendedor/proprietário.'
       );
     }
@@ -560,7 +594,7 @@ export function extrairAtoresDoProcesso(params: {
         notif.arrendatarioNome,
         'arrendatario',
         origem,
-        undefined,
+        notif.arrendatarioDocumento,
         'Arrendatário — distinto do proprietário/titular.'
       );
     }
@@ -570,7 +604,8 @@ export function extrairAtoresDoProcesso(params: {
         seen,
         notif.proprietarioNome,
         'proprietario_titular',
-        origem
+        origem,
+        notif.proprietarioDocumento
       );
     }
     if (notif.empreendedorNome) {
@@ -599,16 +634,19 @@ export function extrairAtoresDoProcesso(params: {
 
 /**
  * Sugere candidatos de Empreendedor no cadastro mestre Administra para investigação humana.
- * Nunca assume que "notificado" ou "responsável pela área" é empreendedor.
- * Quando há apenas nome semelhante sem CPF/CNPJ ou ID forte, classifica como `possivel_erro_grafia`
- * ou `candidato` com `possuiIdentificadorForte: false`.
+ * - Notificado, responsável pela área e arrendatário PODEM gerar candidatos quando possuírem
+ *   CPF/CNPJ exato ou CAR/MT coincidente, mantendo explícito o papel original e sem vincular automaticamente.
+ * - Somente CPF/CNPJ normalizado exato ou CAR/MT coincidente gera candidato; nome semelhante/idêntico
+ *   isolado sem um desses identificadores NÃO gera candidato.
  */
 export function encontrarCandidatosEmpreendedor(params: {
   barragem: BarragemRecord;
   empreendedores: EmpreendedorRecord[];
   atoresDoProcesso?: AtorExtraidoProcesso[];
+  barragensDoEmpreendedor?: BarragemRecord[];
   semaTitularNome?: string;
   semaDocDigits?: string;
+  semaCar?: string;
 }): {
   candidatos: EmpreendedorCandidatoSugestao[];
   classificacaoInicial: ConciliacaoClassificacao;
@@ -618,8 +656,10 @@ export function encontrarCandidatosEmpreendedor(params: {
     barragem,
     empreendedores = [],
     atoresDoProcesso = [],
+    barragensDoEmpreendedor = [],
     semaTitularNome,
-    semaDocDigits
+    semaDocDigits,
+    semaCar
   } = params;
 
   const atoresEmpreendimento = atoresDoProcesso.filter(a => a.presunivelEmpreendedor);
@@ -627,7 +667,6 @@ export function encontrarCandidatosEmpreendedor(params: {
     a => a.papel === 'notificado' || a.papel === 'responsavel_area' || a.papel === 'arrendatario'
   );
 
-  const damCarNorm = normalizeCarKey(barragem?.car);
   const legacyRaw = String(barragem?.empreendedor || '').trim();
   const legacyDigits = cleanOnlyDigits(legacyRaw);
   const semaDigits = cleanOnlyDigits(semaDocDigits);
@@ -636,18 +675,39 @@ export function encontrarCandidatosEmpreendedor(params: {
   if (legacyRaw && !empreendedores.some(e => String(e.id) === legacyRaw)) {
     referentialNames.push(legacyRaw);
   }
-  for (const a of atoresEmpreendimento) {
+  for (const a of atoresDoProcesso) {
     if (a.nome) referentialNames.push(a.nome);
   }
   if (semaTitularNome) {
     referentialNames.push(semaTitularNome);
   }
 
-  const referentialDigits = new Set<string>(
-    [legacyDigits, semaDigits, ...atoresEmpreendimento.map(a => a.docDigits || '')].filter(
-      d => d.length === 11 || d.length === 14
-    )
-  );
+  // Mapa de dígitos exatos de CPF/CNPJ -> papéis de origem nos autos/SEMA
+  const docToRoles = new Map<string, Set<AtorPapel>>();
+  const addDocRole = (digitsRaw: string | undefined, papel: AtorPapel) => {
+    const d = cleanOnlyDigits(digitsRaw);
+    if (d.length !== 11 && d.length !== 14) return;
+    if (!docToRoles.has(d)) docToRoles.set(d, new Set());
+    docToRoles.get(d)!.add(papel);
+  };
+
+  if (legacyDigits.length === 11 || legacyDigits.length === 14) {
+    addDocRole(legacyDigits, 'empreendedor');
+  }
+  if (semaDigits.length === 11 || semaDigits.length === 14) {
+    addDocRole(semaDigits, 'proprietario_titular');
+  }
+  for (const a of atoresDoProcesso) {
+    if (a.docDigits) {
+      addDocRole(a.docDigits, a.papel);
+    }
+  }
+
+  // Chaves CAR normalizadas da barragem e da eventual feição SEMA selecionada
+  const targetCarKeys = new Set<string>([
+    ...buildCarMatchSet(barragem?.car),
+    ...buildCarMatchSet(semaCar)
+  ]);
 
   const candidatos: EmpreendedorCandidatoSugestao[] = [];
   const addedIds = new Set<string>();
@@ -656,10 +716,6 @@ export function encontrarCandidatosEmpreendedor(params: {
     if (!emp || !emp.id) continue;
     const empId = String(emp.id);
     const empDigits = cleanOnlyDigits(emp.cpfCnpj);
-    const empCarMatches =
-      Boolean(damCarNorm) &&
-      Array.isArray(emp.empreendimentos) &&
-      emp.empreendimentos.some(em => normalizeCarKey(em?.car) === damCarNorm);
 
     let bestSim = 0;
     for (const refName of referentialNames) {
@@ -670,9 +726,7 @@ export function encontrarCandidatosEmpreendedor(params: {
       );
     }
 
-    const docMatched = Boolean(empDigits && referentialDigits.has(empDigits));
     const exactIdMatched = Boolean(legacyRaw && empId === legacyRaw);
-
     if (exactIdMatched) {
       addedIds.add(empId);
       candidatos.push({
@@ -684,13 +738,29 @@ export function encontrarCandidatosEmpreendedor(params: {
         criterio: 'id_exato',
         similaridade: 1,
         possuiIdentificadorForte: true,
+        papelOriginal: 'empreendedor',
+        papeisOrigem: ['empreendedor'],
         classificacaoSugerida: 'candidato',
         motivo: 'ID de empreendedor encontrado no texto legado da barragem (requer confirmação formal do vínculo).'
       });
       continue;
     }
 
-    if (docMatched) {
+    const matchedRolesSet =
+      empDigits && (empDigits.length === 11 || empDigits.length === 14)
+        ? docToRoles.get(empDigits)
+        : undefined;
+
+    if (matchedRolesSet && matchedRolesSet.size > 0) {
+      const papeisOrigem = Array.from(matchedRolesSet);
+      const hasPrimaryRole =
+        matchedRolesSet.has('empreendedor') || matchedRolesSet.has('proprietario_titular');
+      const papelOriginal: AtorPapel = hasPrimaryRole
+        ? matchedRolesSet.has('empreendedor')
+          ? 'empreendedor'
+          : 'proprietario_titular'
+        : papeisOrigem[0];
+
       addedIds.add(empId);
       candidatos.push({
         empreendedorId: empId,
@@ -701,48 +771,55 @@ export function encontrarCandidatosEmpreendedor(params: {
         criterio: 'cpf_cnpj_exato',
         similaridade: Math.max(bestSim, 0.9),
         possuiIdentificadorForte: true,
-        classificacaoSugerida: 'candidato',
-        motivo: 'Correspondência por CPF/CNPJ informado nos dados do processo/SEMA.'
+        papelOriginal,
+        papeisOrigem,
+        classificacaoSugerida: hasPrimaryRole ? 'candidato' : 'papeis_diferentes',
+        motivo: hasPrimaryRole
+          ? 'Correspondência exata por CPF/CNPJ normalizado nos autos/SEMA (requer decisão humana).'
+          : `CPF/CNPJ normalizado exato encontrado como ${ATOR_PAPEL_LABELS[papelOriginal]} — papel original preservado (não presumir empreendedor sem revisão humana).`
       });
       continue;
     }
 
-    if (bestSim >= 0.99 && !addedIds.has(empId)) {
-      addedIds.add(empId);
-      candidatos.push({
-        empreendedorId: empId,
-        nome: emp.nome,
-        nomeFantasia: emp.nomeFantasia,
-        cpfCnpjMascarado: emp.cpfCnpj ? maskCpfCnpjDisplay(emp.cpfCnpj) : undefined,
-        municipioUf: [emp.municipio, emp.uf].filter(Boolean).join('/'),
-        criterio: 'nome_exato_sem_doc',
-        similaridade: 1,
-        possuiIdentificadorForte: false,
-        classificacaoSugerida: 'candidato',
-        motivo:
-          'Nome idêntico no cadastro mestre sem CPF/CNPJ identificador forte nos autos — verificar homonímia antes de vincular.'
-      });
-      continue;
+    // Correspondência por CAR/MT coincidente (em empreendimentos do titular OU outras barragens do mesmo titular)
+    let matchedCarLabel: string | undefined;
+    if (targetCarKeys.size > 0) {
+      if (Array.isArray(emp.empreendimentos)) {
+        for (const em of emp.empreendimentos) {
+          const emKeys = buildCarMatchSet(em?.car);
+          for (const k of emKeys) {
+            if (targetCarKeys.has(k)) {
+              matchedCarLabel = String(em?.car || barragem?.car || semaCar || '');
+              break;
+            }
+          }
+          if (matchedCarLabel) break;
+        }
+      }
+
+      if (!matchedCarLabel && barragensDoEmpreendedor.length > 0) {
+        for (const otherDam of barragensDoEmpreendedor) {
+          if (!otherDam || String(otherDam.id) === String(barragem?.id)) continue;
+          const otherEmpId = String(
+            (otherDam as any).empreendedorId || (otherDam as any).empreendedor_id || ''
+          ).trim();
+          const otherEmpLegacy = String(otherDam.empreendedor || '').trim();
+          const belongsToEmp = otherEmpId === empId || otherEmpLegacy === empId;
+          if (!belongsToEmp) continue;
+
+          const otherKeys = buildCarMatchSet(otherDam.car);
+          for (const k of otherKeys) {
+            if (targetCarKeys.has(k)) {
+              matchedCarLabel = String(otherDam.car || barragem?.car || semaCar || '');
+              break;
+            }
+          }
+          if (matchedCarLabel) break;
+        }
+      }
     }
 
-    if (bestSim >= 0.72 && !addedIds.has(empId)) {
-      addedIds.add(empId);
-      candidatos.push({
-        empreendedorId: empId,
-        nome: emp.nome,
-        nomeFantasia: emp.nomeFantasia,
-        cpfCnpjMascarado: emp.cpfCnpj ? maskCpfCnpjDisplay(emp.cpfCnpj) : undefined,
-        municipioUf: [emp.municipio, emp.uf].filter(Boolean).join('/'),
-        criterio: 'nome_semelhante_sem_doc',
-        similaridade: bestSim,
-        possuiIdentificadorForte: false,
-        classificacaoSugerida: 'possivel_erro_grafia',
-        motivo: `Nome semelhante (${Math.round(bestSim * 100)}%) sem CPF/CNPJ confirmador — possível erro de grafia ou pessoa distinta.`
-      });
-      continue;
-    }
-
-    if (empCarMatches && !addedIds.has(empId)) {
+    if (matchedCarLabel && !addedIds.has(empId)) {
       addedIds.add(empId);
       candidatos.push({
         empreendedorId: empId,
@@ -753,8 +830,9 @@ export function encontrarCandidatosEmpreendedor(params: {
         criterio: 'car_em_empreendimento',
         similaridade: bestSim,
         possuiIdentificadorForte: false,
+        carCoincidente: matchedCarLabel,
         classificacaoSugerida: 'candidato',
-        motivo: 'Empreendedor possui empreendimento com o mesmo CAR/MT (evidência indireta; um CAR pode conter múltiplas barragens).'
+        motivo: `CAR/MT coincidente (${matchedCarLabel}) — candidato para revisão humana (um CAR pode conter múltiplas barragens).`
       });
     }
   }
@@ -766,41 +844,49 @@ export function encontrarCandidatosEmpreendedor(params: {
     return b.similaridade - a.similaridade;
   });
 
-  // Verifica se algum notificado/responsável pela área tem mesmo nome que algum candidato proprietário/empreendedor diferente
-  const strongMatches = candidatos.filter(c => c.possuiIdentificadorForte);
-  const weakMatches = candidatos.filter(c => !c.possuiIdentificadorForte);
+  const strongDirectMatches = candidatos.filter(
+    c => c.possuiIdentificadorForte && c.classificacaoSugerida !== 'papeis_diferentes'
+  );
+  const roleDistinctDocMatches = candidatos.filter(
+    c => c.possuiIdentificadorForte && c.classificacaoSugerida === 'papeis_diferentes'
+  );
+  const carMatches = candidatos.filter(c => c.criterio === 'car_em_empreendimento');
 
   let classificacaoInicial: ConciliacaoClassificacao = 'sem_correspondencia';
-  let motivoResumo = 'Nenhuma correspondência encontrada no cadastro mestre de empreendedores.';
+  let motivoResumo =
+    'Nenhuma correspondência por CPF/CNPJ exato ou CAR/MT coincidente encontrada no cadastro mestre.';
 
-  if (notificadosOuResponsaveis.length > 0 && strongMatches.length === 0 && weakMatches.length === 0) {
-    classificacaoInicial = 'papeis_diferentes';
+  if (strongDirectMatches.length > 1) {
+    classificacaoInicial = 'ambiguo';
+    motivoResumo = `Múltiplos empreendedores compatíveis por CPF/CNPJ ou ID (${strongDirectMatches.length}); requer revisão manual.`;
+  } else if (strongDirectMatches.length === 1) {
+    classificacaoInicial = 'candidato';
+    motivoResumo = strongDirectMatches[0].motivo;
+  } else if (roleDistinctDocMatches.length > 0) {
+    classificacaoInicial = roleDistinctDocMatches.length > 1 ? 'ambiguo' : 'papeis_diferentes';
     motivoResumo =
-      'Há apenas pessoa notificada, arrendatário ou responsável pela área registrado nos autos; não presumir como empreendedor/proprietário.';
-  } else if (notificadosOuResponsaveis.length > 0 && atoresEmpreendimento.length > 0) {
-    const temDivergenciaPapel = notificadosOuResponsaveis.some(n =>
-      atoresEmpreendimento.every(e => computarSimilaridadeNome(n.nome, e.nome) < 0.85)
-    );
-    if (temDivergenciaPapel && strongMatches.length === 0) {
+      roleDistinctDocMatches.length === 1
+        ? roleDistinctDocMatches[0].motivo
+        : `Múltiplos candidatos com CPF/CNPJ exato em papéis distintos de empreendedor (${roleDistinctDocMatches.length}); revisar papéis antes de vincular.`;
+  } else if (carMatches.length > 1) {
+    classificacaoInicial = 'ambiguo';
+    motivoResumo = `Múltiplos empreendedores compartilham o mesmo CAR/MT (${carMatches.length}); revisar titularidade pois um CAR pode conter múltiplas barragens.`;
+  } else if (carMatches.length === 1) {
+    classificacaoInicial = 'candidato';
+    motivoResumo = carMatches[0].motivo;
+  } else if (notificadosOuResponsaveis.length > 0) {
+    if (atoresEmpreendimento.length > 0) {
+      const temDivergenciaPapel = notificadosOuResponsaveis.some(n =>
+        atoresEmpreendimento.every(e => computarSimilaridadeNome(n.nome, e.nome) < 0.85)
+      );
+      classificacaoInicial = temDivergenciaPapel ? 'papeis_diferentes' : 'papeis_diferentes';
+      motivoResumo = temDivergenciaPapel
+        ? 'Pessoa notificada / responsável pela área diverge do titular/empreendedor indicado; sem CPF/CNPJ ou CAR coincidente.'
+        : 'Há apenas pessoa notificada, arrendatário ou responsável pela área sem correspondência por CPF/CNPJ ou CAR/MT; não presumir empreendedor.';
+    } else {
       classificacaoInicial = 'papeis_diferentes';
       motivoResumo =
-        'Pessoa notificada / responsável pela área diverge do titular/empreendedor indicado; classificado para distinção de papéis.';
-    }
-  }
-
-  if (classificacaoInicial === 'sem_correspondencia') {
-    if (strongMatches.length > 1) {
-      classificacaoInicial = 'ambiguo';
-      motivoResumo = `Múltiplos empreendedores compatíveis por identificador forte (${strongMatches.length}); requer revisão manual.`;
-    } else if (strongMatches.length === 1) {
-      classificacaoInicial = 'candidato';
-      motivoResumo = strongMatches[0].motivo;
-    } else if (weakMatches.length > 1) {
-      classificacaoInicial = 'ambiguo';
-      motivoResumo = `Múltiplos candidatos sem identificador forte (${weakMatches.length}); investigar homonímia/grafia antes de vincular.`;
-    } else if (weakMatches.length === 1) {
-      classificacaoInicial = weakMatches[0].classificacaoSugerida;
-      motivoResumo = weakMatches[0].motivo;
+        'Há apenas pessoa notificada, arrendatário ou responsável pela área nos autos, sem CPF/CNPJ ou CAR/MT coincidente; não presumir como empreendedor/proprietário.';
     }
   }
 
@@ -861,7 +947,7 @@ export function extrairCitacaoRtDeParecer(doc: {
   let rtNome = String(doc.responsavelTecnicoNome || '').trim();
   if (!rtNome) {
     const rtMatch = combined.match(
-      /(?:respons[aá]vel\s+t[eé]cnic[oa]|RT)\s*[:\-–]\s*([A-Za-zÀ-ÿ\s.]{4,70}?)(?=\s*(?:\||;|,|\(|-|–|CREA|CAU|CFT|ART|RRT|$))/i
+      /(?:\brespons[aá]vel\s+t[eé]cnic[oa]\b|\bRT\b)\s*[:\-–]\s*([A-Za-zÀ-ÿ\s.]{4,70}?)(?=\s*(?:\||·|;|,|\(|-|–|\bCREA\b|\bCAU\b|\bCFT\b|\bART\b|\bRRT\b|$))/i
     );
     if (rtMatch?.[1]) {
       rtNome = rtMatch[1].trim();
@@ -1067,9 +1153,21 @@ export function analisarPareceresRtPendentes(params: {
   return pendencias;
 }
 
+function timestampsMatch(expected: string | undefined, actual: string | undefined): boolean {
+  if (!expected) return true;
+  if (!actual) return false;
+  if (expected === actual) return true;
+  const p1 = Date.parse(expected);
+  const p2 = Date.parse(actual);
+  if (Number.isFinite(p1) && Number.isFinite(p2)) {
+    return Math.abs(p1 - p2) <= 1;
+  }
+  return false;
+}
+
 /**
  * Validação de concorrência otimista antes de qualquer escrita no cadastro mestre.
- * Confirma que o registro mestre não foi alterado desde o momento em que o revisor abriu a conciliação.
+ * Confirma que o registro mestre existe no banco central e não foi alterado desde o início da revisão.
  */
 export async function verificarConcorrenciaCadastroMestre(params: {
   entidadeTipo: 'barragem' | 'rt';
@@ -1077,8 +1175,19 @@ export async function verificarConcorrenciaCadastroMestre(params: {
   expectedUpdatedAt?: string;
   expectedEmpreendedorId?: string;
   localRecords: Array<{ id: string; updatedAt?: string; empreendedorId?: string; empreendedor?: string }>;
+  supabaseClient?: any;
+  allowLocalOnlyFallback?: boolean;
 }): Promise<{ ok: boolean; error?: string; currentUpdatedAt?: string }> {
-  const { entidadeTipo, entidadeId, expectedUpdatedAt, expectedEmpreendedorId, localRecords } = params;
+  const {
+    entidadeTipo,
+    entidadeId,
+    expectedUpdatedAt,
+    expectedEmpreendedorId,
+    localRecords,
+    supabaseClient,
+    allowLocalOnlyFallback = false
+  } = params;
+
   const localItem = localRecords.find(r => String(r.id) === String(entidadeId));
   if (!localItem) {
     return {
@@ -1087,7 +1196,7 @@ export async function verificarConcorrenciaCadastroMestre(params: {
     };
   }
 
-  if (expectedUpdatedAt && localItem.updatedAt && localItem.updatedAt !== expectedUpdatedAt) {
+  if (expectedUpdatedAt && localItem.updatedAt && !timestampsMatch(expectedUpdatedAt, localItem.updatedAt)) {
     return {
       ok: false,
       currentUpdatedAt: localItem.updatedAt,
@@ -1096,61 +1205,208 @@ export async function verificarConcorrenciaCadastroMestre(params: {
     };
   }
 
-  if (isSupabaseConfigured() && supabase) {
-    const table = entidadeTipo === 'barragem' ? 'barragens' : 'rts';
-    const cols =
-      entidadeTipo === 'barragem'
-        ? 'id,updated_at,empreendedor_id,empreendedor'
-        : 'id,updated_at';
-    try {
-      const { data, error } = await supabase
-        .from(table)
-        .select(cols)
-        .eq('id', entidadeId)
-        .maybeSingle();
+  const remoteClient = supabaseClient ?? (isSupabaseConfigured() ? supabase : null);
+  if (!remoteClient) {
+    if (allowLocalOnlyFallback) {
+      return {
+        ok: true,
+        currentUpdatedAt: localItem.updatedAt
+      };
+    }
+    return {
+      ok: false,
+      error: 'Banco central indisponível para validar concorrência antes da gravação no cadastro mestre.'
+    };
+  }
 
-      if (error) {
-        return {
-          ok: false,
-          error: `Não foi possível validar o estado atual no banco central: ${error.message}`
-        };
-      }
+  const table = entidadeTipo === 'barragem' ? 'barragens' : 'rts';
+  const cols =
+    entidadeTipo === 'barragem'
+      ? 'id,updated_at,empreendedor_id,empreendedor'
+      : 'id,updated_at';
 
-      if (data) {
-        const remoteUpdatedAt = (data as any).updated_at ? String((data as any).updated_at) : '';
-        if (expectedUpdatedAt && remoteUpdatedAt && remoteUpdatedAt !== expectedUpdatedAt) {
-          return {
-            ok: false,
-            currentUpdatedAt: remoteUpdatedAt,
-            error:
-              'Conflito de concorrência detectado: outro usuário atualizou o cadastro mestre na base central desde o início desta revisão.'
-          };
-        }
-        if (
-          entidadeTipo === 'barragem' &&
-          expectedEmpreendedorId !== undefined &&
-          String((data as any).empreendedor_id || '') !== String(expectedEmpreendedorId || '')
-        ) {
-          return {
-            ok: false,
-            currentUpdatedAt: remoteUpdatedAt,
-            error:
-              'Conflito detectado: o vínculo de empreendedor desta barragem já foi alterado na base central.'
-          };
-        }
-      }
-    } catch (err: any) {
+  try {
+    const { data, error } = await remoteClient
+      .from(table)
+      .select(cols)
+      .eq('id', entidadeId)
+      .maybeSingle();
+
+    if (error) {
       return {
         ok: false,
-        error: err?.message || 'Erro ao verificar integridade concorrente no servidor.'
+        error: `Não foi possível validar o estado atual no banco central: ${error.message}`
       };
+    }
+
+    if (!data) {
+      return {
+        ok: false,
+        error:
+          'Conflito de concorrência: o registro mestre alvo não foi encontrado no banco central.'
+      };
+    }
+
+    const remoteUpdatedAt = (data as any).updated_at ? String((data as any).updated_at) : '';
+    if (expectedUpdatedAt && !timestampsMatch(expectedUpdatedAt, remoteUpdatedAt)) {
+      return {
+        ok: false,
+        currentUpdatedAt: remoteUpdatedAt,
+        error:
+          'Conflito de concorrência detectado: outro usuário atualizou o cadastro mestre na base central desde o início desta revisão.'
+      };
+    }
+
+    if (
+      entidadeTipo === 'barragem' &&
+      expectedEmpreendedorId !== undefined &&
+      String((data as any).empreendedor_id || '') !== String(expectedEmpreendedorId || '')
+    ) {
+      return {
+        ok: false,
+        currentUpdatedAt: remoteUpdatedAt,
+        error:
+          'Conflito detectado: o vínculo de empreendedor desta barragem já foi alterado na base central.'
+      };
+    }
+
+    return {
+      ok: true,
+      currentUpdatedAt: remoteUpdatedAt || localItem.updatedAt
+    };
+  } catch (err: any) {
+    return {
+      ok: false,
+      error: err?.message || 'Erro ao verificar integridade concorrente no servidor.'
+    };
+  }
+}
+
+export interface GravarConciliacaoServidorParams {
+  alvoTipo: 'barragem_empreendedor' | 'barragem_rt_parecer';
+  barragemId: string;
+  acao: ConciliacaoAcao;
+  classificacao: ConciliacaoClassificacao;
+  justificativa: string;
+  masterUpdatedAtSnapshot?: string;
+  masterEmpreendedorIdSnapshot?: string;
+  selectedEmpreendedorId?: string;
+  selectedRtId?: string;
+  selectedRtArt?: string;
+  selectedRtUpdatedAtSnapshot?: string;
+  auditoriaId?: string;
+  vincularCarDaSema?: boolean;
+  semaCar?: string;
+  auditPayload: RevisaoConciliacaoAuditPayload;
+  accessToken?: string;
+}
+
+/**
+ * Executa a gravação segura e atômica da conciliação exclusivamente pela rota do servidor
+ * (`/api/conciliacao-gravar`), sem nunca realizar gravação direta pelo cliente.
+ */
+export async function gravarConciliacaoAssistidaServidor(
+  params: GravarConciliacaoServidorParams
+): Promise<{
+  success: boolean;
+  error?: string;
+  revisaoId?: string;
+  updatedAt?: string;
+  barragem?: any;
+  revisao?: any;
+}> {
+  let token = String(params.accessToken || '').trim();
+  if (!token) {
+    if (!isSupabaseConfigured() || !supabase) {
+      return {
+        success: false,
+        error:
+          'Banco central ou autenticação não configurada. A gravação de conciliação exige rota segura autenticada no servidor.'
+      };
+    }
+    try {
+      const { data } = await supabase.auth.getSession();
+      let session = data?.session;
+      const expiresAtMs = session?.expires_at ? Number(session.expires_at) * 1000 : 0;
+      if (session && (!session.access_token || (expiresAtMs && expiresAtMs - Date.now() < 60_000))) {
+        const { data: refreshed } = await supabase.auth.refreshSession().catch(() => ({ data: null }));
+        if (refreshed?.session) session = refreshed.session;
+      }
+      token = session?.access_token || '';
+    } catch {
+      token = '';
     }
   }
 
-  return {
-    ok: true,
-    currentUpdatedAt: localItem.updatedAt
-  };
+  if (!token) {
+    return {
+      success: false,
+      error: 'Sessão institucional ausente ou expirada. Faça login novamente antes de gravar.'
+    };
+  }
+
+  try {
+    const res = await fetch('/api/conciliacao-gravar', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Accept: 'application/json',
+        'X-Requested-With': 'XMLHttpRequest',
+        Authorization: `Bearer ${token}`
+      },
+      body: JSON.stringify({
+        alvoTipo: params.alvoTipo,
+        barragemId: params.barragemId,
+        acao: params.acao,
+        classificacao: params.classificacao,
+        justificativa: params.justificativa,
+        masterUpdatedAtSnapshot: params.masterUpdatedAtSnapshot || null,
+        masterEmpreendedorIdSnapshot: params.masterEmpreendedorIdSnapshot ?? null,
+        selectedEmpreendedorId: params.selectedEmpreendedorId || null,
+        selectedRtId: params.selectedRtId || null,
+        selectedRtArt: params.selectedRtArt || null,
+        selectedRtUpdatedAtSnapshot: params.selectedRtUpdatedAtSnapshot || null,
+        auditoriaId: params.auditoriaId || null,
+        vincularCarDaSema: Boolean(params.vincularCarDaSema),
+        semaCar: params.semaCar || null,
+        auditPayload: params.auditPayload
+      })
+    });
+
+    const rawText = await res.text().catch(() => '');
+    let data: any = null;
+    if (rawText) {
+      try {
+        data = JSON.parse(rawText);
+      } catch {
+        data = null;
+      }
+    }
+
+    if (!res.ok || !data || data.success !== true) {
+      return {
+        success: false,
+        error:
+          data?.error ||
+          `Falha ao gravar conciliação no servidor (HTTP ${res.status}). Nenhuma alteração foi aplicada.`
+      };
+    }
+
+    return {
+      success: true,
+      revisaoId: data.revisaoId ? String(data.revisaoId) : undefined,
+      updatedAt: data.updatedAt ? String(data.updatedAt) : undefined,
+      barragem: data.barragem,
+      revisao: data.revisao
+    };
+  } catch (err: any) {
+    return {
+      success: false,
+      error:
+        err?.message ||
+        'Erro de comunicação com a rota segura de conciliação no servidor. Nenhuma alteração foi aplicada.'
+    };
+  }
 }
 
 export function construirRegistroRevisaoConciliacao(params: {

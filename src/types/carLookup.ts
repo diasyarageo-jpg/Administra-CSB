@@ -48,6 +48,7 @@ export interface CarGeoJsonFeature {
   geometry_name?: string;
   camadaOrigem?: string;
   auditoriaId?: string;
+  auditoriaDisponivel?: boolean;
   _schemaMeta?: FeatureSchemaMeta;
   _spatialMeta?: SpatialEvidenceMeta;
   properties: Record<string, any>;
@@ -56,6 +57,7 @@ export interface CarGeoJsonFeature {
 export interface CarFeatureMapped {
   id?: string;
   auditoriaId?: string;
+  auditoriaDisponivel?: boolean;
   camadaOrigem?: string;
   car: string;
   carFederal: string;
@@ -87,6 +89,7 @@ export interface CarLookupApiResponse {
   consultadoEm: string;
   camadasConsultadas?: CamadaConsultaStatus[];
   mensagemStatus?: string;
+  auditoriaDisponivel?: boolean;
   error?: string;
 }
 
@@ -104,6 +107,7 @@ export interface CarLookupResult {
   camadasConsultadas?: CamadaConsultaStatus[];
   mensagemStatus?: string;
   consultadoEm: string;
+  auditoriaDisponivel?: boolean;
   mensagemErro?: string;
 }
 
@@ -123,6 +127,7 @@ export interface SemaDocumentoItem {
   linkDocumento?: string;
   camadaOrigem: string;
   auditoriaId?: string;
+  auditoriaDisponivel?: boolean;
   camadaTitulo?: string;
   carFederal?: string;
   areaHa?: string;
@@ -162,6 +167,7 @@ export interface SemaDocumentosGroupedResult {
   consultadoEm: string;
   mensagemStatus: string;
   camadasConsultadas: CamadaConsultaStatus[];
+  auditoriaDisponivel?: boolean;
   erroGeral?: string;
 }
 

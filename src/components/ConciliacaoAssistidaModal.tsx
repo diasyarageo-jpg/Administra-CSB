@@ -44,6 +44,7 @@ export interface ConciliacaoDecisaoSubmission {
   selectedEmpreendedorId?: string;
   selectedRtId?: string;
   selectedRtArt?: string;
+  selectedRtUpdatedAtSnapshot?: string;
   selectedSemaFeature?: CarFeatureMapped | null;
   vincularCarDaSema?: boolean;
   auditPayload: RevisaoConciliacaoAuditPayload;
@@ -171,8 +172,14 @@ export const ConciliacaoAssistidaModal: React.FC<ConciliacaoAssistidaModalProps>
                 empreendedorNome: p.empreendedorNome || p.empreendedor || undefined,
                 empreendedorDocumento: p.empreendedorCpfCnpj || p.cpfCnpjEmpreendedor || undefined,
                 responsavelAreaNome: p.responsavelArea || p.responsavelPelaArea || undefined,
+                responsavelAreaDocumento:
+                  p.responsavelAreaCpfCnpj || p.cpfCnpjResponsavelArea || undefined,
                 arrendatarioNome: p.arrendatario || p.arrendatarioNome || undefined,
+                arrendatarioDocumento:
+                  p.arrendatarioCpfCnpj || p.cpfCnpjArrendatario || undefined,
                 proprietarioNome: p.proprietario || p.titular || undefined,
+                proprietarioDocumento:
+                  p.proprietarioCpfCnpj || p.titularCpfCnpj || p.cpfCnpjProprietario || undefined,
                 resumo: [p.objetivo, p.observacoes, p.resumo].filter(Boolean).join(' · ')
               });
             }
@@ -215,15 +222,55 @@ export const ConciliacaoAssistidaModal: React.FC<ConciliacaoAssistidaModalProps>
       ? semaResult.feicoes[selectedSemaIdx]
       : null;
 
+  const semaDocDigits = useMemo(() => {
+    if (
+      !selectedSemaFeature ||
+      !selectedSemaFeature.cpfCnpjCompletoDisponivel ||
+      selectedSemaFeature.cpfCnpjStatus !== 'completo'
+    ) {
+      return undefined;
+    }
+    const rawProps = selectedSemaFeature.propriedadesBrutas || {};
+    const origemKey = selectedSemaFeature.cpfCnpjCampoOrigem;
+    const candidates = [
+      origemKey ? rawProps[origemKey] : undefined,
+      rawProps.CPF_CNPJ,
+      rawProps.CPF,
+      rawProps.CNPJ,
+      rawProps.NR_CPF_CNPJ,
+      rawProps.DOCUMENTO_TITULAR,
+      selectedSemaFeature.empreendedor
+    ];
+    for (const c of candidates) {
+      const str = String(c ?? '').trim();
+      if (!str || /[x*]/i.test(str)) continue;
+      const digits = str.replace(/\D/g, '');
+      if (digits.length === 11 || digits.length === 14) {
+        return digits;
+      }
+    }
+    return undefined;
+  }, [selectedSemaFeature]);
+
   const candidatoAnalysis = useMemo(
     () =>
       encontrarCandidatosEmpreendedor({
         barragem: barragemTarget,
         empreendedores,
         atoresDoProcesso: atoresProcesso,
-        semaTitularNome: selectedSemaFeature?.empreendedor || undefined
+        barragensDoEmpreendedor: todasBarragens,
+        semaTitularNome: selectedSemaFeature?.empreendedor || undefined,
+        semaDocDigits,
+        semaCar: selectedSemaFeature?.car || selectedSemaFeature?.carFederal || undefined
       }),
-    [barragemTarget, empreendedores, atoresProcesso, selectedSemaFeature]
+    [
+      barragemTarget,
+      empreendedores,
+      atoresProcesso,
+      todasBarragens,
+      selectedSemaFeature,
+      semaDocDigits
+    ]
   );
 
   // Atualiza sugestão inicial de classificação apenas quando ainda não alterada manualmente e em modo barragem_empreendedor
@@ -410,6 +457,7 @@ export const ConciliacaoAssistidaModal: React.FC<ConciliacaoAssistidaModalProps>
         selectedEmpreendedorId: selectedEmpObj?.id,
         selectedRtId: selectedRtObj?.id,
         selectedRtArt: selectedRtArt.trim(),
+        selectedRtUpdatedAtSnapshot: selectedRtObj?.updatedAt,
         selectedSemaFeature,
         vincularCarDaSema,
         auditPayload
@@ -880,11 +928,15 @@ export const ConciliacaoAssistidaModal: React.FC<ConciliacaoAssistidaModalProps>
                             <b>Município / Área:</b> {feat.municipio || feat.municipioCodigo || '—'}
                             {feat.areaHa ? ` · ${feat.areaHa} ha` : ''}
                           </div>
-                          {feat.auditoriaId && (
+                          {feat.auditoriaId ? (
                             <div style={{ color: '#047857', fontSize: '10px', marginTop: '3px' }}>
                               Auditoria SEMA registrada ({feat.auditoriaId.slice(0, 8)}…)
                             </div>
-                          )}
+                          ) : feat.auditoriaDisponivel === false ? (
+                            <div style={{ color: '#b45309', fontSize: '10px', marginTop: '3px' }}>
+                              Auditoria indisponível: exibição de CPF/CNPJ completo bloqueada e alterações protegidas.
+                            </div>
+                          ) : null}
                           <div style={{ color: '#64748b', fontSize: '10px', marginTop: '3px' }}>
                             Evidência espacial apenas: a coordenada pode apontar sede do imóvel e não confirma titularidade sem validação humana.
                           </div>
@@ -971,17 +1023,25 @@ export const ConciliacaoAssistidaModal: React.FC<ConciliacaoAssistidaModalProps>
                                   }}
                                 >
                                   <strong style={{ color: '#0f172a' }}>{c.nome}</strong>
-                                  <span
-                                    className={`badge ${
-                                      c.possuiIdentificadorForte ? 'green' : 'amber'
-                                    }`}
-                                  >
-                                    {CONCILIACAO_CLASSIFICACAO_LABELS[c.classificacaoSugerida]}
-                                  </span>
+                                  <div style={{ display: 'flex', gap: '4px', flexWrap: 'wrap' }}>
+                                    {c.papelOriginal && (
+                                      <span className="badge blue">
+                                        {ATOR_PAPEL_LABELS[c.papelOriginal]}
+                                      </span>
+                                    )}
+                                    <span
+                                      className={`badge ${
+                                        c.possuiIdentificadorForte ? 'green' : 'amber'
+                                      }`}
+                                    >
+                                      {CONCILIACAO_CLASSIFICACAO_LABELS[c.classificacaoSugerida]}
+                                    </span>
+                                  </div>
                                 </div>
                                 <div style={{ color: '#475569' }}>
                                   {c.cpfCnpjMascarado || 'Sem CPF/CNPJ'}
                                   {c.municipioUf ? ` · ${c.municipioUf}` : ''}
+                                  {c.carCoincidente ? ` · CAR ${c.carCoincidente}` : ''}
                                 </div>
                                 <div style={{ color: '#64748b', fontSize: '10px', marginTop: '2px' }}>
                                   {c.motivo}

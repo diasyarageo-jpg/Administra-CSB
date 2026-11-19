@@ -60,9 +60,11 @@ const DEFAULT_WMS_ENDPOINTS = [
   'https://geo.sema.mt.gov.br/geoserver/wms'
 ];
 
-export const SEMA_GEOSERVER_AUTHKEY =
-  (process.env.SEMA_GEOSERVER_AUTHKEY || process.env.GEOSERVER_AUTHKEY || '').trim() ||
-  '541085de-9a2e-454e-bdba-eb3d57a2f492';
+export function getSemaGeoServerAuthKey(): string {
+  return (process.env.SEMA_GEOSERVER_AUTHKEY || process.env.GEOSERVER_AUTHKEY || '').trim();
+}
+
+export const SEMA_GEOSERVER_AUTHKEY = getSemaGeoServerAuthKey();
 
 export const SEMA_BROWSER_HEADERS: Record<string, string> = {
   'User-Agent':
@@ -133,9 +135,14 @@ export function isSemaTimeoutError(err: any): boolean {
 
 export function sanitizeSemaServerText(raw: string): string {
   let out = String(raw || '');
-  if (SEMA_GEOSERVER_AUTHKEY) {
-    out = out.replace(new RegExp(SEMA_GEOSERVER_AUTHKEY.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), '[REDACTED]');
+  const activeKey = getSemaGeoServerAuthKey();
+  if (activeKey) {
+    out = out.replace(new RegExp(activeKey.replace(/[.*+?^${}()|[\]\\]/g, '\\$&'), 'gi'), '[REDACTED]');
   }
+  out = out
+    .replace(/([?&]authkey=)[^&\s]+/gi, '$1[REDACTED]')
+    .replace(/\b(\d{3})\.(\d{3})\.(\d{3})-(\d{2})\b/g, '***.$2.***-$4')
+    .replace(/\b(\d{2})\.(\d{3})\.(\d{3})\/(\d{4})-(\d{2})\b/g, '**.$2.***/$4-**');
   return out.trim();
 }
 
@@ -187,7 +194,8 @@ export async function fetchWithTimeout(
 }
 
 function getAuthKeyCandidates(): string[] {
-  return SEMA_GEOSERVER_AUTHKEY ? [SEMA_GEOSERVER_AUTHKEY, ''] : [''];
+  const activeKey = getSemaGeoServerAuthKey();
+  return activeKey ? [activeKey, ''] : [''];
 }
 
 export async function getSemaCapabilities(): Promise<SemaCapabilitiesResult> {
@@ -272,8 +280,9 @@ export async function getSemaCapabilities(): Promise<SemaCapabilitiesResult> {
         version: '1.3.0',
         request: 'GetCapabilities'
       });
-      if (SEMA_GEOSERVER_AUTHKEY) {
-        wmsParams.set('authkey', SEMA_GEOSERVER_AUTHKEY);
+      const wmsAuthKey = getSemaGeoServerAuthKey();
+      if (wmsAuthKey) {
+        wmsParams.set('authkey', wmsAuthKey);
       }
       try {
         const wmsRes = await fetchWithTimeout(`${wmsBase}?${wmsParams.toString()}`, 8000);
@@ -872,13 +881,14 @@ export async function queryGeoportalCacheFallback(
           ? `${Number(row.area_ha).toLocaleString('pt-BR', { maximumFractionDigits: 2 })} ha`
           : undefined;
 
-      const titularClean = row.nome_proprietario
+      const titularRaw = row.nome_proprietario
         ? stripOuterQuotesAndBrackets(String(row.nome_proprietario))
         : extractConfirmedFieldValue(
             rawProps,
             new Map(schemaFieldKeys.map(k => [k, 'xsd:string'])),
             SEMA_FIELD_CANDIDATES.titular
           );
+      const titularClean = titularRaw ? sanitizeSemaServerText(titularRaw) : undefined;
 
       const propNomeClean = row.nome_propriedade
         ? stripOuterQuotesAndBrackets(String(row.nome_propriedade))

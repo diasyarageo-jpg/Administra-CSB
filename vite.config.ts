@@ -12,7 +12,9 @@ function registerApiMiddlewares(
     '/api/car-lookup': '/api/car-lookup.ts',
     '/api/car-sync': '/api/car-sync.ts',
     '/api/sema-documentos': '/api/sema-documentos.ts',
-    '/api/integracoes-status': '/api/integracoes-status.ts'
+    '/api/integracoes-status': '/api/integracoes-status.ts',
+    '/api/conciliacao-gravar': '/api/conciliacao-gravar.ts',
+    '/api/pendencias': '/api/pendencias.ts'
   };
 
   for (const [route, file] of Object.entries(endpoints)) {

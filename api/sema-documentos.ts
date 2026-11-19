@@ -7,13 +7,18 @@ import {
   extractCarSearchTokens,
   deduplicateCarImoveisByCar,
   formatCpfCnpjReadable,
+  maskCpfCnpjDisplay,
   preserveSemaProperties,
+  sanitizeSemaProperties,
   stripOuterQuotesAndBrackets
 } from '../src/config/carCampos';
 import {
   authorizeSemaLookupRequest,
+  canViewFullSemaPersonalData,
   parseSemaAuditTargetContext,
-  recordSemaServerAudit,
+  recordSemaServerAuditDetailed,
+  scrubSensitiveTextForServerLog,
+  sha256HexServer,
   validateTargetEntityAccess
 } from '../src/server/semaAudit';
 import {
@@ -1253,14 +1258,41 @@ export default async function handler(
       : auditCritTipo === 'processo'
       ? procList[0]
       : auditCritTipo === 'coordenada'
-      ? `${coordList[0].lat.toFixed(6)},${coordList[0].lng.toFixed(6)}`
+      ? `sha256:${sha256HexServer(`${coordList[0].lat.toFixed(6)},${coordList[0].lng.toFixed(6)}`).slice(0, 24)}`
       : cleanNome;
+
+  const canViewFullPii = canViewFullSemaPersonalData(authCtx);
+
+  const redactSemaItemPersonalData = (item: any) => {
+    const hadDoc = Boolean(
+      item?.cpfCnpjStatus === 'completo' ||
+        item?.cpfCnpjStatus === 'mascarado' ||
+        item?.cpfCnpjMascarado
+    );
+    const out: any = {
+      ...item,
+      ...(item?.razaoSocial
+        ? { razaoSocial: scrubSensitiveTextForServerLog(String(item.razaoSocial)) }
+        : {}),
+      ...(item?.cpfCnpjMascarado
+        ? { cpfCnpjMascarado: maskCpfCnpjDisplay(String(item.cpfCnpjMascarado)) || '***' }
+        : {}),
+      cpfCnpjCompletoDisponivel: false,
+      cpfCnpjStatus: hadDoc ? 'mascarado' : 'ausente',
+      propriedadesBrutas: sanitizeSemaProperties(item?.propriedadesBrutas || {}, [])
+    };
+    delete out.cpfCnpjCampoOrigem;
+    return out;
+  };
 
   const attachAuditToGroup = async (list: any[]): Promise<any[]> => {
     return await Promise.all(
       list.map(async item => {
         const { _auditRawProps, _auditDocDigits, _auditCar, ...publicItem } = item;
-        const auditoriaId = await recordSemaServerAudit(authCtx, targetAccess.resolvedTarget, {
+        const rawProps = _auditRawProps || publicItem.propriedadesBrutas || {};
+        const camposConsultados = Object.keys(publicItem.propriedadesBrutas || rawProps || {});
+
+        const auditRes = await recordSemaServerAuditDetailed(authCtx, targetAccess.resolvedTarget, {
           criterioTipo: auditCritTipo,
           criterioValor: auditCritVal,
           camada: publicItem.camadaOrigem || 'Geoportal:CAR_ATP',
@@ -1269,11 +1301,15 @@ export default async function handler(
             _auditCar ||
             publicItem.carFederal ||
             (publicItem.camadaOrigem?.includes('CAR') ? publicItem.numeroDocumento : undefined),
-          rawProps: _auditRawProps || publicItem.propriedadesBrutas || {},
+          rawProps,
           docStatus: publicItem.cpfCnpjStatus || 'ausente',
           docDigits: _auditDocDigits,
+          camposConsultados,
+          consultadoEm,
           extraSafeAttrs: {
-            ...(publicItem.razaoSocial ? { titularNome: publicItem.razaoSocial } : {}),
+            ...(publicItem.razaoSocial
+              ? { titularNome: scrubSensitiveTextForServerLog(String(publicItem.razaoSocial)) }
+              : {}),
             ...(publicItem.nomeDocumento ? { nomeDocumento: publicItem.nomeDocumento } : {}),
             ...(publicItem.municipio ? { municipio: publicItem.municipio } : {}),
             ...(publicItem.municipioCodigo ? { municipioCodigo: publicItem.municipioCodigo } : {}),
@@ -1283,7 +1319,16 @@ export default async function handler(
               : {})
           }
         });
-        return auditoriaId ? { ...publicItem, auditoriaId } : publicItem;
+
+        const auditOk = Boolean(auditRes.ok && auditRes.auditoriaId);
+        const allowFullPersonalData = canViewFullPii && auditOk;
+        const baseItem = allowFullPersonalData ? publicItem : redactSemaItemPersonalData(publicItem);
+
+        return {
+          ...baseItem,
+          auditoriaDisponivel: auditOk,
+          ...(auditOk ? { auditoriaId: auditRes.auditoriaId } : {})
+        };
       })
     );
   };
@@ -1319,6 +1364,19 @@ export default async function handler(
     resultado.termosEmbargo.length +
     resultado.outros.length;
 
+  const allReturnedItems = [
+    ...resultado.carImoveis,
+    ...resultado.licencas,
+    ...resultado.notificacoes,
+    ...resultado.autosInfracao,
+    ...resultado.termosEmbargo,
+    ...resultado.outros
+  ];
+  const auditoriaDisponivel =
+    allReturnedItems.length > 0
+      ? allReturnedItems.every(it => it.auditoriaDisponivel === true)
+      : Boolean(authCtx.configured && authCtx.authorized && authCtx.role !== 'Visualizador');
+
   const consultadasCount = camadasConsultadas.filter(
     c => c.status === 'consultada' || c.status === 'sem_resultados'
   ).length;
@@ -1350,6 +1408,7 @@ export default async function handler(
   res.status(200)!.json!({
     sucesso: consultadasCount > 0 || (naoSuportadasCount > 0 && falhasCount === 0),
     origemDados,
+    auditoriaDisponivel,
     criteriosUtilizados: {
       temCpfCnpj: Boolean(cleanDoc),
       car: rawCarStr || undefined,

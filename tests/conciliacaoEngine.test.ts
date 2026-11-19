@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import { EventEmitter } from 'node:events';
 
 import carLookupHandler, { estimateGeometryDistanceMeters } from '../api/car-lookup';
+import semaDocumentosHandler from '../api/sema-documentos';
+import conciliacaoGravarHandler from '../api/conciliacao-gravar';
 import { resetSemaGeoserverCachesForTest } from '../src/server/semaGeoserver';
 import { setTestSupabaseAdminForSemaAudit } from '../src/server/semaAudit';
 import {
@@ -13,6 +15,7 @@ import {
   detectarMultiplasBarragensMesmoCar,
   encontrarCandidatosEmpreendedor,
   extrairAtoresDoProcesso,
+  extrairCitacaoRtDeParecer,
   isDocumentoSemRtIgnoradoComoDivergencia,
   parseRevisaoConciliacaoDetalhes,
   verificarConcorrenciaCadastroMestre
@@ -72,6 +75,104 @@ function createMockRes() {
   return res;
 }
 
+function createSupabaseMockForSemaTests(opts: {
+  role: 'Administrador' | 'Analista' | 'Usuário' | 'Visualizador';
+  userId?: string;
+  login?: string;
+  auditFail?: boolean;
+  damRow?: Record<string, any> | null;
+  rpcHandler?: (fnName: string, args: Record<string, any>) => Promise<{ data: any; error: any }>;
+}) {
+  const auditCalls: Array<{ fnName: string; args: Record<string, any> }> = [];
+  const uid = opts.userId || '11111111-1111-4111-8111-111111111111';
+
+  const makeSelectChain = (table: string) => {
+    const state: { eqCol?: string; eqVal?: unknown } = {};
+    const chain: any = {
+      select() {
+        return chain;
+      },
+      eq(col: string, val: unknown) {
+        state.eqCol = col;
+        state.eqVal = val;
+        return chain;
+      },
+      ilike(col: string, val: unknown) {
+        state.eqCol = col;
+        state.eqVal = val;
+        return chain;
+      },
+      async maybeSingle() {
+        if (table === 'usuarios') {
+          return {
+            data: {
+              id: 'usr_1',
+              papel: opts.role,
+              situacao: 'Ativo',
+              status: 'Ativo',
+              auth_user_id: uid,
+              login: opts.login || 'analista.csb',
+              nome: 'Analista Teste',
+              email: 'analista@sema.mt.gov.br'
+            },
+            error: null
+          };
+        }
+        if (table === 'barragens') {
+          if (opts.damRow === null) {
+            return { data: null, error: null };
+          }
+          return {
+            data: opts.damRow || {
+              id: String(state.eqVal || 'bar_1'),
+              created_by: uid,
+              updated_at: '2026-05-01T12:00:00.000Z',
+              empreendedor_id: null,
+              empreendedor: ''
+            },
+            error: null
+          };
+        }
+        return { data: null, error: null };
+      }
+    };
+    return chain;
+  };
+
+  const client: any = {
+    auditCalls,
+    auth: {
+      async getUser(jwt: string) {
+        if (!jwt || jwt === 'invalid') {
+          return { data: { user: null }, error: { message: 'JWT inválido' } };
+        }
+        return {
+          data: { user: { id: uid, email: 'analista@sema.mt.gov.br' } },
+          error: null
+        };
+      }
+    },
+    from(table: string) {
+      return makeSelectChain(table);
+    },
+    async rpc(fnName: string, args: Record<string, any>) {
+      auditCalls.push({ fnName, args });
+      if (opts.rpcHandler) {
+        return opts.rpcHandler(fnName, args);
+      }
+      if (fnName === 'registrar_consulta_sema_auditoria') {
+        if (opts.auditFail) {
+          return { data: null, error: { message: 'Auditoria indisponível simulada' } };
+        }
+        return { data: 'aaaaaaaa-aaaa-4aaa-8aaa-aaaaaaaaaaaa', error: null };
+      }
+      return { data: null, error: null };
+    }
+  };
+
+  return client;
+}
+
 const CAPABILITIES_CAR_XML = `<?xml version="1.0" encoding="UTF-8"?>
 <wfs:WFS_Capabilities version="2.0.0" xmlns:wfs="http://www.opengis.net/wfs/2.0">
   <FeatureTypeList>
@@ -88,6 +189,7 @@ const DESCRIBE_CAR_XML = `<?xml version="1.0" encoding="UTF-8"?>
       <xsd:element name="CAR_FEDERAL" type="xsd:string"/>
       <xsd:element name="NOMEPROPRIEDADE" type="xsd:string"/>
       <xsd:element name="NOMESPROPRIETARIOS" type="xsd:string"/>
+      <xsd:element name="CPF_CNPJ" type="xsd:string"/>
       <xsd:element name="MUNICIPIO_CODIGO" type="xsd:string"/>
       <xsd:element name="AREA_HA" type="xsd:double"/>
     </xsd:sequence>
@@ -95,9 +197,9 @@ const DESCRIBE_CAR_XML = `<?xml version="1.0" encoding="UTF-8"?>
 </xsd:schema>`;
 
 // ---------------------------------------------------------------------------
-// Cenário 1: Pessoa notificada / responsável pela área diferente do empreendedor
+// Cenário 1: Notificado / responsável / arrendatário e vínculo por identificador
 // ---------------------------------------------------------------------------
-test('Cenário 1: pessoa notificada e responsável pela área nunca são presumidos empreendedores ou proprietários', () => {
+test('Cenário 1: notificado, responsável pela área e arrendatário geram candidato apenas com CPF/CNPJ exato mantendo papel original e sem vínculo automático', () => {
   const barragem: BarragemRecord = {
     id: 'bar_01',
     nome: 'Barragem Fazenda Esperança',
@@ -151,20 +253,33 @@ test('Cenário 1: pessoa notificada e responsável pela área nunca são presumi
   assert.equal(arrendatario?.presunivelEmpreendedor, false);
   assert.equal(proprietario?.presunivelEmpreendedor, true);
 
-  // Sem proprietário explícito, notificado NÃO vira candidato automático a empreendedor
-  const semProp = encontrarCandidatosEmpreendedor({
+  // Com CPF/CNPJ normalizado exato, o notificado vira candidato para revisão humana com papel original preservado
+  const comDocNotificado = encontrarCandidatosEmpreendedor({
     barragem,
     empreendedores,
     atoresDoProcesso: atores.filter(a => a.papel !== 'proprietario_titular')
   });
-  assert.equal(semProp.classificacaoInicial, 'papeis_diferentes');
-  assert.equal(semProp.candidatos.length, 0);
+  assert.equal(comDocNotificado.classificacaoInicial, 'papeis_diferentes');
+  assert.equal(comDocNotificado.candidatos.length, 1);
+  assert.equal(comDocNotificado.candidatos[0].empreendedorId, 'emp_notificado');
+  assert.equal(comDocNotificado.candidatos[0].criterio, 'cpf_cnpj_exato');
+  assert.equal(comDocNotificado.candidatos[0].papelOriginal, 'notificado');
+  assert.equal(comDocNotificado.candidatos[0].classificacaoSugerida, 'papeis_diferentes');
+
+  // Sem CPF/CNPJ e sem CAR coincidente, notificado/responsável não gera candidato
+  const semDoc = encontrarCandidatosEmpreendedor({
+    barragem,
+    empreendedores: empreendedores.map(e => ({ ...e, cpfCnpj: '' })),
+    atoresDoProcesso: atores.filter(a => a.papel !== 'proprietario_titular')
+  });
+  assert.equal(semDoc.classificacaoInicial, 'papeis_diferentes');
+  assert.equal(semDoc.candidatos.length, 0);
 });
 
 // ---------------------------------------------------------------------------
 // Cenário 2: Duas barragens distintas no mesmo CAR
 // ---------------------------------------------------------------------------
-test('Cenário 2: detecta múltiplas barragens no mesmo CAR e alerta que CAR não identifica barragem isoladamente', () => {
+test('Cenário 2: detecta múltiplas barragens no mesmo CAR e CAR coincidente gera candidato para revisão humana', () => {
   const carComum = 'MT-5107909-AAAAAAAAAAAAAAAAAAAAAAAAAAAAAAAA';
   const dam1: BarragemRecord = {
     id: 'bar_car_1',
@@ -178,6 +293,7 @@ test('Cenário 2: detecta múltiplas barragens no mesmo CAR e alerta que CAR nã
     id: 'bar_car_2',
     nome: 'Barragem Inferior',
     car: 'mt 5107909 aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa',
+    empreendedorId: 'emp_mesmo_car',
     processo: 'PROC-002/2025',
     createdAt: '2026-01-01T10:00:00.000Z',
     updatedAt: '2026-01-01T10:00:00.000Z'
@@ -189,6 +305,25 @@ test('Cenário 2: detecta múltiplas barragens no mesmo CAR e alerta que CAR nã
   assert.equal(info.outrasBarragens.length, 1);
   assert.equal(info.outrasBarragens[0].id, 'bar_car_2');
   assert.match(info.mensagem, /não substitui a identificação individual/i);
+
+  const analiseCar = encontrarCandidatosEmpreendedor({
+    barragem: dam1,
+    empreendedores: [
+      {
+        id: 'emp_mesmo_car',
+        nome: 'Empreendedor Agro MT',
+        cpfCnpj: '98.765.432/0001-10',
+        createdAt: '2026-01-01T10:00:00.000Z',
+        updatedAt: '2026-01-01T10:00:00.000Z'
+      }
+    ],
+    barragensDoEmpreendedor: [dam1, dam2]
+  });
+
+  assert.equal(analiseCar.candidatos.length, 1);
+  assert.equal(analiseCar.candidatos[0].criterio, 'car_em_empreendimento');
+  assert.equal(analiseCar.candidatos[0].classificacaoSugerida, 'candidato');
+  assert.equal(analiseCar.classificacaoInicial, 'candidato');
 });
 
 // ---------------------------------------------------------------------------
@@ -203,31 +338,28 @@ test('Cenário 3: identifica corretamente coordenada ausente, inválida e ambíg
   assert.equal(invalida.status, 'invalida');
   assert.equal(invalida.permiteConsultaEspacial, false);
 
-  // Grau inteiro (baixa precisão / potencial sede)
   const imprecisa = avaliarCoordenadasBarragem('-14.0', '-56.0');
   assert.equal(imprecisa.status, 'fora_mt_ou_ambigua');
   assert.equal(imprecisa.permiteConsultaEspacial, true);
 
-  // Fora dos limites de MT (eixos invertidos)
   const foraMt = avaliarCoordenadasBarragem('-56.5', '-14.2');
   assert.equal(foraMt.status, 'fora_mt_ou_ambigua');
   assert.equal(foraMt.permiteConsultaEspacial, false);
 
-  // Válida em GMS de Mato Grosso
   const valida = avaliarCoordenadasBarragem(`14°26'52.8"S`, `56°58'51.6"W`);
   assert.equal(valida.status, 'valida');
   assert.equal(valida.permiteConsultaEspacial, true);
 });
 
 // ---------------------------------------------------------------------------
-// Cenário 4 & 5: Nenhuma feição encontrada / Proximidade BBOX / SEMA indisponível
+// Cenário 4 & 5 + BBOX sem dados pessoais + SEMA sem Supabase + Audit fail + RBAC
 // ---------------------------------------------------------------------------
-test('Cenário 4 e 5: /api/car-lookup trata nenhuma feição (INTERSECTS+BBOX), proximidade BBOX com distância e SEMA indisponível HTTP 403 sem simular dados', async () => {
+test('Cenário 4 e 5: /api/car-lookup trata vazio, BBOX sem dados pessoais, sem Supabase e RBAC + auditoria', async () => {
   const originalFetch = globalThis.fetch;
   resetSemaGeoserverCachesForTest();
   setTestSupabaseAdminForSemaAudit(null);
 
-  // 4A. Nenhuma feição encontrada em INTERSECTS nem BBOX
+  // 4A. Nenhuma feição encontrada
   globalThis.fetch = (async (input: RequestInfo | URL) => {
     const url = String(input);
     if (url.includes('request=GetCapabilities')) {
@@ -251,9 +383,10 @@ test('Cenário 4 e 5: /api/car-lookup trata nenhuma feição (INTERSECTS+BBOX), 
     await carLookupHandler(reqEmpty, resEmpty);
     assert.equal(resEmpty.statusCode, 200);
     assert.equal(resEmpty._body.encontrado, false);
+    assert.equal(resEmpty._body.auditoriaDisponivel, false);
     assert.equal(resEmpty._body.feicoes.length, 0);
 
-    // 4B. INTERSECTS vazio -> BBOX proximidade retorna 1 imóvel com distância calculada
+    // 4B. BBOX proximidade NÃO deve retornar proprietário, CPF/CNPJ nem outros atributos pessoais
     let callCount = 0;
     globalThis.fetch = (async (input: RequestInfo | URL, init?: RequestInit) => {
       const url = String(input);
@@ -270,7 +403,6 @@ test('Cenário 4 e 5: /api/car-lookup trata nenhuma feição (INTERSECTS+BBOX), 
           status: 200
         });
       }
-      // BBOX retorna um polígono ~500m ao norte
       return new Response(
         JSON.stringify({
           type: 'FeatureCollection',
@@ -293,7 +425,8 @@ test('Cenário 4 e 5: /api/car-lookup trata nenhuma feição (INTERSECTS+BBOX), 
               properties: {
                 NUMEROESTADUAL: 'MT-5100001',
                 NOMEPROPRIEDADE: 'FAZENDA PROXIMA',
-                NOMESPROPRIETARIOS: 'MARIA TITULAR (XXX.456.789-XX)',
+                NOMESPROPRIETARIOS: 'MARIA TITULAR SECRETA',
+                CPF_CNPJ: '123.456.789-01',
                 MUNICIPIO_CODIGO: '5103403',
                 AREA_HA: 120.5
               }
@@ -314,12 +447,106 @@ test('Cenário 4 e 5: /api/car-lookup trata nenhuma feição (INTERSECTS+BBOX), 
     assert.equal(resProx.statusCode, 200);
     assert.equal(resProx._body.encontrado, true);
     assert.equal(resProx._body.feicoes.length, 1);
-    assert.equal(resProx._body.feicoes[0]._spatialMeta.criterioEspacial, 'BBOX_PROXIMIDADE');
-    assert.ok(resProx._body.feicoes[0]._spatialMeta.distanciaMetros > 300);
-    assert.ok(resProx._body.feicoes[0]._spatialMeta.distanciaMetros < 800);
+    const bboxProps = resProx._body.feicoes[0].properties;
+    assert.equal(bboxProps.NUMEROESTADUAL, 'MT-5100001');
+    assert.equal(bboxProps.NOMEPROPRIEDADE, 'FAZENDA PROXIMA');
+    assert.ok(bboxProps.DISTANCIA_ESTIMADA_METROS > 300);
+    assert.equal(bboxProps.NOMESPROPRIETARIOS, undefined);
+    assert.equal(bboxProps.CPF_CNPJ, undefined);
+    assert.equal(bboxProps.MUNICIPIO_CODIGO, undefined);
+    assert.equal(bboxProps.AREA_HA, undefined);
+    assert.equal(resProx._body.feicoes[0]._schemaMeta.cpfCnpjCompletoDisponivel, false);
     assert.ok(callCount >= 2);
 
-    // 5. SEMA indisponível (HTTP 403) -> retorna erro transparente sem inventar dados
+    // 4C. INTERSECTS com Analista + auditoria funcionando -> retorna dado completo e grava auditoria com campos_consultados
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('request=GetCapabilities')) {
+        return new Response(CAPABILITIES_CAR_XML, { status: 200 });
+      }
+      if (url.includes('request=DescribeFeatureType')) {
+        return new Response(DESCRIBE_CAR_XML, { status: 200 });
+      }
+      return new Response(
+        JSON.stringify({
+          type: 'FeatureCollection',
+          features: [
+            {
+              type: 'Feature',
+              id: 'CAR_ATP.888',
+              properties: {
+                NUMEROESTADUAL: 'MT-5100002',
+                NOMEPROPRIEDADE: 'FAZENDA DIRETA',
+                NOMESPROPRIETARIOS: 'JOAO TITULAR',
+                CPF_CNPJ: '12345678901'
+              }
+            }
+          ]
+        }),
+        { status: 200 }
+      );
+    }) as typeof fetch;
+
+    const analistaMock = createSupabaseMockForSemaTests({ role: 'Analista', login: 'analista.mt' });
+    setTestSupabaseAdminForSemaAudit(analistaMock);
+    const resAnalista = createMockRes();
+    await carLookupHandler(
+      createMockReq({
+        method: 'POST',
+        headers: { authorization: 'Bearer valid-jwt' },
+        body: { lat: -14.448, lng: -56.981 }
+      }),
+      resAnalista
+    );
+    assert.equal(resAnalista.statusCode, 200);
+    assert.equal(resAnalista._body.auditoriaDisponivel, true);
+    assert.equal(resAnalista._body.feicoes[0]._schemaMeta.cpfCnpjCompletoDisponivel, true);
+    assert.equal(resAnalista._body.feicoes[0].properties.CPF_CNPJ, '123.456.789-01');
+    assert.equal(analistaMock.auditCalls.length, 1);
+    assert.equal(analistaMock.auditCalls[0].args.p_atributos_recebidos.visualizacao_dado_completo, true);
+    assert.ok(Array.isArray(analistaMock.auditCalls[0].args.p_atributos_recebidos.campos_consultados));
+    assert.equal(analistaMock.auditCalls[0].args.p_atributos_recebidos.consultado_por_login, 'analista.mt');
+    // Não pode armazenar CPF/CNPJ bruto nos atributos auditados
+    assert.equal(analistaMock.auditCalls[0].args.p_atributos_recebidos.CPF_CNPJ, undefined);
+
+    // 4D. Usuário comum NÃO recebe CPF/CNPJ completo
+    const usuarioMock = createSupabaseMockForSemaTests({ role: 'Usuário' });
+    setTestSupabaseAdminForSemaAudit(usuarioMock);
+    const resUsuario = createMockRes();
+    await carLookupHandler(
+      createMockReq({
+        method: 'POST',
+        headers: { authorization: 'Bearer valid-jwt' },
+        body: { lat: -14.448, lng: -56.981 }
+      }),
+      resUsuario
+    );
+    assert.equal(resUsuario.statusCode, 200);
+    assert.equal(resUsuario._body.feicoes[0]._schemaMeta.cpfCnpjCompletoDisponivel, false);
+    assert.notEqual(resUsuario._body.feicoes[0].properties.CPF_CNPJ, '123.456.789-01');
+
+    // 4E. Se auditoria falhar no servidor, mesmo Administrador NÃO recebe CPF/CNPJ completo
+    const adminAuditFailMock = createSupabaseMockForSemaTests({
+      role: 'Administrador',
+      auditFail: true
+    });
+    setTestSupabaseAdminForSemaAudit(adminAuditFailMock);
+    const resAuditFail = createMockRes();
+    await carLookupHandler(
+      createMockReq({
+        method: 'POST',
+        headers: { authorization: 'Bearer valid-jwt' },
+        body: { lat: -14.448, lng: -56.981 }
+      }),
+      resAuditFail
+    );
+    assert.equal(resAuditFail.statusCode, 200);
+    assert.equal(resAuditFail._body.auditoriaDisponivel, false);
+    assert.equal(resAuditFail._body.feicoes[0]._schemaMeta.cpfCnpjCompletoDisponivel, false);
+    assert.notEqual(resAuditFail._body.feicoes[0].properties.CPF_CNPJ, '123.456.789-01');
+
+    // 5. SEMA indisponível (HTTP 403)
+    setTestSupabaseAdminForSemaAudit(null);
     resetSemaGeoserverCachesForTest();
     globalThis.fetch = (async () =>
       new Response('Forbidden', { status: 403 })) as typeof fetch;
@@ -334,6 +561,90 @@ test('Cenário 4 e 5: /api/car-lookup trata nenhuma feição (INTERSECTS+BBOX), 
     assert.equal(resDown.statusCode, 502);
     assert.ok(resDown._body.error);
   } finally {
+    setTestSupabaseAdminForSemaAudit(null);
+    globalThis.fetch = originalFetch;
+    resetSemaGeoserverCachesForTest();
+  }
+});
+
+test('/api/sema-documentos bloqueia dado pessoal completo quando auditoria falha ou sem Supabase e exige RBAC Administrador/Analista', async () => {
+  const originalFetch = globalThis.fetch;
+  resetSemaGeoserverCachesForTest();
+
+  const docsCapabilitiesXml = `<?xml version="1.0" encoding="UTF-8"?>
+  <wfs:WFS_Capabilities version="2.0.0" xmlns:wfs="http://www.opengis.net/wfs/2.0">
+    <FeatureTypeList>
+      <FeatureType><Name>Geoportal:CAR_ATP</Name><Title>CAR ATP</Title></FeatureType>
+    </FeatureTypeList>
+  </wfs:WFS_Capabilities>`;
+
+  globalThis.fetch = (async (input: RequestInfo | URL) => {
+    const url = String(input);
+    if (url.includes('request=GetCapabilities')) {
+      return new Response(docsCapabilitiesXml, { status: 200 });
+    }
+    if (url.includes('request=DescribeFeatureType')) {
+      return new Response(DESCRIBE_CAR_XML, { status: 200 });
+    }
+    return new Response(
+      JSON.stringify({
+        type: 'FeatureCollection',
+        features: [
+          {
+            type: 'Feature',
+            id: 'CAR_ATP.901',
+            properties: {
+              NUMEROESTADUAL: 'MT-5100009',
+              NOMEPROPRIEDADE: 'FAZENDA DOCS',
+              NOMESPROPRIETARIOS: 'EMPRESA TITULAR S/A',
+              CPF_CNPJ: '12.345.678/0001-99'
+            }
+          }
+        ]
+      }),
+      { status: 200 }
+    );
+  }) as typeof fetch;
+
+  try {
+    // Auditoria falhando com Administrador -> mascara dado pessoal
+    const failMock = createSupabaseMockForSemaTests({ role: 'Administrador', auditFail: true });
+    setTestSupabaseAdminForSemaAudit(failMock);
+    const resFail = createMockRes();
+    await semaDocumentosHandler(
+      createMockReq({
+        method: 'POST',
+        headers: { authorization: 'Bearer valid-jwt' },
+        body: { car: 'MT-5100009' }
+      }),
+      resFail
+    );
+    assert.equal(resFail.statusCode, 200);
+    assert.equal(resFail._body.auditoriaDisponivel, false);
+    const itemFail = resFail._body.carImoveis[0];
+    assert.equal(itemFail.cpfCnpjCompletoDisponivel, false);
+    assert.notEqual(itemFail.cpfCnpjMascarado, '12.345.678/0001-99');
+
+    // Analista com auditoria OK -> retorna dado completo e grava auditoria
+    const okMock = createSupabaseMockForSemaTests({ role: 'Analista' });
+    setTestSupabaseAdminForSemaAudit(okMock);
+    const resOk = createMockRes();
+    await semaDocumentosHandler(
+      createMockReq({
+        method: 'POST',
+        headers: { authorization: 'Bearer valid-jwt' },
+        body: { car: 'MT-5100009' }
+      }),
+      resOk
+    );
+    assert.equal(resOk.statusCode, 200);
+    assert.equal(resOk._body.auditoriaDisponivel, true);
+    const itemOk = resOk._body.carImoveis[0];
+    assert.equal(itemOk.cpfCnpjCompletoDisponivel, true);
+    assert.equal(itemOk.cpfCnpjMascarado, '12.345.678/0001-99');
+    assert.equal(okMock.auditCalls[0].args.p_atributos_recebidos.visualizacao_dado_completo, true);
+  } finally {
+    setTestSupabaseAdminForSemaAudit(null);
     globalThis.fetch = originalFetch;
     resetSemaGeoserverCachesForTest();
   }
@@ -349,13 +660,13 @@ test('estimateGeometryDistanceMeters calcula distância coerente para ponto e po
 });
 
 // ---------------------------------------------------------------------------
-// Cenário 6: Nome semelhante sem identificador forte
+// Cenário 6: Nome semelhante ou idêntico sem identificador forte NÃO gera candidato
 // ---------------------------------------------------------------------------
-test('Cenário 6: nome semelhante sem CPF/CNPJ/ID forte é marcado como possível erro de grafia e não como confirmado', () => {
+test('Cenário 6: nome semelhante ou idêntico sem CPF/CNPJ ou CAR coincidente não gera candidato', () => {
   const barragem: BarragemRecord = {
     id: 'bar_grafia',
     nome: 'Barragem Santa Luzia',
-    empreendedor: 'Joao Batista da Sylva',
+    empreendedor: 'João Batista da Silva',
     createdAt: '2026-01-01T10:00:00.000Z',
     updatedAt: '2026-01-01T10:00:00.000Z'
   };
@@ -376,16 +687,44 @@ test('Cenário 6: nome semelhante sem CPF/CNPJ/ID forte é marcado como possíve
     atoresDoProcesso: extrairAtoresDoProcesso({ barragem, empreendedores })
   });
 
-  assert.equal(analise.candidatos.length, 1);
-  assert.equal(analise.candidatos[0].possuiIdentificadorForte, false);
-  assert.equal(analise.candidatos[0].classificacaoSugerida, 'possivel_erro_grafia');
-  assert.equal(analise.classificacaoInicial, 'possivel_erro_grafia');
+  assert.equal(analise.candidatos.length, 0);
+  assert.equal(analise.classificacaoInicial, 'sem_correspondencia');
+
+  // Mesmo com nome diferente, CPF/CNPJ normalizado exato gera candidato forte
+  const comDoc = encontrarCandidatosEmpreendedor({
+    barragem: { ...barragem, empreendedor: 'Joao B. Silva (12345678900)' },
+    empreendedores,
+    atoresDoProcesso: extrairAtoresDoProcesso({
+      barragem: { ...barragem, empreendedor: 'Joao B. Silva (12345678900)' },
+      empreendedores
+    })
+  });
+  assert.equal(comDoc.candidatos.length, 1);
+  assert.equal(comDoc.candidatos[0].criterio, 'cpf_cnpj_exato');
+  assert.equal(comDoc.candidatos[0].possuiIdentificadorForte, true);
+  assert.equal(comDoc.classificacaoInicial, 'candidato');
 });
 
 // ---------------------------------------------------------------------------
-// Cenário 7: Parecer com RT/ART no texto sem vínculo estruturado vs Notificação/Ofício sem RT
+// Cenário 7: Regex `\bRT\b` isolado + Parecer com RT/ART sem vínculo estruturado
 // ---------------------------------------------------------------------------
-test('Cenário 7: Parecer cita RT/ART sem vínculo estruturado gera pendência; Notificação/Ofício sem RT NÃO é divergência', () => {
+test('Cenário 7: extrairCitacaoRtDeParecer exige palavra isolada \\bRT\\b e não casa dentro de ART/PART/RRT', () => {
+  const soArt = extrairCitacaoRtDeParecer({
+    titulo: 'Parecer de Análise · PART: João Fake · ART nº MT20259999'
+  });
+  assert.ok(soArt);
+  assert.equal(soArt?.artNumero, 'MT20259999');
+  assert.equal(soArt?.rtNome, undefined);
+
+  const comRtIsolado = extrairCitacaoRtDeParecer({
+    titulo: 'Parecer Técnico · RT: Eng. Carlos Alberto · ART nº MT20259999'
+  });
+  assert.ok(comRtIsolado);
+  assert.equal(comRtIsolado?.rtNome, 'Eng. Carlos Alberto');
+  assert.equal(comRtIsolado?.artNumero, 'MT20259999');
+});
+
+test('Cenário 7B: Parecer cita RT/ART sem vínculo estruturado gera pendência; Notificação/Ofício sem RT NÃO é divergência', () => {
   assert.equal(isDocumentoSemRtIgnoradoComoDivergencia('Notificação'), true);
   assert.equal(isDocumentoSemRtIgnoradoComoDivergencia('Ofício'), true);
   assert.equal(isDocumentoSemRtIgnoradoComoDivergencia('Parecer Técnico'), false);
@@ -446,7 +785,6 @@ test('Cenário 7: Parecer cita RT/ART sem vínculo estruturado gera pendência; 
     documentosPorBarragem: docsPorBarragem
   });
 
-  // Apenas o Parecer gera pendência; Notificação e Ofício sem RT são ignorados corretamente
   assert.equal(pendencias.length, 1);
   assert.equal(pendencias[0].documentoId, 'parecer_com_rt');
   assert.equal(pendencias[0].citacao.artNumero, 'MT20250088123');
@@ -456,9 +794,9 @@ test('Cenário 7: Parecer cita RT/ART sem vínculo estruturado gera pendência; 
 });
 
 // ---------------------------------------------------------------------------
-// Concorrência otimista + Auditoria completa em `revisoes`
+// Concorrência otimista + Gravação segura no servidor (/api/conciliacao-gravar)
 // ---------------------------------------------------------------------------
-test('Valida concorrência otimista antes de gravar no mestre e serializa/desserializa auditoria completa em revisoes', async () => {
+test('Valida concorrência otimista exigindo banco central e falhando quando registro remoto não existe', async () => {
   const barragens: BarragemRecord[] = [
     {
       id: 'bar_lock',
@@ -468,20 +806,54 @@ test('Valida concorrência otimista antes de gravar no mestre e serializa/desser
     }
   ];
 
-  const staleCheck = await verificarConcorrenciaCadastroMestre({
-    entidadeTipo: 'barragem',
-    entidadeId: 'bar_lock',
-    expectedUpdatedAt: '2026-01-01T10:00:00.000Z',
-    localRecords: barragens
-  });
-  assert.equal(staleCheck.ok, false);
-  assert.match(staleCheck.error || '', /modificado/i);
-
-  const freshCheck = await verificarConcorrenciaCadastroMestre({
+  // Sem banco central configurado, não pode confirmar concorrência por padrão
+  const noRemoteCheck = await verificarConcorrenciaCadastroMestre({
     entidadeTipo: 'barragem',
     entidadeId: 'bar_lock',
     expectedUpdatedAt: '2026-05-01T12:00:00.000Z',
     localRecords: barragens
+  });
+  assert.equal(noRemoteCheck.ok, false);
+
+  // Registro remoto ausente (`!data`) NÃO pode retornar ok
+  const missingRemoteMock = createSupabaseMockForSemaTests({
+    role: 'Analista',
+    damRow: null
+  });
+  const missingRemoteCheck = await verificarConcorrenciaCadastroMestre({
+    entidadeTipo: 'barragem',
+    entidadeId: 'bar_lock',
+    expectedUpdatedAt: '2026-05-01T12:00:00.000Z',
+    localRecords: barragens,
+    supabaseClient: missingRemoteMock
+  });
+  assert.equal(missingRemoteCheck.ok, false);
+
+  const staleCheck = await verificarConcorrenciaCadastroMestre({
+    entidadeTipo: 'barragem',
+    entidadeId: 'bar_lock',
+    expectedUpdatedAt: '2026-01-01T10:00:00.000Z',
+    localRecords: barragens,
+    allowLocalOnlyFallback: true
+  });
+  assert.equal(staleCheck.ok, false);
+  assert.match(staleCheck.error || '', /modificado/i);
+
+  const validRemoteMock = createSupabaseMockForSemaTests({
+    role: 'Analista',
+    damRow: {
+      id: 'bar_lock',
+      updated_at: '2026-05-01T12:00:00.000Z',
+      empreendedor_id: null,
+      empreendedor: ''
+    }
+  });
+  const freshCheck = await verificarConcorrenciaCadastroMestre({
+    entidadeTipo: 'barragem',
+    entidadeId: 'bar_lock',
+    expectedUpdatedAt: '2026-05-01T12:00:00.000Z',
+    localRecords: barragens,
+    supabaseClient: validRemoteMock
   });
   assert.equal(freshCheck.ok, true);
 
@@ -517,5 +889,116 @@ test('Valida concorrência otimista antes de gravar no mestre e serializa/desser
   const parsed = parseRevisaoConciliacaoDetalhes(rev);
   assert.equal(parsed.structured?.classificacao, 'confirmado_usuario');
   assert.equal(parsed.structured?.evidencias.multiplasBarragensNoCar, 2);
-  assert.equal(parsed.structured?.justificativa, 'Confirmado via documentação do processo e interseção CAR.');
+});
+
+test('/api/conciliacao-gravar aplica RBAC, valida banco/auditoria, trata conflito e falha atômica de auditoria', async () => {
+  const validBody = {
+    alvoTipo: 'barragem_empreendedor',
+    barragemId: 'bar_lock',
+    acao: 'vincular',
+    classificacao: 'confirmado_usuario',
+    justificativa: 'Vínculo conferido via documento do processo CPF 123.456.789-01.',
+    masterUpdatedAtSnapshot: '2026-05-01T12:00:00.000Z',
+    selectedEmpreendedorId: 'emp_1',
+    auditPayload: {
+      schemaVersion: 1,
+      modulo: 'conciliacao_assistida',
+      alvoTipo: 'barragem_empreendedor',
+      barragemId: 'bar_lock',
+      barragemNome: 'Barragem Controle',
+      classificacao: 'confirmado_usuario',
+      acao: 'vincular',
+      fonte: 'Conferência Humana Administra',
+      dataDecisao: '2026-05-01T13:00:00.000Z',
+      usuario: 'Analista CSB',
+      valorAnterior: 'Sem vínculo',
+      valorProposto: 'emp_1',
+      justificativa: 'Conferido',
+      evidencias: {}
+    }
+  };
+
+  try {
+    // 1. Sem banco/auditoria -> bloqueia gravação com 503
+    setTestSupabaseAdminForSemaAudit(null);
+    const resNoDb = createMockRes();
+    await conciliacaoGravarHandler(
+      createMockReq({ method: 'POST', headers: { authorization: 'Bearer jwt' }, body: validBody }),
+      resNoDb
+    );
+    assert.equal(resNoDb.statusCode, 503);
+    assert.equal(resNoDb._body.success, false);
+
+    // 2. Perfil Visualizador -> bloqueia com 403 antes da RPC
+    const vizMock = createSupabaseMockForSemaTests({ role: 'Visualizador' });
+    setTestSupabaseAdminForSemaAudit(vizMock);
+    const resViz = createMockRes();
+    await conciliacaoGravarHandler(
+      createMockReq({ method: 'POST', headers: { authorization: 'Bearer jwt' }, body: validBody }),
+      resViz
+    );
+    assert.equal(resViz.statusCode, 403);
+    assert.equal(resViz._body.success, false);
+    assert.equal(vizMock.auditCalls.length, 0);
+
+    // 3. Conflito de concorrência retornado pela RPC -> 409
+    const conflictMock = createSupabaseMockForSemaTests({
+      role: 'Analista',
+      rpcHandler: async () => ({
+        data: { success: false, http_status: 409, error: 'Conflito de concorrência detectado' },
+        error: null
+      })
+    });
+    setTestSupabaseAdminForSemaAudit(conflictMock);
+    const resConflict = createMockRes();
+    await conciliacaoGravarHandler(
+      createMockReq({ method: 'POST', headers: { authorization: 'Bearer jwt' }, body: validBody }),
+      resConflict
+    );
+    assert.equal(resConflict.statusCode, 409);
+    assert.equal(resConflict._body.success, false);
+
+    // 4. Falha na auditoria/revisão (erro de banco ou sem revisao_id) -> 500 e success=false
+    const failAuditMock = createSupabaseMockForSemaTests({
+      role: 'Analista',
+      rpcHandler: async () => ({
+        data: null,
+        error: { message: 'Falha ao inserir auditoria em revisoes' }
+      })
+    });
+    setTestSupabaseAdminForSemaAudit(failAuditMock);
+    const resFailAudit = createMockRes();
+    await conciliacaoGravarHandler(
+      createMockReq({ method: 'POST', headers: { authorization: 'Bearer jwt' }, body: validBody }),
+      resFailAudit
+    );
+    assert.equal(resFailAudit.statusCode, 500);
+    assert.equal(resFailAudit._body.success, false);
+
+    // 5. Sucesso atômico com Analista -> 200 e justificativa sanitizada sem CPF bruto
+    const okMock = createSupabaseMockForSemaTests({
+      role: 'Analista',
+      rpcHandler: async () => ({
+        data: {
+          success: true,
+          http_status: 200,
+          revisao_id: 'rev_ok_1',
+          updated_at: '2026-05-01T14:00:00.000Z'
+        },
+        error: null
+      })
+    });
+    setTestSupabaseAdminForSemaAudit(okMock);
+    const resOk = createMockRes();
+    await conciliacaoGravarHandler(
+      createMockReq({ method: 'POST', headers: { authorization: 'Bearer jwt' }, body: validBody }),
+      resOk
+    );
+    assert.equal(resOk.statusCode, 200);
+    assert.equal(resOk._body.success, true);
+    assert.equal(resOk._body.revisaoId, 'rev_ok_1');
+    assert.ok(!okMock.auditCalls[0].args.p_justificativa.includes('123.456.789-01'));
+  } finally {
+    setTestSupabaseAdminForSemaAudit(null);
+  }
 });

@@ -96,6 +96,7 @@ function mapMappedCarFeatureToSemaItem(
   return {
     id: feat.id || feat.car || feat.carFederal || '',
     auditoriaId: feat.auditoriaId,
+    auditoriaDisponivel: feat.auditoriaDisponivel,
     tipo: feat.atividade || 'CAR / Imóvel Rural',
     numeroDocumento: feat.car || feat.carFederal || '',
     nomeDocumento: feat.empreendimento || '',
@@ -318,6 +319,10 @@ export function mapPropertiesToCarFeature(feature: CarGeoJsonFeature): CarFeatur
   return {
     id: feature?.id ? String(feature.id) : undefined,
     auditoriaId: feature?.auditoriaId ? String(feature.auditoriaId) : undefined,
+    auditoriaDisponivel:
+      typeof feature?.auditoriaDisponivel === 'boolean'
+        ? feature.auditoriaDisponivel
+        : undefined,
     camadaOrigem: feature?.camadaOrigem,
     car: extractFirstMatchingField(props, CAR_CAMPOS.car),
     carFederal: extractFirstMatchingField(props, CAR_CAMPOS.carFederal),
@@ -446,16 +451,16 @@ export async function consultarCarPorCoordenada(
       });
     };
 
-    let res = await doFetchGet(false);
+    let res = await doFetchPost(false);
     if (res.status === 401 && isSupabaseConfigured()) {
-      res = await doFetchGet(true);
+      res = await doFetchPost(true);
     }
 
     let { data: parsedData, rawText } = await parseApiJsonOrText<CarLookupApiResponse>(res);
-    if (isProxyHtmlBlock(res.status, rawText, parsedData) || res.status === 405) {
-      res = await doFetchPost(false);
+    if (isProxyHtmlBlock(res.status, rawText, parsedData) || res.status === 404 || res.status === 405) {
+      res = await doFetchGet(false);
       if (res.status === 401 && isSupabaseConfigured()) {
-        res = await doFetchPost(true);
+        res = await doFetchGet(true);
       }
       ({ data: parsedData, rawText } = await parseApiJsonOrText<CarLookupApiResponse>(res));
     }
@@ -482,6 +487,8 @@ export async function consultarCarPorCoordenada(
         camadasConsultadas: Array.isArray(data.camadasConsultadas)
           ? data.camadasConsultadas
           : undefined,
+        auditoriaDisponivel:
+          typeof data.auditoriaDisponivel === 'boolean' ? data.auditoriaDisponivel : undefined,
         consultadoEm: data.consultadoEm || new Date().toISOString(),
         mensagemErro:
           data.error ||
@@ -507,6 +514,8 @@ export async function consultarCarPorCoordenada(
         ? data.camadasConsultadas
         : undefined,
       mensagemStatus: data.mensagemStatus,
+      auditoriaDisponivel:
+        typeof data.auditoriaDisponivel === 'boolean' ? data.auditoriaDisponivel : undefined,
       consultadoEm: data.consultadoEm || new Date().toISOString()
     };
   } catch (err: any) {
@@ -818,6 +827,8 @@ export async function consultarDocumentosSema(
       totalRegistros: Number(data.totalRegistros || 0),
       consultadoEm: data.consultadoEm || new Date().toISOString(),
       mensagemStatus: String(data.mensagemStatus || ''),
+      auditoriaDisponivel:
+        typeof data.auditoriaDisponivel === 'boolean' ? data.auditoriaDisponivel : undefined,
       camadasConsultadas: Array.isArray(data.camadasConsultadas) ? data.camadasConsultadas : []
     };
   } catch (err: any) {

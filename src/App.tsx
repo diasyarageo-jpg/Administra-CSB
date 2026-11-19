@@ -42,15 +42,9 @@ import {
   ConciliacaoCadastrosView,
   computeConciliacaoPendencias
 } from './components/ConciliacaoCadastrosView';
+import { PendenciasView } from './components/PendenciasView';
 import type { ConciliacaoDecisaoSubmission } from './components/ConciliacaoAssistidaModal';
-import {
-  construirRegistroRevisaoConciliacao,
-  verificarConcorrenciaCadastroMestre
-} from './utils/conciliacaoEngine';
-import {
-  aceitarCamposSemaParaMestre,
-  isValidSemaAuditoriaId
-} from './services/carLookupService';
+import { gravarConciliacaoAssistidaServidor } from './utils/conciliacaoEngine';
 import { parseCoordAdvanced } from './services/coordService';
 import {
   BarragensAdvancedFilters,
@@ -267,6 +261,7 @@ const viewNames: Record<string, string> = {
   revisoes: 'Conciliação de cadastros',
   produtividade: 'Produtividade',
   portarias: 'Portarias',
+  pendencias: 'Pendências',
   documentos: 'Documentos',
   usuarios: 'Usuários',
   integracao: 'Estrutura de integração',
@@ -811,183 +806,51 @@ export default function App() {
     submission: ConciliacaoDecisaoSubmission
   ): Promise<{ success: boolean; error?: string }> => {
     if (userRole === 'Visualizador') {
-      return { success: false, error: 'Perfil Visualizador não possui permissão para registrar alterações.' };
+      return {
+        success: false,
+        error: 'Perfil Visualizador não possui permissão para registrar alterações.'
+      };
     }
 
-    let workingDb = db;
-
-    if (submission.acao === 'vincular') {
-      if (submission.alvoTipo === 'barragem_empreendedor') {
-        const targetEmp = workingDb.empreendedores.find(
-          e => String(e.id) === String(submission.selectedEmpreendedorId)
-        );
-        if (!targetEmp) {
-          return { success: false, error: 'Empreendedor selecionado não encontrado no cadastro mestre.' };
-        }
-
-        const concurrency = await verificarConcorrenciaCadastroMestre({
-          entidadeTipo: 'barragem',
-          entidadeId: String(submission.barragem.id),
-          expectedUpdatedAt: submission.masterUpdatedAtSnapshot,
-          expectedEmpreendedorId: submission.masterEmpreendedorIdSnapshot,
-          localRecords: workingDb.barragens
-        });
-        if (!concurrency.ok) {
-          return { success: false, error: concurrency.error };
-        }
-
-        const idxDam = workingDb.barragens.findIndex(
-          b => String(b.id) === String(submission.barragem.id)
-        );
-        if (idxDam < 0) {
-          return { success: false, error: 'Barragem alvo não localizada.' };
-        }
-
-        const existingDam = workingDb.barragens[idxDam];
-        const canUseSemaRpc = Boolean(
-          isSupabaseConfigured() &&
-            isValidSemaAuditoriaId(submission.selectedSemaFeature?.auditoriaId)
-        );
-
-        const updatedDam = {
-          ...existingDam,
-          empreendedorId: targetEmp.id,
-          empreendedor: targetEmp.id,
-          ...(submission.vincularCarDaSema && submission.selectedSemaFeature?.car
-            ? { car: submission.selectedSemaFeature.car }
-            : {}),
-          updatedAt: new Date().toISOString()
-        };
-
-        if (canUseSemaRpc) {
-          const semaCar =
-            submission.vincularCarDaSema && submission.selectedSemaFeature?.car
-              ? submission.selectedSemaFeature.car
-              : '';
-          const rpcRes = await aceitarCamposSemaParaMestre({
-            auditoriaId: String(submission.selectedSemaFeature!.auditoriaId),
-            entidadeTipo: 'barragem',
-            entidadeId: String(existingDam.id),
-            campos: {
-              empreendedor_id: String(targetEmp.id),
-              ...(semaCar ? { car: semaCar } : {})
-            },
-            motivo: submission.justificativa,
-            criterioVinculo: 'confirmacao_manual_analista'
-          });
-
-          if (!rpcRes.success) {
-            return {
-              success: false,
-              error: rpcRes.error || 'Falha ao gravar vínculo auditado via SEMA/MT no cadastro mestre.'
-            };
-          }
-
-          const nextBarragens = [...workingDb.barragens];
-          nextBarragens[idxDam] = updatedDam;
-          workingDb = { ...workingDb, barragens: nextBarragens };
-          saveNotificaDatabase(workingDb);
-        } else {
-          const damSave = await notificaDataService.saveRecord(
-            workingDb,
-            'barragens',
-            updatedDam,
-            idxDam,
-            currentAuthUser?.id
-          );
-          if (isSupabaseConfigured() && !damSave.savedRemote && damSave.error) {
-            return { success: false, error: damSave.error };
-          }
-          workingDb = damSave.updatedDb;
-        }
-      } else {
-        const targetRtIdx = workingDb.rts.findIndex(
-          r => String(r.id) === String(submission.selectedRtId)
-        );
-        if (targetRtIdx < 0) {
-          return { success: false, error: 'Responsável Técnico selecionado não encontrado.' };
-        }
-        const targetRt = workingDb.rts[targetRtIdx];
-
-        const [damConcurrency, rtConcurrency] = await Promise.all([
-          verificarConcorrenciaCadastroMestre({
-            entidadeTipo: 'barragem',
-            entidadeId: String(submission.barragem.id),
-            expectedUpdatedAt: submission.masterUpdatedAtSnapshot,
-            localRecords: workingDb.barragens
-          }),
-          verificarConcorrenciaCadastroMestre({
-            entidadeTipo: 'rt',
-            entidadeId: String(targetRt.id),
-            expectedUpdatedAt: targetRt.updatedAt,
-            localRecords: workingDb.rts
-          })
-        ]);
-
-        if (!damConcurrency.ok) {
-          return { success: false, error: damConcurrency.error };
-        }
-        if (!rtConcurrency.ok) {
-          return { success: false, error: rtConcurrency.error };
-        }
-
-        const newLinkId =
-          typeof crypto !== 'undefined' && typeof crypto.randomUUID === 'function'
-            ? `vinc_${crypto.randomUUID()}`
-            : `vinc_${Date.now()}`;
-        const existingLinks = Array.isArray(targetRt.vinculos) ? targetRt.vinculos : [];
-        const newVinculo = {
-          id: newLinkId,
-          rtId: String(targetRt.id),
-          art: String(submission.selectedRtArt || ''),
-          artRrt: String(submission.selectedRtArt || ''),
-          barragemVinculada: String(submission.barragem.id),
-          barragemId: String(submission.barragem.id),
-          nomeBarragem: String(submission.barragem.nome || ''),
-          situacao: 'Ativo',
-          processo: submission.barragem.processo || undefined,
-          parecerOrigemId: submission.auditPayload.evidencias.parecerDocumento || 'ADMINISTRA:CONCILIACAO',
-          observacoes: `Conciliação de Parecer: ${submission.justificativa}`
-        };
-
-        const updatedRt = {
-          ...targetRt,
-          vinculos: [...existingLinks, newVinculo],
-          barragensVinculadas: Array.from(
-            new Set([
-              ...(Array.isArray(targetRt.barragensVinculadas) ? targetRt.barragensVinculadas : []),
-              String(submission.barragem.id)
-            ])
-          ),
-          updatedAt: new Date().toISOString()
-        };
-
-        const rtSave = await notificaDataService.saveRecord(
-          workingDb,
-          'rts',
-          updatedRt,
-          targetRtIdx,
-          currentAuthUser?.id
-        );
-        if (isSupabaseConfigured() && !rtSave.savedRemote && rtSave.error) {
-          return { success: false, error: rtSave.error };
-        }
-        workingDb = rtSave.updatedDb;
-      }
-    }
-
-    const revRecord = construirRegistroRevisaoConciliacao({
-      payload: submission.auditPayload,
-      createdBy: currentAuthUser?.id
+    const res = await gravarConciliacaoAssistidaServidor({
+      alvoTipo: submission.alvoTipo,
+      barragemId: String(submission.barragem.id),
+      acao: submission.acao,
+      classificacao: submission.classificacao,
+      justificativa: submission.justificativa,
+      masterUpdatedAtSnapshot: submission.masterUpdatedAtSnapshot,
+      masterEmpreendedorIdSnapshot: submission.masterEmpreendedorIdSnapshot,
+      selectedEmpreendedorId: submission.selectedEmpreendedorId,
+      selectedRtId: submission.selectedRtId,
+      selectedRtArt: submission.selectedRtArt,
+      selectedRtUpdatedAtSnapshot: submission.selectedRtUpdatedAtSnapshot,
+      auditoriaId: submission.selectedSemaFeature?.auditoriaId,
+      vincularCarDaSema: submission.vincularCarDaSema,
+      semaCar:
+        submission.selectedSemaFeature?.car ||
+        submission.selectedSemaFeature?.carFederal ||
+        undefined,
+      auditPayload: submission.auditPayload
     });
-    const revSave = await notificaDataService.saveRecord(
-      workingDb,
-      'revisoes',
-      revRecord,
-      null,
-      currentAuthUser?.id
-    );
-    setDb(revSave.updatedDb);
+
+    if (!res.success) {
+      return {
+        success: false,
+        error:
+          res.error ||
+          'Falha ao gravar decisão e auditoria no servidor. Nenhuma alteração foi aplicada.'
+      };
+    }
+
+    try {
+      const reloadRes = await notificaDataService.fetchRemoteDatabase();
+      if (reloadRes.success && reloadRes.db) {
+        setDb(reloadRes.db);
+        saveNotificaDatabase(reloadRes.db);
+      }
+    } catch {
+      // Caso o recarregamento falhe momentaneamente, a transação já foi confirmada no servidor.
+    }
 
     if (submission.acao === 'vincular') {
       showToast('Vínculo confirmado com auditoria registrada.');
@@ -1584,6 +1447,15 @@ export default function App() {
             }}
           >
             <span className="nav-ico">▣</span>Portarias
+          </button>
+          <button
+            className={`navbtn ${activeView === 'pendencias' ? 'active' : ''}`}
+            onClick={() => {
+              setActiveView('pendencias');
+              setMenuOpen(false);
+            }}
+          >
+            <span className="nav-ico">⚑</span>Pendências
           </button>
           <button
             className={`navbtn ${activeView === 'documentos' ? 'active' : ''}`}
@@ -3141,6 +3013,16 @@ export default function App() {
               onConsultarSemaEmpreendedor={record => setEmpreendedorSemaModal(record)}
               onOpenGeoportalSync={() => setShowGeoportalSyncModal(true)}
               onRegistrarConciliacao={handleRegistrarConciliacao}
+            />
+          )}
+
+          {/* PENDÊNCIAS */}
+          {activeView === 'pendencias' && (
+            <PendenciasView
+              userRole={userRole}
+              empreendedores={db.empreendedores}
+              barragens={db.barragens}
+              onNotify={showToast}
             />
           )}
 

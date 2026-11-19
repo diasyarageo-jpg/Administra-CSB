@@ -4,13 +4,17 @@ import {
   SEMA_FIELD_CANDIDATES,
   resolveConfirmedFields,
   preserveSemaProperties,
+  sanitizeSemaProperties,
   extractConfirmedFieldValue,
   stripOuterQuotesAndBrackets
 } from '../src/config/carCampos';
 import {
   authorizeSemaLookupRequest,
+  canViewFullSemaPersonalData,
   parseSemaAuditTargetContext,
-  recordSemaServerAudit,
+  recordSemaServerAuditDetailed,
+  scrubSensitiveTextForServerLog,
+  sha256HexServer,
   validateTargetEntityAccess
 } from '../src/server/semaAudit';
 import {
@@ -305,14 +309,69 @@ async function queryLayerSpatial(
   }
 
   const consultadoEm = new Date().toISOString();
+  const pickBboxPublicProps = (rawProps: Record<string, any>, distMetros: number): Record<string, any> => {
+    const allowedMap = new Map<string, string>();
+    for (const [k, v] of Object.entries(rawProps || {})) {
+      const upper = k.toUpperCase();
+      if (
+        upper === 'NUMEROESTADUAL' ||
+        upper === 'CAR_ESTADUAL' ||
+        upper === 'CAR_FEDERAL' ||
+        upper === 'CODIGO_CAR_FEDERAL' ||
+        upper === 'PROTOCOLO' ||
+        upper === 'PROTOCOLO_NUMERO' ||
+        upper === 'NOMEPROPRIEDADE' ||
+        upper === 'NOME_PROPRIEDADE'
+      ) {
+        allowedMap.set(k, v !== undefined && v !== null ? String(v) : '');
+      }
+    }
+    const out: Record<string, any> = {};
+    for (const [k, v] of allowedMap.entries()) {
+      out[k] = typeof v === 'string' ? stripOuterQuotesAndBrackets(v).replace(/"/g, '').trim() : v;
+    }
+    out.DISTANCIA_ESTIMADA_METROS = distMetros;
+    return out;
+  };
+
   const mappedFeatures = rawFeatures.slice(0, maxFeatures).map((f: any) => {
     const rawProps = f.properties && typeof f.properties === 'object' ? f.properties : {};
-    const docInspection = inspectConfirmedCpfCnpj(rawProps, confirmedDocFields, confirmedOwnerFields);
-    const { docDigits, ...publicDocInspection } = docInspection;
     const distMetros =
       criterioUsado === 'INTERSECTS'
         ? 0
         : estimateGeometryDistanceMeters(f.geometry, lat, lng) ?? raioMetros;
+
+    if (criterioUsado === 'BBOX_PROXIMIDADE') {
+      const bboxProps = pickBboxPublicProps(rawProps, distMetros);
+      return {
+        type: f.type || 'Feature',
+        id: f.id,
+        geometry: f.geometry,
+        geometry_name: f.geometry_name,
+        camadaOrigem: layerName,
+        _schemaMeta: {
+          camposConfirmados: Object.keys(bboxProps),
+          cpfCnpjCompletoDisponivel: false,
+          cpfCnpjStatus: 'ausente' as const
+        },
+        _spatialMeta: {
+          criterioEspacial: criterioUsado,
+          distanciaMetros: distMetros,
+          raioPesquisadoMetros: raioMetros,
+          camada: layerName,
+          fonte: 'SEMA-MT Geoportal (WFS Público)',
+          consultadoEm,
+          evidenciaNota:
+            'Evidência espacial por proximidade (BBOX) — retorna apenas CAR, nome da propriedade e distância estimada, sem dados pessoais.'
+        },
+        _auditDocDigits: undefined,
+        _rawProperties: bboxProps,
+        properties: bboxProps
+      };
+    }
+
+    const docInspection = inspectConfirmedCpfCnpj(rawProps, confirmedDocFields, confirmedOwnerFields);
+    const { docDigits, ...publicDocInspection } = docInspection;
     return {
       type: f.type || 'Feature',
       id: f.id,
@@ -326,7 +385,6 @@ async function queryLayerSpatial(
       _spatialMeta: {
         criterioEspacial: criterioUsado,
         distanciaMetros: distMetros,
-        ...(criterioUsado === 'BBOX_PROXIMIDADE' ? { raioPesquisadoMetros: raioMetros } : {}),
         camada: layerName,
         fonte: 'SEMA-MT Geoportal (WFS Público)',
         consultadoEm,
@@ -620,6 +678,9 @@ export default async function handler(
     return;
   }
 
+  const canViewFullPii = canViewFullSemaPersonalData(authCtx);
+  const coordAuditHash = `sha256:${sha256HexServer(`${lat.toFixed(6)},${lng.toFixed(6)}`).slice(0, 24)}`;
+
   const finalFeatures = await Promise.all(
     collectedFeatures.slice(0, 5).map(async feat => {
       const { _auditDocDigits, _rawProperties, ...publicFeature } = feat;
@@ -630,28 +691,71 @@ export default async function handler(
         extractConfirmedFieldValue(rawProps, schemaFieldMap, SEMA_FIELD_CANDIDATES.carEstadual) ||
         extractConfirmedFieldValue(rawProps, schemaFieldMap, SEMA_FIELD_CANDIDATES.carFederal) ||
         extractConfirmedFieldValue(rawProps, schemaFieldMap, SEMA_FIELD_CANDIDATES.protocolo);
-      const titularRaw = extractConfirmedFieldValue(rawProps, schemaFieldMap, SEMA_FIELD_CANDIDATES.titular);
-      const titularClean = titularRaw ? stripOuterQuotesAndBrackets(titularRaw) : undefined;
-      const auditoriaId = await recordSemaServerAudit(authCtx, targetAccess.resolvedTarget, {
+      const isBbox = feat._spatialMeta?.criterioEspacial === 'BBOX_PROXIMIDADE';
+      const titularRaw = isBbox
+        ? undefined
+        : extractConfirmedFieldValue(rawProps, schemaFieldMap, SEMA_FIELD_CANDIDATES.titular);
+      const titularClean = titularRaw
+        ? scrubSensitiveTextForServerLog(stripOuterQuotesAndBrackets(titularRaw))
+        : undefined;
+      const camposConsultados = Object.keys(feat.properties || {});
+
+      const auditRes = await recordSemaServerAuditDetailed(authCtx, targetAccess.resolvedTarget, {
         criterioTipo: 'coordenada',
-        criterioValor: `${lat.toFixed(6)},${lng.toFixed(6)}`,
+        criterioValor: coordAuditHash,
         camada: feat.camadaOrigem || CAR_LAYER,
         featureId: String(feat.id || carVal || 'sema_feature'),
         car: carVal,
         rawProps,
         docStatus: feat._schemaMeta?.cpfCnpjStatus || 'ausente',
-        docDigits: _auditDocDigits,
+        docDigits: isBbox ? undefined : _auditDocDigits,
+        camposConsultados,
+        consultadoEm,
         extraSafeAttrs: {
+          criterioEspacial: feat._spatialMeta?.criterioEspacial || 'INTERSECTS',
           ...(titularClean ? { titularNome: titularClean } : {}),
-          ...(_auditDocDigits
+          ...(!isBbox && _auditDocDigits
             ? { tipoPessoa: _auditDocDigits.length === 11 ? 'Pessoa física' : 'Pessoa jurídica' }
             : {})
         }
       });
 
-      return auditoriaId ? { ...publicFeature, auditoriaId } : publicFeature;
+      const auditOk = Boolean(auditRes.ok && auditRes.auditoriaId);
+      const allowFullPersonalData = !isBbox && canViewFullPii && auditOk;
+
+      let outProperties = publicFeature.properties;
+      let outSchemaMeta = publicFeature._schemaMeta
+        ? { ...publicFeature._schemaMeta }
+        : undefined;
+
+      if (!isBbox && !allowFullPersonalData) {
+        const hadDoc = Boolean(
+          _auditDocDigits ||
+            outSchemaMeta?.cpfCnpjStatus === 'completo' ||
+            outSchemaMeta?.cpfCnpjStatus === 'mascarado'
+        );
+        outProperties = sanitizeSemaProperties(outProperties || {}, []);
+        if (outSchemaMeta) {
+          outSchemaMeta.cpfCnpjCompletoDisponivel = false;
+          outSchemaMeta.cpfCnpjStatus = hadDoc ? 'mascarado' : 'ausente';
+          delete outSchemaMeta.cpfCnpjCampoOrigem;
+        }
+      }
+
+      return {
+        ...publicFeature,
+        properties: outProperties,
+        ...(outSchemaMeta ? { _schemaMeta: outSchemaMeta } : {}),
+        auditoriaDisponivel: auditOk,
+        ...(auditOk ? { auditoriaId: auditRes.auditoriaId } : {})
+      };
     })
   );
+
+  const auditoriaDisponivel =
+    finalFeatures.length > 0
+      ? finalFeatures.every(f => f.auditoriaDisponivel === true)
+      : Boolean(authCtx.configured && authCtx.authorized && authCtx.role !== 'Visualizador');
 
   const mensagemStatus =
     finalFeatures.length > 0
@@ -663,6 +767,7 @@ export default async function handler(
     feicoes: finalFeatures,
     camadasConsultadas,
     mensagemStatus,
+    auditoriaDisponivel,
     consultadoEm
   });
 }

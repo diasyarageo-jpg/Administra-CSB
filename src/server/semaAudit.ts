@@ -10,8 +10,20 @@ export interface SemaAuthContext {
   httpStatus?: number;
   error?: string;
   userId: string | null;
+  usuarioId?: string | null;
   role: string | null;
+  login?: string | null;
+  userName?: string | null;
   supabaseAdmin: SupabaseClient<any, any, any> | null;
+}
+
+export function canViewFullSemaPersonalData(auth: SemaAuthContext | null | undefined): boolean {
+  return Boolean(
+    auth &&
+      auth.configured &&
+      auth.authorized &&
+      (auth.role === 'Administrador' || auth.role === 'Analista')
+  );
 }
 
 export interface SemaAuditTargetContext {
@@ -28,7 +40,16 @@ export interface ServerAuditItemInput {
   rawProps: Record<string, any>;
   docStatus: 'completo' | 'mascarado' | 'ausente';
   docDigits?: string;
+  camposConsultados?: string[];
+  consultadoEm?: string;
   extraSafeAttrs?: Record<string, any>;
+}
+
+export interface RecordSemaAuditResult {
+  ok: boolean;
+  available: boolean;
+  auditoriaId?: string;
+  error?: string;
 }
 
 let testSupabaseAdminOverride: SupabaseClient<any, any, any> | null = null;
@@ -108,6 +129,8 @@ export async function authorizeSemaLookupRequest(
       authorized: true,
       userId: null,
       role: null,
+      login: null,
+      userName: null,
       supabaseAdmin: null
     };
   }
@@ -125,6 +148,8 @@ export async function authorizeSemaLookupRequest(
       error: 'Autenticação obrigatória para consultar e auditar dados da SEMA-MT.',
       userId: null,
       role: null,
+      login: null,
+      userName: null,
       supabaseAdmin: null
     };
   }
@@ -139,6 +164,8 @@ export async function authorizeSemaLookupRequest(
         error: 'Sessão inválida ou expirada. Faça login novamente.',
         userId: null,
         role: null,
+        login: null,
+        userName: null,
         supabaseAdmin: null
       };
     }
@@ -148,14 +175,14 @@ export async function authorizeSemaLookupRequest(
 
     const primaryRes = await supabaseAdmin
       .from('usuarios')
-      .select('id, papel, situacao, status, auth_user_id')
+      .select('id, papel, situacao, status, auth_user_id, login, nome, email')
       .eq('auth_user_id', userData.user.id)
       .maybeSingle();
 
     profile = primaryRes.data;
     profErr = primaryRes.error;
 
-    // Compatibilidade com bases onde a coluna `status` ainda não foi criada
+    // Compatibilidade com bases onde colunas opcionais ainda não existem
     if (profErr) {
       const fallbackColRes = await supabaseAdmin
         .from('usuarios')
@@ -172,7 +199,7 @@ export async function authorizeSemaLookupRequest(
       if (cleanEmail) {
         const emailQuery = supabaseAdmin
           .from('usuarios')
-          .select('id, papel, situacao, auth_user_id');
+          .select('id, papel, situacao, auth_user_id, login, nome, email');
         if (typeof (emailQuery as any).ilike === 'function') {
           const byEmailRes = await (emailQuery as any).ilike('email', cleanEmail).maybeSingle();
           if (byEmailRes?.data && !byEmailRes?.error) {
@@ -200,6 +227,8 @@ export async function authorizeSemaLookupRequest(
         error: 'Usuário não habilitado na base institucional.',
         userId: null,
         role: null,
+        login: null,
+        userName: null,
         supabaseAdmin: null
       };
     }
@@ -219,15 +248,24 @@ export async function authorizeSemaLookupRequest(
         error: 'Perfil sem autorização para consultas SEMA-MT.',
         userId: null,
         role: null,
+        login: null,
+        userName: null,
         supabaseAdmin: null
       };
     }
+
+    const resolvedLogin = String(
+      profile.login || profile.email || userData.user.email || userData.user.id
+    ).trim();
 
     return {
       configured: true,
       authorized: true,
       userId: String(userData.user.id),
+      usuarioId: profile.id ? String(profile.id) : null,
       role,
+      login: resolvedLogin,
+      userName: profile.nome ? String(profile.nome).trim() : null,
       supabaseAdmin
     };
   } catch {
@@ -238,6 +276,8 @@ export async function authorizeSemaLookupRequest(
       error: 'Não foi possível validar a sessão institucional no servidor.',
       userId: null,
       role: null,
+      login: null,
+      userName: null,
       supabaseAdmin: null
     };
   }
@@ -287,7 +327,10 @@ export async function validateTargetEntityAccess(
   return { ok: true, resolvedTarget: target };
 }
 
-function buildSanitizedAuditAttributes(input: ServerAuditItemInput): Record<string, any> {
+function buildSanitizedAuditAttributes(
+  input: ServerAuditItemInput,
+  auth?: SemaAuthContext
+): Record<string, any> {
   const sanitizedRaw = sanitizeSemaProperties(input.rawProps || {});
   const merged: Record<string, any> = {
     ...sanitizedRaw,
@@ -309,25 +352,60 @@ function buildSanitizedAuditAttributes(input: ServerAuditItemInput): Record<stri
     }
   }
 
+  const camposConsultados = Array.from(
+    new Set(
+      (Array.isArray(input.camposConsultados) && input.camposConsultados.length > 0
+        ? input.camposConsultados
+        : Object.keys(input.rawProps || {})
+      )
+        .map(c => String(c || '').trim())
+        .filter(Boolean)
+    )
+  ).slice(0, 80);
+
   cleanOut.doc_status = input.docStatus;
+  cleanOut.visualizacao_dado_completo = Boolean(
+    input.docStatus === 'completo' && auth && canViewFullSemaPersonalData(auth)
+  );
+  cleanOut.campos_consultados = camposConsultados;
+  cleanOut.consultado_em_iso = input.consultadoEm || new Date().toISOString();
+  if (auth?.login) {
+    cleanOut.consultado_por_login = scrubSensitiveTextForServerLog(auth.login).slice(0, 120);
+  }
   if (input.docStatus === 'completo' && input.docDigits) {
     cleanOut.doc_sha256 = sha256HexServer(input.docDigits);
   }
   return cleanOut;
 }
 
-export async function recordSemaServerAudit(
+export async function recordSemaServerAuditDetailed(
   auth: SemaAuthContext,
   target: SemaAuditTargetContext,
   input: ServerAuditItemInput
-): Promise<string | undefined> {
+): Promise<RecordSemaAuditResult> {
   if (!auth.configured || !auth.supabaseAdmin) {
-    return undefined;
+    return {
+      ok: false,
+      available: false,
+      error: 'Serviço central de auditoria indisponível.'
+    };
   }
 
-  // Visualizador é somente leitura e não grava auditoria de alteração
+  if (!auth.authorized || !auth.userId) {
+    return {
+      ok: false,
+      available: false,
+      error: 'Sessão não autenticada para registrar auditoria.'
+    };
+  }
+
+  // Visualizador não visualiza dados pessoais completos nem grava na auditoria de alteração
   if (auth.role === 'Visualizador') {
-    return undefined;
+    return {
+      ok: false,
+      available: true,
+      error: 'Perfil Visualizador em modo somente leitura.'
+    };
   }
 
   let criterioRef: string | null = null;
@@ -346,24 +424,50 @@ export async function recordSemaServerAudit(
       ? sha256HexServer(input.docDigits)
       : null;
 
-  const safeAttrs = buildSanitizedAuditAttributes(input);
+  const safeAttrs = buildSanitizedAuditAttributes(input, auth);
 
-  const { data, error } = await auth.supabaseAdmin.rpc('registrar_consulta_sema_auditoria', {
-    p_entidade_alvo_tipo: target.entidadeAlvoTipo ?? null,
-    p_entidade_alvo_id: target.entidadeAlvoId ?? null,
-    p_criterio_tipo: input.criterioTipo,
-    p_criterio_referencia: criterioRef,
-    p_camada: input.camada,
-    p_feature_id: input.featureId,
-    p_car: input.car ? scrubSensitiveTextForServerLog(input.car).slice(0, 120) : null,
-    p_atributos_recebidos: safeAttrs,
-    p_consultado_por: auth.userId,
-    p_doc_status: input.docStatus,
-    p_doc_sha256: docSha256
-  });
+  try {
+    const { data, error } = await auth.supabaseAdmin.rpc('registrar_consulta_sema_auditoria', {
+      p_entidade_alvo_tipo: target.entidadeAlvoTipo ?? null,
+      p_entidade_alvo_id: target.entidadeAlvoId ?? null,
+      p_criterio_tipo: input.criterioTipo,
+      p_criterio_referencia: criterioRef,
+      p_camada: input.camada,
+      p_feature_id: input.featureId,
+      p_car: input.car ? scrubSensitiveTextForServerLog(input.car).slice(0, 120) : null,
+      p_atributos_recebidos: safeAttrs,
+      p_consultado_por: auth.userId,
+      p_doc_status: input.docStatus,
+      p_doc_sha256: docSha256
+    });
 
-  if (error || !data) {
-    return undefined;
+    if (error || !data) {
+      return {
+        ok: false,
+        available: false,
+        error: error?.message || 'Falha ao gravar registro de auditoria no servidor.'
+      };
+    }
+
+    return {
+      ok: true,
+      available: true,
+      auditoriaId: String(data)
+    };
+  } catch (err: any) {
+    return {
+      ok: false,
+      available: false,
+      error: err?.message || 'Serviço de auditoria indisponível no momento.'
+    };
   }
-  return String(data);
+}
+
+export async function recordSemaServerAudit(
+  auth: SemaAuthContext,
+  target: SemaAuditTargetContext,
+  input: ServerAuditItemInput
+): Promise<string | undefined> {
+  const res = await recordSemaServerAuditDetailed(auth, target, input);
+  return res.auditoriaId;
 }
