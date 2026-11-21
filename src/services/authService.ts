@@ -3,7 +3,7 @@
  * Coordenadoria de Segurança de Barragens — CSB / SURH / SEMA-MT
  */
 
-import { supabase, isSupabaseConfigured } from './supabaseClient';
+import { supabase, isSupabaseConfigured, ensureSupabaseInitialized } from './supabaseClient';
 import {
   ALLOWED_USER_ROLES,
   AuthErrorCode,
@@ -127,7 +127,7 @@ export function validateInstitutionalProfile(
     };
   }
 
-  const situacao = normalizeStrictSituacao(row.situacao ?? row.status);
+  const situacao = normalizeStrictSituacao(row.situacao || row.status);
   if (situacao !== 'Ativo') {
     if (situacao === 'Pendente') {
       return {
@@ -297,13 +297,23 @@ export function createAuthService(getDeps?: () => AuthServiceDeps) {
 
       // 2. Consulta direta protegida por RLS estritamente por auth_user_id (sem fallback por e-mail)
       try {
-        const { data: row, error: queryErr } = await client
+        let { data: row, error: queryErr } = await client
           .from('usuarios')
           .select(
             'id, auth_user_id, nome, login, matricula, perfil_profissional, setor, papel, situacao, status, observacoes, created_by, updated_by, created_at, updated_at'
           )
           .eq('auth_user_id', cleanUid)
           .maybeSingle();
+
+        if (queryErr && !isNetworkOrTransportError(queryErr)) {
+          const fallbackRes = await client
+            .from('usuarios')
+            .select('*')
+            .eq('auth_user_id', cleanUid)
+            .maybeSingle();
+          row = fallbackRes.data;
+          queryErr = fallbackRes.error;
+        }
 
         if (queryErr) {
           if (isNetworkOrTransportError(queryErr)) {
@@ -345,6 +355,9 @@ export function createAuthService(getDeps?: () => AuthServiceDeps) {
      * Restaura sessão existente e valida no Auth + public.usuarios antes de liberar UI.
      */
     async restoreVerifiedSession(): Promise<SessionRestoreResult> {
+      if (!getDeps) {
+        await ensureSupabaseInitialized();
+      }
       const { client, configured } = resolveDeps();
       if (!configured || !client) {
         return {
@@ -430,6 +443,9 @@ export function createAuthService(getDeps?: () => AuthServiceDeps) {
      * e falha fechado se não houver perfil ativo com papel válido em public.usuarios.
      */
     async loginWithPassword(email: string, password: string): Promise<LoginResult> {
+      if (!getDeps) {
+        await ensureSupabaseInitialized();
+      }
       const { client, configured } = resolveDeps();
       if (!configured || !client) {
         return {

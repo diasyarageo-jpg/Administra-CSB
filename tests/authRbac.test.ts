@@ -4,6 +4,7 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'http';
+import authConfigHandler, { resolvePublicSupabaseConfigFromEnv } from '../api/auth-config';
 import authSessionHandler from '../api/auth-session';
 import integracoesStatusHandler from '../api/integracoes-status';
 import pendenciasHandler from '../api/pendencias';
@@ -681,4 +682,117 @@ test('Segurança de código, UI e scripts SQL: sem bypass offline, sem autocadas
   assert.equal(linkSql.includes('f26897f0-bb2f-4dc7-a444-ee4550c8d569'), false);
   assert.equal(rlsSql.includes(YARA_AUTH_UID), true);
   assert.equal(rlsSql.includes('REVOKE ALL ON TABLE public.usuarios FROM anon'), true);
+});
+
+test('Auth Config (/api/auth-config) e fallback de schema: suporta aliases públicos, bloqueia service_role e aceita tabela sem colunas opcionais', async () => {
+  const makeJwtWithRole = (role: string) => {
+    const header = Buffer.from(JSON.stringify({ alg: 'HS256', typ: 'JWT' })).toString('base64url');
+    const payload = Buffer.from(JSON.stringify({ role, iss: 'supabase' })).toString('base64url');
+    return `${header}.${payload}.sig`;
+  };
+
+  const anonJwt = makeJwtWithRole('anon');
+  const serviceJwt = makeJwtWithRole('service_role');
+
+  // 1. Resolve SUPABASE_URL + SUPABASE_ANON_KEY sem prefixo VITE_
+  const resolved = resolvePublicSupabaseConfigFromEnv({
+    SUPABASE_URL: '"https://adm-baragem.supabase.co/"',
+    SUPABASE_ANON_KEY: anonJwt,
+    SUPABASE_SERVICE_ROLE_KEY: serviceJwt
+  });
+  assert.equal(resolved.configured, true);
+  assert.equal(resolved.supabaseUrl, 'https://adm-baragem.supabase.co');
+  assert.equal(resolved.supabaseAnonKey, anonJwt);
+
+  // 2. Bloqueia qualquer chave service_role ou sb_secret_ colocada acidentalmente em ANON_KEY
+  const blockedService = resolvePublicSupabaseConfigFromEnv({
+    VITE_SUPABASE_URL: 'https://adm-baragem.supabase.co',
+    VITE_SUPABASE_ANON_KEY: serviceJwt
+  });
+  assert.equal(blockedService.configured, false);
+  assert.equal(blockedService.supabaseAnonKey, '');
+
+  const blockedSecret = resolvePublicSupabaseConfigFromEnv({
+    VITE_SUPABASE_URL: 'https://adm-baragem.supabase.co',
+    SUPABASE_PUBLISHABLE_KEY: 'sb_secret_123456'
+  });
+  assert.equal(blockedSecret.configured, false);
+
+  // 3. Handler HTTP retorna 200 sem cache e sem expor service_role
+  const prevUrl = process.env.SUPABASE_URL;
+  const prevAnon = process.env.SUPABASE_ANON_KEY;
+  process.env.SUPABASE_URL = 'https://adm-baragem.supabase.co';
+  process.env.SUPABASE_ANON_KEY = anonJwt;
+  try {
+    const res = createMockRes();
+    await authConfigHandler(createMockReq({ method: 'GET' }) as any, res as any);
+    assert.equal(res.getStatus(), 200);
+    assert.equal(res.getBody().configured, true);
+    assert.equal(res.getBody().supabaseUrl, 'https://adm-baragem.supabase.co');
+    assert.equal(res.getBody().supabaseAnonKey, anonJwt);
+  } finally {
+    if (prevUrl !== undefined) process.env.SUPABASE_URL = prevUrl;
+    else delete process.env.SUPABASE_URL;
+    if (prevAnon !== undefined) process.env.SUPABASE_ANON_KEY = prevAnon;
+    else delete process.env.SUPABASE_ANON_KEY;
+  }
+
+  // 4. Fallback para select('*') quando alguma coluna opcional não existe na tabela public.usuarios
+  let selectCalls = 0;
+  const schemaFallbackClient: any = {
+    auth: {
+      async signInWithPassword() {
+        return {
+          data: {
+            user: { id: YARA_AUTH_UID, email: 'yarageologa@gmail.com' },
+            session: { access_token: 'tok-yara', user: { id: YARA_AUTH_UID } }
+          },
+          error: null
+        };
+      },
+      async signOut() {
+        return { error: null };
+      }
+    },
+    from() {
+      return {
+        select(cols: string) {
+          selectCalls += 1;
+          return {
+            eq() {
+              return {
+                async maybeSingle() {
+                  if (cols !== '*') {
+                    return {
+                      data: null,
+                      error: { code: '42703', message: 'column usuarios.created_by does not exist' }
+                    };
+                  }
+                  return {
+                    data: {
+                      id: YARA_USUARIO_ID,
+                      auth_user_id: YARA_AUTH_UID,
+                      nome: 'Yara Dias',
+                      papel: 'Administrador',
+                      situacao: '',
+                      status: 'Ativo'
+                    },
+                    error: null
+                  };
+                }
+              };
+            }
+          };
+        }
+      };
+    }
+  };
+
+  const svc = createAuthService(() => ({ client: schemaFallbackClient, configured: true }));
+  const loginRes = await svc.loginWithPassword('yarageologa@gmail.com', 'senha-teste');
+  assert.equal(loginRes.success, true);
+  assert.equal(selectCalls, 2);
+  assert.equal(loginRes.profile?.id, YARA_USUARIO_ID);
+  assert.equal(loginRes.profile?.papel, 'Administrador');
+  assert.equal(loginRes.profile?.situacao, 'Ativo');
 });

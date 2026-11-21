@@ -78,7 +78,13 @@ export function setTestSupabaseAdminForSemaAudit(
 
 function getServerSupabaseAdminClient(): SupabaseClient<any, any, any> | null {
   if (testSupabaseAdminOverride) return testSupabaseAdminOverride;
-  const supabaseUrl = (process.env.SUPABASE_URL || process.env.VITE_SUPABASE_URL || '').trim();
+  const supabaseUrl = (
+    process.env.SUPABASE_URL ||
+    process.env.VITE_SUPABASE_URL ||
+    process.env.NEXT_PUBLIC_SUPABASE_URL ||
+    process.env.VITE_PUBLIC_SUPABASE_URL ||
+    ''
+  ).trim();
   const serviceRoleKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
   if (!supabaseUrl || !serviceRoleKey) {
     return null;
@@ -231,7 +237,7 @@ export async function authorizeSemaLookupRequest(
     if (profErr) {
       const fallbackColRes = await supabaseAdmin
         .from('usuarios')
-        .select('id, papel, situacao, auth_user_id')
+        .select('*')
         .eq('auth_user_id', userData.user.id)
         .maybeSingle();
       profile = fallbackColRes.data;
@@ -272,7 +278,7 @@ export async function authorizeSemaLookupRequest(
       };
     }
 
-    const normalizedSituacao = normalizeSituacaoLabel(profile.situacao ?? profile.status);
+    const normalizedSituacao = normalizeSituacaoLabel(profile.situacao || profile.status);
     if (normalizedSituacao !== 'Ativo') {
       const code: ServerAuthErrorCode =
         normalizedSituacao === 'Pendente'

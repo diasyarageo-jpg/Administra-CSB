@@ -10,6 +10,9 @@ import {
 } from './services/notificaDataService';
 import {
   isSupabaseConfigured,
+  hasConfiguredSupabaseUrl,
+  hasConfiguredSupabaseAnonKey,
+  ensureSupabaseInitialized,
   checkSupabaseConnection,
   SupabaseConnectionStatus,
   supabase
@@ -399,6 +402,7 @@ export default function App() {
   const [userRole, setUserRole] = useState<UserRole>('Visualizador');
   const [showLoginModal, setShowLoginModal] = useState(false);
   const [isAuthChecking, setIsAuthChecking] = useState(true);
+  const [authConfigured, setAuthConfigured] = useState<boolean>(() => isSupabaseConfigured());
   const [authErrorNotice, setAuthErrorNotice] = useState<string | null>(null);
 
   // Estados para aprovação e recusa de solicitações de usuários por Administradores
@@ -569,10 +573,21 @@ export default function App() {
     };
 
     async function initAuth() {
-      if (!isSupabaseConfigured() || !supabase) {
-        clearSessionState(
-          'Serviço de autenticação não configurado no ambiente. O acesso permanece bloqueado até a configuração.'
-        );
+      await ensureSupabaseInitialized();
+      if (!active) return;
+
+      const configuredNow = isSupabaseConfigured();
+      setAuthConfigured(configuredNow);
+      setSupabaseStatus({
+        configured: configuredNow,
+        connected: false,
+        message: configuredNow
+          ? 'Aguardando autenticação institucional...'
+          : 'Banco de dados central não configurado. Operando exclusivamente no armazenamento local.'
+      });
+
+      if (!configuredNow || !supabase) {
+        clearSessionState(null);
         if (active) setIsAuthChecking(false);
         return;
       }
@@ -1407,6 +1422,7 @@ export default function App() {
   // Só renderiza telas internas quando Supabase Auth estiver configurado E houver sessão ativa
   // com cadastro institucional Ativo e papel válido em public.usuarios (via auth_user_id).
   const hasValidAuthenticatedAccess =
+    authConfigured &&
     isSupabaseConfigured() &&
     Boolean(currentAuthUser) &&
     Boolean(currentUserProfile) &&
@@ -1459,7 +1475,7 @@ export default function App() {
           setUserRole(profile.papel);
         }}
         pendingNotice={pendingNotice}
-        authConfigured={isSupabaseConfigured()}
+        authConfigured={authConfigured}
       />
     );
   }
@@ -3261,7 +3277,7 @@ export default function App() {
                       <div style={{ fontSize: '11px', lineHeight: 1.8 }}>
                         <div>
                           <b>Endereço da Base Central:</b>{' '}
-                          {import.meta.env.VITE_SUPABASE_URL ? (
+                          {hasConfiguredSupabaseUrl() ? (
                             <span style={{ color: '#059669' }}>Configurado</span>
                           ) : (
                             <span style={{ color: '#d97706' }}>Pendente no ambiente</span>
@@ -3269,7 +3285,7 @@ export default function App() {
                         </div>
                         <div>
                           <b>Chave de Acesso:</b>{' '}
-                          {import.meta.env.VITE_SUPABASE_ANON_KEY ? (
+                          {hasConfiguredSupabaseAnonKey() ? (
                             <span style={{ color: '#059669' }}>Configurada</span>
                           ) : (
                             <span style={{ color: '#d97706' }}>Pendente no ambiente</span>

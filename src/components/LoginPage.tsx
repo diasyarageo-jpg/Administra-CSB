@@ -289,7 +289,7 @@ export function LoginPage({
             </div>
           )}
 
-          {pendingNotice && (
+          {pendingNotice && authConfigured && (
             <div
               role="alert"
               style={{
