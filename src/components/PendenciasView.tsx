@@ -79,7 +79,8 @@ export const PendenciasView: React.FC<PendenciasViewProps> = ({
     minhas: 0,
     geral: 0
   });
-  const [currentUserIds, setCurrentUserIds] = useState<Set<string>>(new Set());
+  const [currentUserId, setCurrentUserId] = useState<string | null>(null);
+  const [mutationsEnabled, setMutationsEnabled] = useState<boolean>(false);
   const [usuariosNomes, setUsuariosNomes] = useState<Record<string, PendenciaUserRefInfo>>({});
   const [usuariosDirecionaveis, setUsuariosDirecionaveis] = useState<PendenciaUsuarioOption[]>([]);
 
@@ -166,15 +167,13 @@ export const PendenciasView: React.FC<PendenciasViewProps> = ({
 
     setPendencias(res.pendencias);
     setCounts(res.counts);
+    setMutationsEnabled(Boolean(res.mutationsEnabled));
     setUsuariosNomes(res.usuariosNomes || {});
     if (Array.isArray(res.usuariosDirecionaveis)) {
       setUsuariosDirecionaveis(res.usuariosDirecionaveis);
     }
 
-    const selfIds = new Set<string>();
-    if (res.currentUser?.userId) selfIds.add(String(res.currentUser.userId));
-    if (res.currentUser?.usuarioId) selfIds.add(String(res.currentUser.usuarioId));
-    setCurrentUserIds(selfIds);
+    setCurrentUserId(res.currentUser?.userId ? String(res.currentUser.userId) : null);
     setLoading(false);
   }, [activeTab, isAdmin, situacaoFiltro]);
 
@@ -197,12 +196,15 @@ export const PendenciasView: React.FC<PendenciasViewProps> = ({
 
   const canMutateItem = useCallback(
     (item: PendenciaRecord): boolean => {
-      if (isReadOnly) return false;
+      if (!mutationsEnabled || isReadOnly) return false;
       if (isAdmin) return true;
       if (!item.responsavel_id) return true;
-      return currentUserIds.has(String(item.responsavel_id));
+      return Boolean(
+        currentUserId &&
+          String(item.responsavel_id).toLowerCase() === currentUserId.toLowerCase()
+      );
     },
-    [currentUserIds, isAdmin, isReadOnly]
+    [currentUserId, isAdmin, isReadOnly, mutationsEnabled]
   );
 
   const openDetailModal = async (item: PendenciaRecord, mode: ModalActionMode = 'historico') => {
@@ -523,12 +525,28 @@ export const PendenciasView: React.FC<PendenciasViewProps> = ({
             ↻ Atualizar
           </button>
           {!isReadOnly && (
-            <button type="button" className="btn green" onClick={handleOpenCreateModal}>
+            <button
+              type="button"
+              className="btn green"
+              onClick={handleOpenCreateModal}
+              disabled={!mutationsEnabled}
+              title={
+                mutationsEnabled
+                  ? 'Criar nova pendência'
+                  : 'Mutações temporariamente desabilitadas (HTTP 409) até existir mecanismo transacional atômico'
+              }
+            >
               ＋ Nova pendência
             </button>
           )}
         </div>
       </div>
+
+      {!mutationsEnabled && (
+        <div className="notice amber" style={{ marginBottom: '14px' }}>
+          <b>Modo de leitura segura ativo:</b> criação, direcionamento, edição e resolução de pendências estão desabilitados no servidor (HTTP 409) até existir mecanismo transacional atômico para gravação simultânea com o histórico.
+        </div>
+      )}
 
       <div className="stats">
         <div className="stat">
@@ -684,7 +702,7 @@ export const PendenciasView: React.FC<PendenciasViewProps> = ({
                               </span>
                             )}
                             <span className="td-sub">
-                              Origem: {item.origem || 'Administra'}
+                              Origem: {item.origem || 'administra'}
                               {item.criado_por ? ` · Criado por: ${resolveUserName(item.criado_por)}` : ''}
                             </span>
                           </td>
@@ -751,6 +769,7 @@ export const PendenciasView: React.FC<PendenciasViewProps> = ({
                                 <button
                                   type="button"
                                   className="iconbtn"
+                                  disabled={!mutationsEnabled}
                                   onClick={() => openDetailModal(item, 'direcionar')}
                                 >
                                   {item.responsavel_id ? 'Alterar resp.' : 'Direcionar'}
@@ -760,6 +779,7 @@ export const PendenciasView: React.FC<PendenciasViewProps> = ({
                                 <button
                                   type="button"
                                   className="iconbtn"
+                                  disabled={!mutationsEnabled}
                                   onClick={() => openDetailModal(item, 'resolver')}
                                 >
                                   Resolver
@@ -830,13 +850,13 @@ export const PendenciasView: React.FC<PendenciasViewProps> = ({
               )}
 
               <div className="notice slate" style={{ marginBottom: '14px' }}>
-                A pendência será registrada com origem <b>Administra</b> e autor autenticado da sessão atual. Não informe CPF/CNPJ nos campos de texto; utilize as referências cadastrais.
+                A pendência será registrada com origem <b>administra</b> e autor autenticado da sessão atual. Não informe CPF/CNPJ nos campos de texto; utilize as referências cadastrais.
               </div>
 
               <div className="form-grid">
                 <div className="form-field">
                   <label>Sistema de origem</label>
-                  <input className="input" value="Administra" disabled readOnly />
+                  <input className="input" value="administra" disabled readOnly />
                 </div>
 
                 <div className="form-field">
@@ -1011,7 +1031,7 @@ export const PendenciasView: React.FC<PendenciasViewProps> = ({
               <div>
                 <h3>{selectedPendencia.titulo}</h3>
                 <span className="micro muted">
-                  ID: {selectedPendencia.id} · Origem: {selectedPendencia.origem || 'Administra'}
+                  ID: {selectedPendencia.id} · Origem: {selectedPendencia.origem || 'administra'}
                 </span>
               </div>
               <button
@@ -1132,9 +1152,9 @@ export const PendenciasView: React.FC<PendenciasViewProps> = ({
                 </div>
               )}
 
-              {selectedPendencia.motivo && (
+              {historico[0]?.motivo && (
                 <div className="notice slate" style={{ marginBottom: '14px' }}>
-                  <b>Último motivo registrado:</b> {selectedPendencia.motivo}
+                  <b>Último motivo registrado:</b> {historico[0].motivo}
                 </div>
               )}
 
@@ -1152,6 +1172,7 @@ export const PendenciasView: React.FC<PendenciasViewProps> = ({
                     Histórico ({historico.length})
                   </button>
                   {isAdmin &&
+                    mutationsEnabled &&
                     selectedPendencia.situacao !== 'resolvida' &&
                     selectedPendencia.situacao !== 'cancelada' && (
                       <button

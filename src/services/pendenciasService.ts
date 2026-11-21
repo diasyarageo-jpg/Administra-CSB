@@ -91,7 +91,6 @@ export interface PendenciaRecord {
   referencia_id?: string | null;
   empreendedor_id?: string | null;
   barragem_id?: string | null;
-  motivo?: string | null;
   created_at: string;
   updated_at?: string | null;
   direcionado_em?: string | null;
@@ -129,6 +128,7 @@ export interface PendenciaUsuarioOption {
 export interface PendenciasListResponse {
   success: boolean;
   error?: string;
+  mutationsEnabled?: boolean;
   pendencias: PendenciaRecord[];
   counts: {
     minhas: number;
@@ -137,7 +137,6 @@ export interface PendenciasListResponse {
   };
   currentUser?: {
     userId: string;
-    usuarioId?: string | null;
     nome?: string;
   };
   usuariosNomes: Record<string, PendenciaUserRefInfo>;
@@ -245,6 +244,7 @@ export async function listarPendencias(params: {
 
     return {
       success: true,
+      mutationsEnabled: Boolean(data.mutationsEnabled),
       pendencias: Array.isArray(data.pendencias) ? data.pendencias : [],
       counts: data.counts || { minhas: 0, geral: 0 },
       currentUser: data.currentUser,

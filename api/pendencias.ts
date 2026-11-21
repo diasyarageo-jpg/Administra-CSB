@@ -1,11 +1,13 @@
 // api/pendencias.ts
-import crypto from 'crypto';
 import type { IncomingMessage, ServerResponse } from 'http';
 import {
   authorizeSemaLookupRequest,
   scrubSensitiveTextForServerLog,
   type SemaAuthContext
 } from '../src/server/semaAudit';
+
+export const PENDENCIA_ORIGEM = 'administra' as const;
+export const MUTATIONS_ENABLED = false;
 
 export const ALLOWED_PENDENCIA_SITUACOES = [
   'aberta',
@@ -27,8 +29,17 @@ export const ALLOWED_PENDENCIA_HISTORICO_ACOES = [
 
 export type PendenciaHistoricoAcao = typeof ALLOWED_PENDENCIA_HISTORICO_ACOES[number];
 
+export const UUID_REGEX =
+  /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+
 const VALID_SITUACOES_SET = new Set<string>(ALLOWED_PENDENCIA_SITUACOES);
-const CLOSED_SITUACOES = new Set<string>(['resolvida', 'cancelada']);
+const ALLOWED_ACTIONS = new Set<string>([
+  'criar',
+  'direcionar',
+  'alterar_situacao',
+  'editar',
+  'resolver'
+]);
 
 const FORBIDDEN_PAYLOAD_KEYS = new Set([
   'payload',
@@ -44,17 +55,23 @@ const FORBIDDEN_PAYLOAD_KEYS = new Set([
   'nr_cnpj',
   'nr_cpf_cnpj',
   'documento_titular',
+  'origem',
   'criado_por',
   'criadopor',
   'direcionado_por',
   'direcionadopor',
+  'direcionado_em',
   'resolvido_por',
   'resolvidopor',
+  'resolvido_em',
+  'created_at',
+  'updated_at',
   'usuario_id',
   'usuarioid',
   'userid',
   'role',
-  'papel'
+  'papel',
+  'email'
 ]);
 
 const EDITABLE_TEXT_FIELDS = [
@@ -67,6 +84,10 @@ const EDITABLE_TEXT_FIELDS = [
   'empreendedor_id',
   'barragem_id'
 ] as const;
+
+export function isValidUuid(val: unknown): boolean {
+  return typeof val === 'string' && UUID_REGEX.test(val.trim());
+}
 
 function sendJson(
   res: ServerResponse & { status?: any; json?: any },
@@ -160,6 +181,178 @@ export function containsSensitiveCpfOrCnpj(raw: unknown): boolean {
   return false;
 }
 
+export const PROTECTED_DOCUMENT_PLACEHOLDER = '[documento protegido]' as const;
+
+export const PENDENCIA_RESPONSE_ALLOWLIST = [
+  'id',
+  'origem',
+  'origem_ref_id',
+  'tipo',
+  'titulo',
+  'descricao',
+  'situacao',
+  'responsavel_id',
+  'criado_por',
+  'direcionado_por',
+  'direcionado_em',
+  'resolvido_por',
+  'resolvido_em',
+  'tipo_referencia',
+  'referencia_id',
+  'empreendedor_id',
+  'barragem_id',
+  'created_at',
+  'updated_at'
+] as const;
+
+export const PENDENCIA_HISTORICO_RESPONSE_ALLOWLIST = [
+  'id',
+  'pendencia_id',
+  'acao',
+  'campo',
+  'valor_anterior',
+  'valor_novo',
+  'usuario_id',
+  'motivo',
+  'created_at'
+] as const;
+
+const PRESERVE_TOKEN_REGEX = new RegExp(
+  [
+    // 1. UUIDs (isolados ou após delimitadores de prefixo, sem casar dentro de sequências alfanuméricas contíguas)
+    '(?<![0-9a-zA-Z])[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}(?![0-9a-zA-Z])',
+    // 2. Datas e timestamps ISO (ex.: 2026-11-19, 2026-11-19T10:00:00Z, 2026-11-19 10:00:00)
+    '(?<![0-9a-zA-Z])\\d{4}-(?:0[1-9]|1[0-2])-(?:0[1-9]|[12]\\d|3[01])(?:[T\\s]\\d{2}:\\d{2}(?::\\d{2}(?:\\.\\d+)?)?(?:Z|[+-]\\d{2}:?\\d{2})?)?(?![0-9a-zA-Z])',
+    // 3. Datas no formato brasileiro com hora opcional (ex.: 19/11/2026, 19/11/2026 14:30:00)
+    '(?<![0-9a-zA-Z])(?:0[1-9]|[12]\\d|3[01])[./-](?:0[1-9]|1[0-2])[./-](?:19|20)\\d{2}(?:[T\\s]\\d{2}:\\d{2}(?::\\d{2})?)?(?![0-9a-zA-Z])'
+  ].join('|'),
+  'gi'
+);
+
+function scrubCpfCnpjSegment(segment: string): string {
+  if (!segment) return segment;
+
+  let out = segment;
+
+  // 1. CNPJ com separadores padrão, espaços ou separadores misturados (inclusive após prefixos com -, _, /, .)
+  const cnpjPatterns: RegExp[] = [
+    /(?<![0-9a-zA-Z])\d{2}[ \t./_-]+\d{3}[ \t./_-]+\d{3}[ \t./_-]+\d{4}[ \t./_-]+\d{2}(?![0-9a-zA-Z])/g,
+    /(?<![0-9a-zA-Z])\d{2}[ \t./_-]+\d{6}[ \t./_-]+\d{4}[ \t./_-]+\d{2}(?![0-9a-zA-Z])/g,
+    /(?<![0-9a-zA-Z])\d{2}[ \t./_-]+\d{3}[ \t./_-]+\d{3}[ \t./_-]+\d{6}(?![0-9a-zA-Z])/g,
+    /(?<![0-9a-zA-Z])\d{5}[ \t./_-]+\d{3}[ \t./_-]+\d{4}[ \t./_-]+\d{2}(?![0-9a-zA-Z])/g,
+    /(?<![0-9a-zA-Z])\d{2}[ \t./_-]+\d{6}[ \t./_-]+\d{6}(?![0-9a-zA-Z])/g,
+    /(?<![0-9a-zA-Z])\d{8}[ \t./_-]+\d{4}[ \t./_-]+\d{2}(?![0-9a-zA-Z])/g,
+    /(?<![0-9a-zA-Z])\d{8}[ \t./_-]+\d{6}(?![0-9a-zA-Z])/g,
+    /(?<![0-9a-zA-Z])\d{12}[ \t./_-]+\d{2}(?![0-9a-zA-Z])/g
+  ];
+  for (const pattern of cnpjPatterns) {
+    out = out.replace(pattern, PROTECTED_DOCUMENT_PLACEHOLDER);
+  }
+
+  // 2. CPF com separadores padrão, espaços ou separadores misturados (inclusive após prefixos com -, _, /, .)
+  const cpfPatterns: RegExp[] = [
+    /(?<![0-9a-zA-Z])\d{3}[ \t./_-]+\d{3}[ \t./_-]+\d{3}[ \t./_-]+\d{2}(?![0-9a-zA-Z])/g,
+    /(?<![0-9a-zA-Z])\d{3}[ \t./_-]+\d{3}[ \t./_-]+\d{5}(?![0-9a-zA-Z])/g,
+    /(?<![0-9a-zA-Z])\d{3}[ \t./_-]+\d{6}[ \t./_-]+\d{2}(?![0-9a-zA-Z])/g,
+    /(?<![0-9a-zA-Z])\d{6}[ \t./_-]+\d{3}[ \t./_-]+\d{2}(?![0-9a-zA-Z])/g,
+    /(?<![0-9a-zA-Z])\d{6}[ \t./_-]+\d{5}(?![0-9a-zA-Z])/g,
+    /(?<![0-9a-zA-Z])\d{9}[ \t./_-]+\d{2}(?![0-9a-zA-Z])/g
+  ];
+  for (const pattern of cpfPatterns) {
+    out = out.replace(pattern, PROTECTED_DOCUMENT_PLACEHOLDER);
+  }
+
+  // 3. Sequências numéricas contíguas de 14 dígitos (CNPJ) e 11 dígitos (CPF)
+  out = out.replace(
+    /(?<![0-9a-zA-Z])\d{14}(?![0-9a-zA-Z])/g,
+    PROTECTED_DOCUMENT_PLACEHOLDER
+  );
+  out = out.replace(
+    /(?<![0-9a-zA-Z])\d{11}(?![0-9a-zA-Z])/g,
+    PROTECTED_DOCUMENT_PLACEHOLDER
+  );
+
+  return out;
+}
+
+export function sanitizePendenciaTextForResponse(raw: unknown): string | null {
+  if (raw === undefined || raw === null) return null;
+  const text = String(raw);
+  if (!text) return '';
+
+  const trimmed = text.trim();
+  if (UUID_REGEX.test(trimmed)) {
+    return trimmed;
+  }
+
+  let result = '';
+  let lastIdx = 0;
+  for (const match of text.matchAll(PRESERVE_TOKEN_REGEX)) {
+    const idx = match.index ?? 0;
+    result += scrubCpfCnpjSegment(text.slice(lastIdx, idx));
+    result += match[0];
+    lastIdx = idx + match[0].length;
+  }
+  result += scrubCpfCnpjSegment(text.slice(lastIdx));
+  return result;
+}
+
+function sanitizeAllowedResponseValue(val: unknown): unknown {
+  if (val === undefined) return undefined;
+  if (val === null) return null;
+  if (typeof val === 'boolean') return val;
+  if (typeof val === 'number') {
+    const str = String(val);
+    const scrubbed = sanitizePendenciaTextForResponse(str);
+    return scrubbed !== str ? scrubbed : val;
+  }
+  if (val instanceof Date) {
+    return Number.isNaN(val.getTime()) ? null : val.toISOString();
+  }
+  if (typeof val === 'string') {
+    return sanitizePendenciaTextForResponse(val);
+  }
+  if (Array.isArray(val)) {
+    return val.map(item => sanitizeAllowedResponseValue(item));
+  }
+  if (typeof val === 'object') {
+    const safeObj: Record<string, unknown> = {};
+    for (const [k, v] of Object.entries(val as Record<string, unknown>)) {
+      if (v === undefined) continue;
+      const safeKey = sanitizePendenciaTextForResponse(k) ?? k;
+      safeObj[safeKey] = sanitizeAllowedResponseValue(v);
+    }
+    return safeObj;
+  }
+  return sanitizePendenciaTextForResponse(String(val));
+}
+
+export function sanitizePendenciaRecordForResponse<T extends Record<string, any>>(
+  row: T
+): Record<string, any> {
+  if (!row || typeof row !== 'object') return {};
+  const out: Record<string, any> = {};
+  for (const key of PENDENCIA_RESPONSE_ALLOWLIST) {
+    if (Object.prototype.hasOwnProperty.call(row, key) && row[key] !== undefined) {
+      out[key] = sanitizeAllowedResponseValue(row[key]);
+    }
+  }
+  return out;
+}
+
+export function sanitizePendenciaHistoricoForResponse<T extends Record<string, any>>(
+  row: T
+): Record<string, any> {
+  if (!row || typeof row !== 'object') return {};
+  const out: Record<string, any> = {};
+  for (const key of PENDENCIA_HISTORICO_RESPONSE_ALLOWLIST) {
+    if (Object.prototype.hasOwnProperty.call(row, key) && row[key] !== undefined) {
+      out[key] = sanitizeAllowedResponseValue(row[key]);
+    }
+  }
+  return out;
+}
+
 function normalizeOptionalString(val: unknown, maxLen: number): string | null {
   if (val === undefined || val === null) return null;
   const trimmed = String(val).trim();
@@ -167,39 +360,38 @@ function normalizeOptionalString(val: unknown, maxLen: number): string | null {
   return trimmed.slice(0, maxLen);
 }
 
-function getSelfIdSet(authCtx: SemaAuthContext): Set<string> {
-  const ids = new Set<string>();
-  if (authCtx.userId) ids.add(String(authCtx.userId));
-  if (authCtx.usuarioId) ids.add(String(authCtx.usuarioId));
-  return ids;
+function isSameCanonicalUser(a: unknown, b: unknown): boolean {
+  const left = String(a || '').trim().toLowerCase();
+  const right = String(b || '').trim().toLowerCase();
+  return Boolean(left && right && left === right);
 }
 
-function canReadPendenciaRow(
-  row: Record<string, any>,
-  authCtx: SemaAuthContext,
-  selfIds: Set<string>
+const READ_ALLOWED_ROLES = new Set<string>([
+  'Administrador',
+  'Analista',
+  'Usuário',
+  'Visualizador'
+]);
+
+export function canReadPendenciaRow(
+  row: Record<string, any> | null | undefined,
+  authCtx: SemaAuthContext
 ): boolean {
-  if (authCtx.role === 'Administrador') return true;
-  const respId = row.responsavel_id ? String(row.responsavel_id) : '';
-  const criadoPor = row.criado_por ? String(row.criado_por) : '';
-  if (!respId) return true;
-  if (selfIds.has(respId)) return true;
-  if (criadoPor && selfIds.has(criadoPor)) return true;
-  return false;
+  if (!row) return false;
+  if (!authCtx.configured || !authCtx.authorized || !authCtx.userId || !isValidUuid(authCtx.userId)) {
+    return false;
+  }
+  return READ_ALLOWED_ROLES.has(authCtx.role || '');
 }
 
-function canMutatePendenciaRow(
-  row: Record<string, any>,
-  authCtx: SemaAuthContext,
-  selfIds: Set<string>
-): boolean {
+function canMutatePendenciaRow(row: Record<string, any>, authCtx: SemaAuthContext): boolean {
   if (!['Administrador', 'Analista', 'Usuário'].includes(authCtx.role || '')) {
     return false;
   }
   if (authCtx.role === 'Administrador') return true;
-  const respId = row.responsavel_id ? String(row.responsavel_id) : '';
+  const respId = row.responsavel_id ? String(row.responsavel_id).trim() : '';
   if (!respId) return true;
-  return selfIds.has(respId);
+  return isSameCanonicalUser(respId, authCtx.userId);
 }
 
 interface UsuarioRow {
@@ -207,7 +399,6 @@ interface UsuarioRow {
   auth_user_id?: string | null;
   nome?: string | null;
   login?: string | null;
-  email?: string | null;
   papel?: string | null;
   setor?: string | null;
   perfil_profissional?: string | null;
@@ -220,7 +411,7 @@ async function fetchUsuariosDirectory(
 ): Promise<UsuarioRow[]> {
   const primary = await supabaseAdmin
     .from('usuarios')
-    .select('id, auth_user_id, nome, login, email, papel, setor, perfil_profissional, situacao, status');
+    .select('id, auth_user_id, nome, login, papel, setor, perfil_profissional, situacao, status');
 
   if (!primary.error && Array.isArray(primary.data)) {
     return primary.data as UsuarioRow[];
@@ -228,7 +419,7 @@ async function fetchUsuariosDirectory(
 
   const fallback = await supabaseAdmin
     .from('usuarios')
-    .select('id, auth_user_id, nome, login, email, papel, situacao');
+    .select('id, auth_user_id, nome, login, papel, situacao');
 
   if (!fallback.error && Array.isArray(fallback.data)) {
     return fallback.data as UsuarioRow[];
@@ -244,215 +435,38 @@ function isUsuarioActive(u: UsuarioRow): boolean {
   return sit === 'ativo';
 }
 
+function formatSafeUsuarioLabel(u: UsuarioRow, isAdmin: boolean): string {
+  const nome = String(u.nome || '').trim();
+  if (nome && (isAdmin || !nome.includes('@'))) {
+    return sanitizePendenciaTextForResponse(nome) || 'Usuário cadastrado';
+  }
+  const login = String(u.login || '').trim();
+  if (login && (isAdmin || !login.includes('@'))) {
+    return sanitizePendenciaTextForResponse(login) || 'Usuário cadastrado';
+  }
+  return 'Usuário cadastrado';
+}
+
 function buildUsuariosNomesMap(
-  usuarios: UsuarioRow[]
+  usuarios: UsuarioRow[],
+  isAdmin: boolean
 ): Record<string, { id: string; nome: string; setor?: string; papel?: string }> {
   const map: Record<string, { id: string; nome: string; setor?: string; papel?: string }> = {};
   for (const u of usuarios) {
-    const label = String(u.nome || u.login || u.email || u.id).trim();
-    const entry = {
-      id: String(u.id),
+    if (!u.auth_user_id || !isValidUuid(u.auth_user_id)) continue;
+    const canonicalId = String(u.auth_user_id);
+    const label = formatSafeUsuarioLabel(u, isAdmin);
+    map[canonicalId] = {
+      id: canonicalId,
       nome: label,
-      ...(u.setor ? { setor: String(u.setor) } : {}),
-      ...(u.papel ? { papel: String(u.papel) } : {})
+      ...(u.setor ? { setor: sanitizePendenciaTextForResponse(u.setor) || '' } : {}),
+      ...(u.papel ? { papel: sanitizePendenciaTextForResponse(u.papel) || '' } : {})
     };
-    if (u.id) map[String(u.id)] = entry;
-    if (u.auth_user_id) map[String(u.auth_user_id)] = entry;
   }
   return map;
 }
 
-function isMissingOptionalColumnError(error: any, colName: string): boolean {
-  const code = String(error?.code || '');
-  const msg = String(error?.message || '');
-  return (code === '42703' || code === 'PGRST204') && msg.toLowerCase().includes(colName.toLowerCase());
-}
-
-function isFkUsuariosError(error: any): boolean {
-  const code = String(error?.code || '');
-  const msg = String(error?.message || '').toLowerCase();
-  return code === '23503' && msg.includes('usuarios');
-}
-
-function isNotNullIdError(error: any): boolean {
-  const code = String(error?.code || '');
-  const msg = String(error?.message || '').toLowerCase();
-  return code === '23502' && msg.includes('id');
-}
-
-async function insertPendenciaRowWithAdaptiveCompat(
-  supabaseAdmin: NonNullable<SemaAuthContext['supabaseAdmin']>,
-  baseRow: Record<string, any>,
-  actorAuthId: string,
-  actorUsuarioId?: string | null,
-  targetUsuarioId?: string | null
-): Promise<{ data: any; error: any; resolvedActorId: string }> {
-  let payload: Record<string, any> = { ...baseRow };
-  let resolvedActorId = actorAuthId;
-
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const res = await supabaseAdmin
-      .from('pendencias')
-      .insert(payload)
-      .select()
-      .single();
-
-    if (!res.error && res.data) {
-      return { data: res.data, error: null, resolvedActorId };
-    }
-
-    const err = res.error;
-    if (isNotNullIdError(err) && !payload.id) {
-      payload = { ...payload, id: crypto.randomUUID() };
-      continue;
-    }
-
-    if (isFkUsuariosError(err) && actorUsuarioId && resolvedActorId !== actorUsuarioId) {
-      resolvedActorId = actorUsuarioId;
-      payload = {
-        ...payload,
-        criado_por: actorUsuarioId,
-        ...(payload.direcionado_por ? { direcionado_por: actorUsuarioId } : {}),
-        ...(payload.responsavel_id && targetUsuarioId ? { responsavel_id: targetUsuarioId } : {})
-      };
-      continue;
-    }
-
-    let strippedOptional = false;
-    for (const optCol of ['direcionado_em', 'resolvido_em', 'motivo']) {
-      if (optCol in payload && isMissingOptionalColumnError(err, optCol)) {
-        const next = { ...payload };
-        delete next[optCol];
-        payload = next;
-        strippedOptional = true;
-        break;
-      }
-    }
-    if (strippedOptional) continue;
-
-    return { data: null, error: err, resolvedActorId };
-  }
-
-  return {
-    data: null,
-    error: { message: 'Falha ao inserir pendência após tentativas de compatibilidade.' },
-    resolvedActorId
-  };
-}
-
-async function updatePendenciaRowWithAdaptiveCompat(
-  supabaseAdmin: NonNullable<SemaAuthContext['supabaseAdmin']>,
-  pendenciaId: string,
-  basePatch: Record<string, any>,
-  actorAuthId: string,
-  actorUsuarioId?: string | null,
-  targetUsuarioId?: string | null
-): Promise<{ data: any; error: any; resolvedActorId: string }> {
-  let patch: Record<string, any> = { ...basePatch };
-  let resolvedActorId = actorAuthId;
-
-  for (let attempt = 0; attempt < 5; attempt++) {
-    const res = await supabaseAdmin
-      .from('pendencias')
-      .update(patch)
-      .eq('id', pendenciaId)
-      .select()
-      .single();
-
-    if (!res.error && res.data) {
-      return { data: res.data, error: null, resolvedActorId };
-    }
-
-    const err = res.error;
-    if (isFkUsuariosError(err) && actorUsuarioId && resolvedActorId !== actorUsuarioId) {
-      resolvedActorId = actorUsuarioId;
-      const next = { ...patch };
-      if (next.direcionado_por) next.direcionado_por = actorUsuarioId;
-      if (next.resolvido_por) next.resolvido_por = actorUsuarioId;
-      if (next.responsavel_id && targetUsuarioId) next.responsavel_id = targetUsuarioId;
-      patch = next;
-      continue;
-    }
-
-    let strippedOptional = false;
-    for (const optCol of ['direcionado_em', 'resolvido_em', 'motivo']) {
-      if (optCol in patch && isMissingOptionalColumnError(err, optCol)) {
-        const next = { ...patch };
-        delete next[optCol];
-        patch = next;
-        strippedOptional = true;
-        break;
-      }
-    }
-    if (strippedOptional) continue;
-
-    return { data: null, error: err, resolvedActorId };
-  }
-
-  return {
-    data: null,
-    error: { message: 'Falha ao atualizar pendência após tentativas de compatibilidade.' },
-    resolvedActorId
-  };
-}
-
-interface HistoricoEntryInput {
-  pendencia_id: string;
-  acao: PendenciaHistoricoAcao;
-  campo: string;
-  valor_anterior: string | null;
-  valor_novo: string | null;
-  usuario_id: string;
-  motivo: string | null;
-  created_at: string;
-}
-
-async function insertHistoricoAppendOnly(
-  supabaseAdmin: NonNullable<SemaAuthContext['supabaseAdmin']>,
-  entries: HistoricoEntryInput[],
-  actorUsuarioId?: string | null
-): Promise<{ data: any[]; error: any }> {
-  if (entries.length === 0) return { data: [], error: null };
-
-  let rowsToInsert: Record<string, any>[] = entries.map(e => ({
-    pendencia_id: e.pendencia_id,
-    acao: e.acao,
-    campo: e.campo,
-    valor_anterior: e.valor_anterior !== null ? scrubSensitiveTextForServerLog(e.valor_anterior) : null,
-    valor_novo: e.valor_novo !== null ? scrubSensitiveTextForServerLog(e.valor_novo) : null,
-    usuario_id: e.usuario_id,
-    motivo: e.motivo !== null ? scrubSensitiveTextForServerLog(e.motivo) : null,
-    created_at: e.created_at
-  }));
-
-  for (let attempt = 0; attempt < 4; attempt++) {
-    const res = await supabaseAdmin
-      .from('pendencias_historico')
-      .insert(rowsToInsert)
-      .select();
-
-    if (!res.error) {
-      return { data: Array.isArray(res.data) ? res.data : rowsToInsert, error: null };
-    }
-
-    const err = res.error;
-    if (isNotNullIdError(err) && !rowsToInsert[0]?.id) {
-      rowsToInsert = rowsToInsert.map(r => ({ ...r, id: crypto.randomUUID() }));
-      continue;
-    }
-
-    if (isFkUsuariosError(err) && actorUsuarioId && rowsToInsert[0]?.usuario_id !== actorUsuarioId) {
-      rowsToInsert = rowsToInsert.map(r => ({ ...r, usuario_id: actorUsuarioId }));
-      continue;
-    }
-
-    return { data: [], error: err };
-  }
-
-  return { data: [], error: { message: 'Falha ao registrar histórico de pendência.' } };
-}
-
-function validateBodySafetyAndNoSpoof(body: Record<string, any>): string | null {
+export function validateBodySafetyAndNoSpoof(body: Record<string, any>): string | null {
   for (const key of Object.keys(body)) {
     const normKey = key.toLowerCase();
     if (FORBIDDEN_PAYLOAD_KEYS.has(normKey)) {
@@ -483,6 +497,155 @@ function validateBodySafetyAndNoSpoof(body: Record<string, any>): string | null 
   return null;
 }
 
+export interface HistoricoDraftEntry {
+  pendencia_id?: string;
+  acao: PendenciaHistoricoAcao;
+  campo: string;
+  valor_anterior: string | null;
+  valor_novo: string | null;
+  usuario_id: string;
+  motivo: string | null;
+  created_at: string;
+}
+
+export function buildCreatePendenciaDraft(
+  body: Record<string, any>,
+  actorUserId: string,
+  resolvedRespId: string | null,
+  nowIso: string
+): { pendencia: Record<string, any>; historico: HistoricoDraftEntry[] } {
+  const titulo = normalizeOptionalString(body.titulo, 200)!;
+  const tipo = normalizeOptionalString(body.tipo, 100)!;
+  const descricao = normalizeOptionalString(body.descricao, 2000);
+  const origemRefId = normalizeOptionalString(body.origem_ref_id, 120);
+  const tipoReferencia = normalizeOptionalString(body.tipo_referencia, 80);
+  const referenciaId = normalizeOptionalString(body.referencia_id, 120);
+  const empreendedorId = normalizeOptionalString(body.empreendedor_id, 120);
+  const barragemId = normalizeOptionalString(body.barragem_id, 120);
+  const motivo = normalizeOptionalString(body.motivo, 500);
+
+  const initialSituacao: PendenciaSituacao = resolvedRespId ? 'direcionada' : 'aberta';
+  const pendencia: Record<string, any> = {
+    origem: PENDENCIA_ORIGEM,
+    origem_ref_id: origemRefId,
+    tipo,
+    titulo,
+    descricao,
+    situacao: initialSituacao,
+    responsavel_id: resolvedRespId,
+    criado_por: actorUserId,
+    direcionado_por: resolvedRespId ? actorUserId : null,
+    direcionado_em: resolvedRespId ? nowIso : null,
+    resolvido_por: null,
+    resolvido_em: null,
+    tipo_referencia: tipoReferencia,
+    referencia_id: referenciaId,
+    empreendedor_id: empreendedorId,
+    barragem_id: barragemId,
+    created_at: nowIso,
+    updated_at: nowIso
+  };
+
+  const historico: HistoricoDraftEntry[] = [
+    {
+      acao: 'criacao',
+      campo: 'situacao',
+      valor_anterior: null,
+      valor_novo: initialSituacao,
+      usuario_id: actorUserId,
+      motivo: motivo ? scrubSensitiveTextForServerLog(motivo) : 'Criação da pendência',
+      created_at: nowIso
+    }
+  ];
+
+  if (resolvedRespId) {
+    historico.push({
+      acao: 'direcionamento',
+      campo: 'responsavel_id',
+      valor_anterior: null,
+      valor_novo: resolvedRespId,
+      usuario_id: actorUserId,
+      motivo: motivo ? scrubSensitiveTextForServerLog(motivo) : 'Direcionamento inicial na criação',
+      created_at: nowIso
+    });
+  }
+
+  return { pendencia, historico };
+}
+
+export function buildAlterarSituacaoDraft(
+  current: Record<string, any>,
+  novaSituacao: PendenciaSituacao,
+  motivo: string | null,
+  actorUserId: string,
+  nowIso: string
+): { patch: Record<string, any>; historico: HistoricoDraftEntry[] } {
+  const currentSituacao = String(current.situacao || 'aberta').toLowerCase();
+  const patch: Record<string, any> = {
+    situacao: novaSituacao,
+    updated_at: nowIso,
+    ...(novaSituacao === 'resolvida'
+      ? { resolvido_por: actorUserId, resolvido_em: nowIso }
+      : { resolvido_por: null, resolvido_em: null })
+  };
+
+  const historico: HistoricoDraftEntry[] = [
+    {
+      pendencia_id: String(current.id),
+      acao: novaSituacao === 'resolvida' ? 'resolucao' : 'mudanca_situacao',
+      campo: 'situacao',
+      valor_anterior: currentSituacao,
+      valor_novo: novaSituacao,
+      usuario_id: actorUserId,
+      motivo: motivo ? scrubSensitiveTextForServerLog(motivo) : `Situação alterada para ${novaSituacao}`,
+      created_at: nowIso
+    }
+  ];
+
+  return { patch, historico };
+}
+
+export function buildEditarPendenciaDraft(
+  current: Record<string, any>,
+  body: Record<string, any>,
+  actorUserId: string,
+  nowIso: string
+): { patch: Record<string, any>; historico: HistoricoDraftEntry[] } {
+  const motivo = normalizeOptionalString(body.motivo, 500);
+  const patch: Record<string, any> = {};
+  const historico: HistoricoDraftEntry[] = [];
+
+  for (const field of EDITABLE_TEXT_FIELDS) {
+    if (!(field in body)) continue;
+    const maxLen = field === 'descricao' ? 2000 : field === 'titulo' ? 200 : 120;
+    const nextVal = normalizeOptionalString(body[field], maxLen);
+    const prevVal =
+      current[field] !== undefined && current[field] !== null && String(current[field]).trim() !== ''
+        ? String(current[field]).trim()
+        : null;
+
+    if (nextVal !== prevVal) {
+      patch[field] = nextVal;
+      historico.push({
+        pendencia_id: String(current.id),
+        acao: 'edicao',
+        campo: field,
+        valor_anterior: prevVal,
+        valor_novo: nextVal,
+        usuario_id: actorUserId,
+        motivo: motivo ? scrubSensitiveTextForServerLog(motivo) : `Edição do campo ${field}`,
+        created_at: nowIso
+      });
+    }
+  }
+
+  if (historico.length > 0) {
+    patch.updated_at = nowIso;
+  }
+
+  return { patch, historico };
+}
+
 export default async function pendenciasHandler(
   req: IncomingMessage & {
     body?: any;
@@ -507,7 +670,6 @@ export default async function pendenciasHandler(
     });
   }
 
-  // 1. Autenticação obrigatória via sessão verificada no servidor
   const authCtx = await authorizeSemaLookupRequest(req);
   if (!authCtx.configured) {
     return sendJson(res, 503, {
@@ -517,7 +679,7 @@ export default async function pendenciasHandler(
     });
   }
 
-  if (!authCtx.authorized || !authCtx.userId) {
+  if (!authCtx.authorized || !authCtx.userId || !isValidUuid(authCtx.userId)) {
     return sendJson(res, authCtx.httpStatus || 401, {
       success: false,
       error: authCtx.error || 'Sessão institucional ausente ou inválida.'
@@ -532,11 +694,27 @@ export default async function pendenciasHandler(
     });
   }
 
+  if (!READ_ALLOWED_ROLES.has(authCtx.role || '')) {
+    return sendJson(res, 403, {
+      success: false,
+      error: 'Perfil sem permissão para consultar o módulo de pendências.'
+    });
+  }
+
   const supabaseAdmin = authCtx.supabaseAdmin;
-  const selfIds = getSelfIdSet(authCtx);
+  const canonicalUserId = String(authCtx.userId);
   const isAdmin = authCtx.role === 'Administrador';
 
-  // ==================== GET: LISTAGEM / DETALHE + HISTÓRICO ====================
+  const safeCurrentUserName = (() => {
+    if (authCtx.userName && (isAdmin || !authCtx.userName.includes('@'))) {
+      return sanitizePendenciaTextForResponse(authCtx.userName) || 'Usuário autenticado';
+    }
+    if (authCtx.login && (isAdmin || !authCtx.login.includes('@'))) {
+      return sanitizePendenciaTextForResponse(authCtx.login) || 'Usuário autenticado';
+    }
+    return 'Usuário autenticado';
+  })();
+
   if (method === 'GET') {
     const query = getQueryParams(req);
     const tab = String(query.get('tab') || 'geral').trim().toLowerCase();
@@ -553,7 +731,7 @@ export default async function pendenciasHandler(
     if (tab === 'direcionado' && !isAdmin) {
       return sendJson(res, 403, {
         success: false,
-        error: 'A aba Direcionado é visível somente para o perfil Administrador.'
+        error: 'A aba Direcionado é exclusiva para o perfil Administrador.'
       });
     }
 
@@ -564,9 +742,16 @@ export default async function pendenciasHandler(
       });
     }
 
+    if (pendenciaId && !isValidUuid(pendenciaId)) {
+      return sendJson(res, 400, {
+        success: false,
+        error: 'Identificador da pendência inválido.'
+      });
+    }
+
     try {
       const usuarios = await fetchUsuariosDirectory(supabaseAdmin);
-      const usuariosNomes = buildUsuariosNomesMap(usuarios);
+      const usuariosNomes = buildUsuariosNomesMap(usuarios, isAdmin);
 
       if (pendenciaId) {
         const { data: item, error: itemErr } = await supabaseAdmin
@@ -589,10 +774,10 @@ export default async function pendenciasHandler(
           });
         }
 
-        if (!canReadPendenciaRow(item, authCtx, selfIds)) {
+        if (!canReadPendenciaRow(item, authCtx)) {
           return sendJson(res, 403, {
             success: false,
-            error: 'Sem permissão para visualizar esta pendência.'
+            error: 'Sem permissão para consultar os detalhes e o histórico desta pendência.'
           });
         }
 
@@ -613,20 +798,23 @@ export default async function pendenciasHandler(
 
         return sendJson(res, 200, {
           success: true,
-          pendencia: item,
-          historico: Array.isArray(histRows) ? histRows : [],
+          mutationsEnabled: MUTATIONS_ENABLED,
+          pendencia: sanitizePendenciaRecordForResponse(item),
+          historico: (Array.isArray(histRows) ? histRows : []).map(h =>
+            sanitizePendenciaHistoricoForResponse(h)
+          ),
           usuariosNomes,
           ...(isAdmin
             ? {
                 usuariosDirecionaveis: usuarios
-                  .filter(isUsuarioActive)
+                  .filter(u => isUsuarioActive(u) && isValidUuid(u.auth_user_id))
                   .map(u => ({
-                    id: String(u.id),
-                    authUserId: u.auth_user_id ? String(u.auth_user_id) : null,
-                    nome: String(u.nome || u.login || u.email || u.id).trim(),
-                    login: u.login ? String(u.login) : '',
-                    setor: u.setor ? String(u.setor) : '',
-                    papel: u.papel ? String(u.papel) : 'Usuário'
+                    id: String(u.auth_user_id),
+                    authUserId: String(u.auth_user_id),
+                    nome: formatSafeUsuarioLabel(u, true),
+                    login: u.login ? sanitizePendenciaTextForResponse(u.login) || '' : '',
+                    setor: u.setor ? sanitizePendenciaTextForResponse(u.setor) || '' : '',
+                    papel: u.papel ? sanitizePendenciaTextForResponse(u.papel) || 'Usuário' : 'Usuário'
                   }))
               }
             : {})
@@ -645,11 +833,11 @@ export default async function pendenciasHandler(
         });
       }
 
-      const rows = Array.isArray(allRows) ? allRows : [];
-      const minhasRows = rows.filter(r => Boolean(r.responsavel_id && selfIds.has(String(r.responsavel_id))));
-      const geralRows = isAdmin
-        ? rows
-        : rows.filter(r => canReadPendenciaRow(r, authCtx, selfIds));
+      const rows = (Array.isArray(allRows) ? allRows : []).filter(r =>
+        canReadPendenciaRow(r, authCtx)
+      );
+      const minhasRows = rows.filter(r => isSameCanonicalUser(r.responsavel_id, canonicalUserId));
+      const geralRows = rows;
       const direcionadoRows = isAdmin ? rows.filter(r => Boolean(r.responsavel_id)) : [];
 
       let tabRows = tab === 'minhas' ? minhasRows : tab === 'direcionado' ? direcionadoRows : geralRows;
@@ -659,31 +847,31 @@ export default async function pendenciasHandler(
 
       return sendJson(res, 200, {
         success: true,
+        mutationsEnabled: MUTATIONS_ENABLED,
         tab,
         role: authCtx.role,
         currentUser: {
-          userId: authCtx.userId,
-          usuarioId: authCtx.usuarioId || null,
-          nome: authCtx.userName || authCtx.login || authCtx.userId
+          userId: canonicalUserId,
+          nome: safeCurrentUserName
         },
         counts: {
           minhas: minhasRows.length,
           geral: geralRows.length,
           ...(isAdmin ? { direcionado: direcionadoRows.length } : {})
         },
-        pendencias: tabRows,
+        pendencias: tabRows.map(r => sanitizePendenciaRecordForResponse(r)),
         usuariosNomes,
         ...(isAdmin
           ? {
               usuariosDirecionaveis: usuarios
-                .filter(isUsuarioActive)
+                .filter(u => isUsuarioActive(u) && isValidUuid(u.auth_user_id))
                 .map(u => ({
-                  id: String(u.id),
-                  authUserId: u.auth_user_id ? String(u.auth_user_id) : null,
-                  nome: String(u.nome || u.login || u.email || u.id).trim(),
-                  login: u.login ? String(u.login) : '',
-                  setor: u.setor ? String(u.setor) : '',
-                  papel: u.papel ? String(u.papel) : 'Usuário'
+                  id: String(u.auth_user_id),
+                  authUserId: String(u.auth_user_id),
+                  nome: formatSafeUsuarioLabel(u, true),
+                  login: u.login ? sanitizePendenciaTextForResponse(u.login) || '' : '',
+                  setor: u.setor ? sanitizePendenciaTextForResponse(u.setor) || '' : '',
+                  papel: u.papel ? sanitizePendenciaTextForResponse(u.papel) || 'Usuário' : 'Usuário'
                 }))
             }
           : {})
@@ -698,7 +886,7 @@ export default async function pendenciasHandler(
     }
   }
 
-  // ==================== POST / PATCH: MUTAÇÕES COM HISTÓRICO ====================
+  // ==================== POST / PATCH: VALIDAÇÕES + BLOQUEIO 409 SEM GRAVAÇÃO PARCIAL ====================
   if (!['Administrador', 'Analista', 'Usuário'].includes(authCtx.role || '')) {
     return sendJson(res, 403, {
       success: false,
@@ -723,32 +911,36 @@ export default async function pendenciasHandler(
   }
 
   const action = String(body.action || 'criar').trim().toLowerCase();
+  if (!ALLOWED_ACTIONS.has(action)) {
+    return sendJson(res, 400, {
+      success: false,
+      error: `Ação "${action}" não reconhecida para pendências.`
+    });
+  }
+
+  if (action === 'direcionar' && !isAdmin) {
+    return sendJson(res, 403, {
+      success: false,
+      error: 'Apenas Administradores podem direcionar ou alterar o responsável de uma pendência.'
+    });
+  }
+
+  if (
+    (action === 'criar' || action === 'editar') &&
+    !isAdmin &&
+    (body.responsavel_id !== undefined || body.responsavelUsuarioId !== undefined)
+  ) {
+    return sendJson(res, 403, {
+      success: false,
+      error: 'Usuários não administradores não podem escolher nem alterar o responsável.'
+    });
+  }
+
   const nowIso = new Date().toISOString();
 
-  // --- AÇÃO 1: CRIAR ---
   if (action === 'criar') {
-    const requestedRespRaw = normalizeOptionalString(
-      body.responsavel_id ?? body.responsavelUsuarioId,
-      120
-    );
-
-    if (!isAdmin && requestedRespRaw) {
-      return sendJson(res, 403, {
-        success: false,
-        error: 'Usuários não administradores não podem escolher nem atribuir responsável.'
-      });
-    }
-
     const titulo = normalizeOptionalString(body.titulo, 200);
     const tipo = normalizeOptionalString(body.tipo, 100);
-    const descricao = normalizeOptionalString(body.descricao, 2000);
-    const origemRefId = normalizeOptionalString(body.origem_ref_id, 120);
-    const tipoReferencia = normalizeOptionalString(body.tipo_referencia, 80);
-    const referenciaId = normalizeOptionalString(body.referencia_id, 120);
-    const empreendedorId = normalizeOptionalString(body.empreendedor_id, 120);
-    const barragemId = normalizeOptionalString(body.barragem_id, 120);
-    const motivo = normalizeOptionalString(body.motivo, 500);
-
     if (!titulo || titulo.length < 3) {
       return sendJson(res, 400, {
         success: false,
@@ -762,603 +954,135 @@ export default async function pendenciasHandler(
       });
     }
 
+    const requestedRespRaw = normalizeOptionalString(
+      body.responsavel_id ?? body.responsavelUsuarioId,
+      120
+    );
+
     let resolvedRespId: string | null = null;
-    let targetUsuarioId: string | null = null;
     if (isAdmin && requestedRespRaw) {
+      if (!isValidUuid(requestedRespRaw)) {
+        return sendJson(res, 400, {
+          success: false,
+          error: 'O identificador do usuário responsável deve ser um UUID válido.'
+        });
+      }
       const usuarios = await fetchUsuariosDirectory(supabaseAdmin);
-      const targetUser = usuarios.find(
-        u =>
-          String(u.id) === requestedRespRaw ||
-          (u.auth_user_id && String(u.auth_user_id) === requestedRespRaw)
-      );
-      if (!targetUser || !isUsuarioActive(targetUser)) {
+      const targetUser = usuarios.find(u => isSameCanonicalUser(u.auth_user_id, requestedRespRaw));
+      if (!targetUser || !isUsuarioActive(targetUser) || !isValidUuid(targetUser.auth_user_id)) {
         return sendJson(res, 400, {
           success: false,
           error: 'Usuário responsável selecionado não foi encontrado ou está inativo.'
         });
       }
-      targetUsuarioId = String(targetUser.id);
-      resolvedRespId = targetUser.auth_user_id ? String(targetUser.auth_user_id) : String(targetUser.id);
+      resolvedRespId = String(targetUser.auth_user_id);
     }
 
-    const initialSituacao: PendenciaSituacao = resolvedRespId ? 'direcionada' : 'aberta';
-    const newRow: Record<string, any> = {
-      origem: 'Administra',
-      origem_ref_id: origemRefId,
-      tipo,
-      titulo,
-      descricao,
-      situacao: initialSituacao,
-      responsavel_id: resolvedRespId,
-      criado_por: authCtx.userId,
-      direcionado_por: resolvedRespId ? authCtx.userId : null,
-      direcionado_em: resolvedRespId ? nowIso : null,
-      resolvido_por: null,
-      resolvido_em: null,
-      tipo_referencia: tipoReferencia,
-      referencia_id: referenciaId,
-      empreendedor_id: empreendedorId,
-      barragem_id: barragemId,
-      motivo,
-      created_at: nowIso,
-      updated_at: nowIso
-    };
-
-    const insertRes = await insertPendenciaRowWithAdaptiveCompat(
-      supabaseAdmin,
-      newRow,
-      authCtx.userId,
-      authCtx.usuarioId,
-      targetUsuarioId
-    );
-
-    if (insertRes.error || !insertRes.data) {
-      return sendJson(res, 500, {
-        success: false,
-        error: scrubSensitiveTextForServerLog(
-          `Falha ao criar pendência: ${insertRes.error?.message || 'Erro desconhecido.'}`
-        )
-      });
-    }
-
-    const created = insertRes.data;
-    const histEntries: HistoricoEntryInput[] = [
-      {
-        pendencia_id: String(created.id),
-        acao: 'criacao',
-        campo: 'situacao',
-        valor_anterior: null,
-        valor_novo: String(created.situacao || initialSituacao),
-        usuario_id: insertRes.resolvedActorId,
-        motivo: motivo || 'Criação da pendência',
-        created_at: nowIso
-      }
-    ];
-
-    if (created.responsavel_id) {
-      histEntries.push({
-        pendencia_id: String(created.id),
-        acao: 'direcionamento',
-        campo: 'responsavel_id',
-        valor_anterior: null,
-        valor_novo: String(created.responsavel_id),
-        usuario_id: insertRes.resolvedActorId,
-        motivo: motivo || 'Direcionamento inicial na criação',
-        created_at: nowIso
-      });
-    }
-
-    const histRes = await insertHistoricoAppendOnly(supabaseAdmin, histEntries, authCtx.usuarioId);
-    if (histRes.error) {
-      // Não deixa registro de pendência sem histórico auditável; nunca altera nem apaga pendencias_historico.
-      try {
-        await supabaseAdmin.from('pendencias').delete().eq('id', created.id);
-      } catch {
-        // Melhor-esforço de reversão da pendência recém-criada
-      }
-      return sendJson(res, 500, {
-        success: false,
-        error: scrubSensitiveTextForServerLog(
-          `Falha ao gravar histórico da pendência; operação cancelada: ${histRes.error.message}`
-        )
-      });
-    }
-
-    return sendJson(res, 201, {
-      success: true,
-      pendencia: created,
-      historico: histRes.data
-    });
-  }
-
-  // --- AÇÕES SOBRE PENDÊNCIA EXISTENTE ---
-  const pendenciaId = normalizeOptionalString(body.pendenciaId ?? body.id, 120);
-  if (!pendenciaId) {
-    return sendJson(res, 400, {
-      success: false,
-      error: 'Identificador da pendência é obrigatório.'
-    });
-  }
-
-  const { data: current, error: fetchErr } = await supabaseAdmin
-    .from('pendencias')
-    .select('*')
-    .eq('id', pendenciaId)
-    .maybeSingle();
-
-  if (fetchErr) {
-    return sendJson(res, 500, {
-      success: false,
-      error: scrubSensitiveTextForServerLog(`Erro ao localizar pendência: ${fetchErr.message}`)
-    });
-  }
-
-  if (!current) {
-    return sendJson(res, 404, {
-      success: false,
-      error: 'Pendência não encontrada.'
-    });
-  }
-
-  const currentSituacao = String(current.situacao || 'aberta').toLowerCase();
-
-  // --- AÇÃO 2: DIRECIONAR (ADMIN ONLY) ---
-  if (action === 'direcionar') {
-    if (!isAdmin) {
-      return sendJson(res, 403, {
-        success: false,
-        error: 'Apenas Administradores podem direcionar ou alterar o responsável de uma pendência.'
-      });
-    }
-
-    if (CLOSED_SITUACOES.has(currentSituacao)) {
-      return sendJson(res, 409, {
-        success: false,
-        error: 'Não é possível direcionar uma pendência já resolvida ou cancelada.'
-      });
-    }
-
-    const targetRaw = normalizeOptionalString(
-      body.responsavel_id ?? body.responsavelUsuarioId,
-      120
-    );
-    if (!targetRaw) {
+    buildCreatePendenciaDraft(body, canonicalUserId, resolvedRespId, nowIso);
+  } else {
+    const pendenciaId = normalizeOptionalString(body.pendenciaId ?? body.id, 120);
+    if (!pendenciaId || !isValidUuid(pendenciaId)) {
       return sendJson(res, 400, {
         success: false,
-        error: 'Selecione um usuário ativo para direcionar a pendência.'
+        error: 'Identificador da pendência deve ser um UUID válido.'
       });
     }
 
-    const usuarios = await fetchUsuariosDirectory(supabaseAdmin);
-    const targetUser = usuarios.find(
-      u =>
-        String(u.id) === targetRaw ||
-        (u.auth_user_id && String(u.auth_user_id) === targetRaw)
-    );
-    if (!targetUser || !isUsuarioActive(targetUser)) {
-      return sendJson(res, 400, {
-        success: false,
-        error: 'Usuário selecionado não encontrado ou inativo.'
-      });
-    }
-
-    const nextRespId = targetUser.auth_user_id
-      ? String(targetUser.auth_user_id)
-      : String(targetUser.id);
-    const prevRespId = current.responsavel_id ? String(current.responsavel_id) : null;
-    const motivo = normalizeOptionalString(body.motivo, 500);
-
-    if (prevRespId && (prevRespId === nextRespId || prevRespId === String(targetUser.id))) {
-      return sendJson(res, 400, {
-        success: false,
-        error: 'A pendência já está direcionada para este usuário.'
-      });
-    }
-
-    const nextSituacao: PendenciaSituacao =
-      currentSituacao === 'aberta' ? 'direcionada' : (currentSituacao as PendenciaSituacao);
-
-    const patch: Record<string, any> = {
-      responsavel_id: nextRespId,
-      direcionado_por: authCtx.userId,
-      direcionado_em: nowIso,
-      situacao: nextSituacao,
-      updated_at: nowIso
-    };
-
-    const updRes = await updatePendenciaRowWithAdaptiveCompat(
-      supabaseAdmin,
-      pendenciaId,
-      patch,
-      authCtx.userId,
-      authCtx.usuarioId,
-      String(targetUser.id)
-    );
-
-    if (updRes.error || !updRes.data) {
-      return sendJson(res, 500, {
-        success: false,
-        error: scrubSensitiveTextForServerLog(
-          `Erro ao direcionar pendência: ${updRes.error?.message || 'Falha no servidor.'}`
-        )
-      });
-    }
-
-    const updated = updRes.data;
-    const histEntries: HistoricoEntryInput[] = [
-      {
-        pendencia_id: pendenciaId,
-        acao: 'direcionamento',
-        campo: 'responsavel_id',
-        valor_anterior: prevRespId,
-        valor_novo: String(updated.responsavel_id || nextRespId),
-        usuario_id: updRes.resolvedActorId,
-        motivo: motivo || 'Direcionamento de responsável',
-        created_at: nowIso
-      }
-    ];
-
-    if (nextSituacao !== currentSituacao) {
-      histEntries.push({
-        pendencia_id: pendenciaId,
-        acao: 'mudanca_situacao',
-        campo: 'situacao',
-        valor_anterior: currentSituacao,
-        valor_novo: nextSituacao,
-        usuario_id: updRes.resolvedActorId,
-        motivo: motivo || 'Situação atualizada ao direcionar',
-        created_at: nowIso
-      });
-    }
-
-    const histRes = await insertHistoricoAppendOnly(supabaseAdmin, histEntries, authCtx.usuarioId);
-    if (histRes.error) {
-      await updatePendenciaRowWithAdaptiveCompat(
-        supabaseAdmin,
-        pendenciaId,
-        {
-          responsavel_id: current.responsavel_id ?? null,
-          direcionado_por: current.direcionado_por ?? null,
-          direcionado_em: current.direcionado_em ?? null,
-          situacao: current.situacao,
-          updated_at: current.updated_at || nowIso
-        },
-        authCtx.userId,
-        authCtx.usuarioId
+    if (action === 'direcionar') {
+      const targetRaw = normalizeOptionalString(
+        body.responsavel_id ?? body.responsavelUsuarioId,
+        120
       );
-      return sendJson(res, 500, {
-        success: false,
-        error: scrubSensitiveTextForServerLog(
-          `Falha ao registrar histórico de direcionamento: ${histRes.error.message}`
-        )
-      });
-    }
-
-    return sendJson(res, 200, {
-      success: true,
-      pendencia: updated,
-      historico: histRes.data
-    });
-  }
-
-  // Para editar / alterar_situacao / resolver: verifica se usuário está autorizado na pendência
-  if (!canMutatePendenciaRow(current, authCtx, selfIds)) {
-    return sendJson(res, 403, {
-      success: false,
-      error:
-        'Sem permissão para alterar esta pendência. Pendências atribuídas a outro responsável são geridas pelo responsável designado ou por um Administrador.'
-    });
-  }
-
-  // --- AÇÃO 3: MUDAR SITUAÇÃO ---
-  if (action === 'alterar_situacao') {
-    const novaSituacao = String(body.situacao || '').trim().toLowerCase();
-    const motivo = normalizeOptionalString(body.motivo, 500);
-
-    if (!VALID_SITUACOES_SET.has(novaSituacao)) {
-      return sendJson(res, 400, {
-        success: false,
-        error: 'Situação informada não é permitida.'
-      });
-    }
-
-    if (novaSituacao === currentSituacao) {
-      return sendJson(res, 400, {
-        success: false,
-        error: 'A pendência já se encontra nessa situação.'
-      });
-    }
-
-    if (novaSituacao === 'direcionada' && !current.responsavel_id) {
-      return sendJson(res, isAdmin ? 400 : 403, {
-        success: false,
-        error: isAdmin
-          ? 'Para definir a situação como Direcionada, utilize a ação Direcionar e selecione um responsável.'
-          : 'Somente Administradores podem direcionar pendências sem responsável.'
-      });
-    }
-
-    if ((novaSituacao === 'resolvida' || novaSituacao === 'cancelada') && (!motivo || motivo.length < 3)) {
-      return sendJson(res, 400, {
-        success: false,
-        error: 'Informe o motivo (mínimo 3 caracteres) para resolver ou cancelar a pendência.'
-      });
-    }
-
-    const patch: Record<string, any> = {
-      situacao: novaSituacao,
-      updated_at: nowIso,
-      ...(motivo ? { motivo } : {}),
-      ...(novaSituacao === 'resolvida'
-        ? { resolvido_por: authCtx.userId, resolvido_em: nowIso }
-        : currentSituacao === 'resolvida'
-        ? { resolvido_por: null, resolvido_em: null }
-        : {})
-    };
-
-    const updRes = await updatePendenciaRowWithAdaptiveCompat(
-      supabaseAdmin,
-      pendenciaId,
-      patch,
-      authCtx.userId,
-      authCtx.usuarioId
-    );
-
-    if (updRes.error || !updRes.data) {
-      return sendJson(res, 500, {
-        success: false,
-        error: scrubSensitiveTextForServerLog(
-          `Erro ao atualizar situação da pendência: ${updRes.error?.message || 'Falha no servidor.'}`
-        )
-      });
-    }
-
-    const histEntries: HistoricoEntryInput[] = [
-      {
-        pendencia_id: pendenciaId,
-        acao: novaSituacao === 'resolvida' ? 'resolucao' : 'mudanca_situacao',
-        campo: 'situacao',
-        valor_anterior: currentSituacao,
-        valor_novo: novaSituacao,
-        usuario_id: updRes.resolvedActorId,
-        motivo: motivo || `Situação alterada para ${novaSituacao}`,
-        created_at: nowIso
-      }
-    ];
-
-    const histRes = await insertHistoricoAppendOnly(supabaseAdmin, histEntries, authCtx.usuarioId);
-    if (histRes.error) {
-      await updatePendenciaRowWithAdaptiveCompat(
-        supabaseAdmin,
-        pendenciaId,
-        {
-          situacao: current.situacao,
-          motivo: current.motivo ?? null,
-          resolvido_por: current.resolvido_por ?? null,
-          resolvido_em: current.resolvido_em ?? null,
-          updated_at: current.updated_at || nowIso
-        },
-        authCtx.userId,
-        authCtx.usuarioId
-      );
-      return sendJson(res, 500, {
-        success: false,
-        error: scrubSensitiveTextForServerLog(
-          `Falha ao registrar histórico de mudança de situação: ${histRes.error.message}`
-        )
-      });
-    }
-
-    return sendJson(res, 200, {
-      success: true,
-      pendencia: updRes.data,
-      historico: histRes.data
-    });
-  }
-
-  // --- AÇÃO 4: EDITAR ---
-  if (action === 'editar') {
-    if (!isAdmin && (body.responsavel_id !== undefined || body.responsavelUsuarioId !== undefined)) {
-      return sendJson(res, 403, {
-        success: false,
-        error: 'Usuários não administradores não podem alterar o responsável da pendência.'
-      });
-    }
-
-    if (CLOSED_SITUACOES.has(currentSituacao)) {
-      return sendJson(res, 409, {
-        success: false,
-        error: 'Pendências resolvidas ou canceladas não podem ser editadas diretamente.'
-      });
-    }
-
-    const motivo = normalizeOptionalString(body.motivo, 500);
-    const patch: Record<string, any> = {};
-    const diffs: Array<{ campo: string; valor_anterior: string | null; valor_novo: string | null }> = [];
-
-    for (const field of EDITABLE_TEXT_FIELDS) {
-      if (!(field in body)) continue;
-      const maxLen = field === 'descricao' ? 2000 : field === 'titulo' ? 200 : 120;
-      const nextVal = normalizeOptionalString(body[field], maxLen);
-      const prevVal = current[field] !== undefined && current[field] !== null && String(current[field]).trim() !== ''
-        ? String(current[field]).trim()
-        : null;
-
-      if (field === 'titulo' && (!nextVal || nextVal.length < 3)) {
+      if (!targetRaw || !isValidUuid(targetRaw)) {
         return sendJson(res, 400, {
           success: false,
-          error: 'O título deve ter pelo menos 3 caracteres.'
+          error: 'Informe um UUID válido de usuário ativo para direcionar a pendência.'
         });
       }
-      if (field === 'tipo' && !nextVal) {
+      const usuarios = await fetchUsuariosDirectory(supabaseAdmin);
+      const targetUser = usuarios.find(u => isSameCanonicalUser(u.auth_user_id, targetRaw));
+      if (!targetUser || !isUsuarioActive(targetUser) || !isValidUuid(targetUser.auth_user_id)) {
         return sendJson(res, 400, {
           success: false,
-          error: 'O tipo da pendência é obrigatório.'
-        });
-      }
-
-      if (nextVal !== prevVal) {
-        patch[field] = nextVal;
-        diffs.push({
-          campo: field,
-          valor_anterior: prevVal,
-          valor_novo: nextVal
+          error: 'Usuário selecionado não encontrado ou inativo.'
         });
       }
     }
 
-    if (diffs.length === 0) {
-      return sendJson(res, 400, {
-        success: false,
-        error: 'Nenhuma alteração identificada nos campos da pendência.'
-      });
-    }
-
-    patch.updated_at = nowIso;
-
-    const updRes = await updatePendenciaRowWithAdaptiveCompat(
-      supabaseAdmin,
-      pendenciaId,
-      patch,
-      authCtx.userId,
-      authCtx.usuarioId
-    );
-
-    if (updRes.error || !updRes.data) {
-      return sendJson(res, 500, {
-        success: false,
-        error: scrubSensitiveTextForServerLog(
-          `Erro ao editar pendência: ${updRes.error?.message || 'Falha no servidor.'}`
-        )
-      });
-    }
-
-    const histEntries: HistoricoEntryInput[] = diffs.map(d => ({
-      pendencia_id: pendenciaId,
-      acao: 'edicao',
-      campo: d.campo,
-      valor_anterior: d.valor_anterior,
-      valor_novo: d.valor_novo,
-      usuario_id: updRes.resolvedActorId,
-      motivo: motivo || `Edição do campo ${d.campo}`,
-      created_at: nowIso
-    }));
-
-    const histRes = await insertHistoricoAppendOnly(supabaseAdmin, histEntries, authCtx.usuarioId);
-    if (histRes.error) {
-      const revertPatch: Record<string, any> = { updated_at: current.updated_at || nowIso };
-      for (const d of diffs) {
-        revertPatch[d.campo] = d.valor_anterior;
+    if (action === 'alterar_situacao') {
+      const novaSituacao = String(body.situacao || '').trim().toLowerCase();
+      const motivo = normalizeOptionalString(body.motivo, 500);
+      if (!VALID_SITUACOES_SET.has(novaSituacao)) {
+        return sendJson(res, 400, {
+          success: false,
+          error: 'Situação informada não é permitida.'
+        });
       }
-      await updatePendenciaRowWithAdaptiveCompat(
-        supabaseAdmin,
-        pendenciaId,
-        revertPatch,
-        authCtx.userId,
-        authCtx.usuarioId
-      );
+      if ((novaSituacao === 'resolvida' || novaSituacao === 'cancelada') && (!motivo || motivo.length < 3)) {
+        return sendJson(res, 400, {
+          success: false,
+          error: 'Informe o motivo (mínimo 3 caracteres) para resolver ou cancelar a pendência.'
+        });
+      }
+    }
+
+    if (action === 'editar') {
+      if ('titulo' in body) {
+        const titulo = normalizeOptionalString(body.titulo, 200);
+        if (!titulo || titulo.length < 3) {
+          return sendJson(res, 400, {
+            success: false,
+            error: 'O título deve ter pelo menos 3 caracteres.'
+          });
+        }
+      }
+      if ('tipo' in body) {
+        const tipo = normalizeOptionalString(body.tipo, 100);
+        if (!tipo) {
+          return sendJson(res, 400, {
+            success: false,
+            error: 'O tipo da pendência é obrigatório.'
+          });
+        }
+      }
+    }
+
+    if (action === 'resolver') {
+      const motivo = normalizeOptionalString(body.motivo, 500);
+      if (!motivo || motivo.length < 3) {
+        return sendJson(res, 400, {
+          success: false,
+          error: 'Informe o motivo / observação da resolução (mínimo 3 caracteres).'
+        });
+      }
+    }
+
+    const { data: current, error: fetchErr } = await supabaseAdmin
+      .from('pendencias')
+      .select('*')
+      .eq('id', pendenciaId)
+      .maybeSingle();
+
+    if (fetchErr) {
       return sendJson(res, 500, {
         success: false,
-        error: scrubSensitiveTextForServerLog(
-          `Falha ao registrar histórico de edição: ${histRes.error.message}`
-        )
+        error: scrubSensitiveTextForServerLog(`Erro ao localizar pendência: ${fetchErr.message}`)
       });
     }
 
-    return sendJson(res, 200, {
-      success: true,
-      pendencia: updRes.data,
-      historico: histRes.data
-    });
+    if (current && !canMutatePendenciaRow(current, authCtx)) {
+      return sendJson(res, 403, {
+        success: false,
+        error:
+          'Sem permissão para alterar esta pendência. Pendências atribuídas a outro responsável são geridas pelo responsável designado ou por um Administrador.'
+      });
+    }
   }
 
-  // --- AÇÃO 5: RESOLVER ---
-  if (action === 'resolver') {
-    if (CLOSED_SITUACOES.has(currentSituacao)) {
-      return sendJson(res, 409, {
-        success: false,
-        error: 'Esta pendência já está resolvida ou cancelada.'
-      });
-    }
-
-    const motivo = normalizeOptionalString(body.motivo, 500);
-    if (!motivo || motivo.length < 3) {
-      return sendJson(res, 400, {
-        success: false,
-        error: 'Informe o motivo / observação da resolução (mínimo 3 caracteres).'
-      });
-    }
-
-    const patch: Record<string, any> = {
-      situacao: 'resolvida',
-      resolvido_por: authCtx.userId,
-      resolvido_em: nowIso,
-      motivo,
-      updated_at: nowIso
-    };
-
-    const updRes = await updatePendenciaRowWithAdaptiveCompat(
-      supabaseAdmin,
-      pendenciaId,
-      patch,
-      authCtx.userId,
-      authCtx.usuarioId
-    );
-
-    if (updRes.error || !updRes.data) {
-      return sendJson(res, 500, {
-        success: false,
-        error: scrubSensitiveTextForServerLog(
-          `Erro ao resolver pendência: ${updRes.error?.message || 'Falha no servidor.'}`
-        )
-      });
-    }
-
-    const histEntries: HistoricoEntryInput[] = [
-      {
-        pendencia_id: pendenciaId,
-        acao: 'resolucao',
-        campo: 'situacao',
-        valor_anterior: currentSituacao,
-        valor_novo: 'resolvida',
-        usuario_id: updRes.resolvedActorId,
-        motivo,
-        created_at: nowIso
-      }
-    ];
-
-    const histRes = await insertHistoricoAppendOnly(supabaseAdmin, histEntries, authCtx.usuarioId);
-    if (histRes.error) {
-      await updatePendenciaRowWithAdaptiveCompat(
-        supabaseAdmin,
-        pendenciaId,
-        {
-          situacao: current.situacao,
-          resolvido_por: current.resolvido_por ?? null,
-          resolvido_em: current.resolvido_em ?? null,
-          motivo: current.motivo ?? null,
-          updated_at: current.updated_at || nowIso
-        },
-        authCtx.userId,
-        authCtx.usuarioId
-      );
-      return sendJson(res, 500, {
-        success: false,
-        error: scrubSensitiveTextForServerLog(
-          `Falha ao registrar histórico de resolução: ${histRes.error.message}`
-        )
-      });
-    }
-
-    return sendJson(res, 200, {
-      success: true,
-      pendencia: updRes.data,
-      historico: histRes.data
-    });
-  }
-
-  return sendJson(res, 400, {
+  return sendJson(res, 409, {
     success: false,
-    error: `Ação "${action}" não reconhecida para pendências.`
+    code: 'ATOMIC_TRANSACTION_REQUIRED',
+    error:
+      'Mutações no módulo de pendências estão desabilitadas (HTTP 409) até existir mecanismo transacional atômico autorizado para gravar pendência e histórico juntos sem gravação parcial.'
   });
 }

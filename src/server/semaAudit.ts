@@ -10,7 +10,6 @@ export interface SemaAuthContext {
   httpStatus?: number;
   error?: string;
   userId: string | null;
-  usuarioId?: string | null;
   role: string | null;
   login?: string | null;
   userName?: string | null;
@@ -262,7 +261,6 @@ export async function authorizeSemaLookupRequest(
       configured: true,
       authorized: true,
       userId: String(userData.user.id),
-      usuarioId: profile.id ? String(profile.id) : null,
       role,
       login: resolvedLogin,
       userName: profile.nome ? String(profile.nome).trim() : null,
