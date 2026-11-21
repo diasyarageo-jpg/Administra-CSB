@@ -43,6 +43,7 @@ import {
   computeConciliacaoPendencias
 } from './components/ConciliacaoCadastrosView';
 import { PendenciasView } from './components/PendenciasView';
+import { SolicitacoesVistoriaView } from './components/SolicitacoesVistoriaView';
 import type { ConciliacaoDecisaoSubmission } from './components/ConciliacaoAssistidaModal';
 import { gravarConciliacaoAssistidaServidor } from './utils/conciliacaoEngine';
 import { parseCoordAdvanced } from './services/coordService';
@@ -262,6 +263,7 @@ const viewNames: Record<string, string> = {
   produtividade: 'Produtividade',
   portarias: 'Portarias',
   pendencias: 'Pendências',
+  solicitacoes_vistoria: 'Solicitações de Vistoria',
   documentos: 'Documentos',
   usuarios: 'Usuários',
   integracao: 'Estrutura de integração',
@@ -1456,6 +1458,15 @@ export default function App() {
             }}
           >
             <span className="nav-ico">⚑</span>Pendências
+          </button>
+          <button
+            className={`navbtn ${activeView === 'solicitacoes_vistoria' ? 'active' : ''}`}
+            onClick={() => {
+              setActiveView('solicitacoes_vistoria');
+              setMenuOpen(false);
+            }}
+          >
+            <span className="nav-ico">◈</span>Solicitações de Vistoria
           </button>
           <button
             className={`navbtn ${activeView === 'documentos' ? 'active' : ''}`}
@@ -3020,6 +3031,19 @@ export default function App() {
           {activeView === 'pendencias' && (
             <PendenciasView
               userRole={userRole}
+              empreendedores={db.empreendedores}
+              barragens={db.barragens}
+              onNotify={showToast}
+            />
+          )}
+
+          {/* SOLICITAÇÕES DE VISTORIA */}
+          {activeView === 'solicitacoes_vistoria' && (
+            <SolicitacoesVistoriaView
+              userRole={userRole}
+              currentAuthUserId={currentAuthUser?.id || currentUserProfile?.authUserId || null}
+              currentAuthEmail={currentAuthUser?.email || currentUserProfile?.email || null}
+              currentAuthLogin={currentUserProfile?.login || null}
               empreendedores={db.empreendedores}
               barragens={db.barragens}
               onNotify={showToast}

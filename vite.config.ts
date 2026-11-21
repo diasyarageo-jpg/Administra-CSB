@@ -14,13 +14,14 @@ function registerApiMiddlewares(
     '/api/sema-documentos': '/api/sema-documentos.ts',
     '/api/integracoes-status': '/api/integracoes-status.ts',
     '/api/conciliacao-gravar': '/api/conciliacao-gravar.ts',
-    '/api/pendencias': '/api/pendencias.ts'
+    '/api/pendencias': '/api/pendencias.ts',
+    '/api/solicitacoes-vistoria': '/api/solicitacoesVistoria.ts'
   };
 
   for (const [route, file] of Object.entries(endpoints)) {
     middlewares.use(route, async (req, res) => {
       try {
-        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, OPTIONS');
+        res.setHeader('Access-Control-Allow-Methods', 'GET, POST, PATCH, OPTIONS');
         res.setHeader(
           'Access-Control-Allow-Headers',
           'Content-Type, Authorization, X-Requested-With, Accept'
