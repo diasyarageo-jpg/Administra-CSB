@@ -1164,6 +1164,7 @@ test('Solicitações de Vistoria: retorna HTTP 503 JSON amigável quando a tabel
       resList
     );
     assert.equal(resList.statusCode, 503);
+    assert.equal(resList.getHeader('content-type'), 'application/json; charset=utf-8');
     assert.equal(resList._body.success, false);
     assert.equal(resList._body.code, 'DB_TABLE_NOT_AVAILABLE');
     assert.equal(typeof resList._body.error, 'string');
@@ -1171,3 +1172,94 @@ test('Solicitações de Vistoria: retorna HTTP 503 JSON amigável quando a tabel
     setTestSupabaseAdminForSemaAudit(null);
   }
 });
+
+test('Solicitações de Vistoria GET: garante Content-Type application/json em sucesso, URL inválida (503) e exceção inesperada (500)', async () => {
+  const prevUrl = process.env.SUPABASE_URL;
+  const prevViteUrl = process.env.VITE_SUPABASE_URL;
+  const prevSrv = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  setTestSupabaseAdminForSemaAudit(null);
+
+  try {
+    // 1. SUPABASE_URL malformada não lança exceção antes do handler: retorna 503 JSON
+    process.env.SUPABASE_URL = 'url-invalida-sem-esquema';
+    process.env.SUPABASE_SERVICE_ROLE_KEY = 'chave-teste';
+
+    const resInvalidEnv = createMockRes();
+    await solicitacoesVistoriaHandler(
+      createMockReq({
+        method: 'GET',
+        url: '/api/solicitacoesVistoria'
+      }),
+      resInvalidEnv
+    );
+    assert.equal(resInvalidEnv.statusCode, 503);
+    assert.equal(resInvalidEnv.getHeader('content-type'), 'application/json; charset=utf-8');
+    assert.equal(resInvalidEnv._body.success, false);
+    assert.equal(resInvalidEnv._body.code, 'AUTH_NOT_CONFIGURED');
+
+    // 2. Resposta usando apenas ServerResponse bruto (sem .status/.json) devolve JSON 200
+    const mock = createSolicitacoesSupabaseMock({ enableRpcs: false });
+    setTestSupabaseAdminForSemaAudit(mock.client);
+
+    const rawHeaders: Record<string, string> = {};
+    let rawBody = '';
+    const rawRes: any = {
+      statusCode: 200,
+      headersSent: false,
+      setHeader(k: string, v: string) {
+        rawHeaders[k.toLowerCase()] = v;
+      },
+      end(chunk?: string) {
+        rawBody = String(chunk || '');
+        rawRes.headersSent = true;
+        return rawRes;
+      }
+    };
+    await solicitacoesVistoriaHandler(
+      createMockReq({
+        method: 'GET',
+        url: '/api/solicitacoesVistoria/',
+        headers: { authorization: 'Bearer tok-analyst-a' }
+      }),
+      rawRes
+    );
+    assert.equal(rawRes.statusCode, 200);
+    assert.equal(rawHeaders['content-type'], 'application/json; charset=utf-8');
+    const parsedRaw = JSON.parse(rawBody);
+    assert.equal(parsedRaw.success, true);
+    assert.equal(Array.isArray(parsedRaw.solicitacoes), true);
+    assert.equal(parsedRaw.solicitacoes.length, 2);
+
+    // 3. Exceção inesperada lançada durante GET devolve HTTP 500 JSON (nunca HTML)
+    const originalFrom = mock.client.from.bind(mock.client);
+    mock.client.from = (table: string) => {
+      if (table === 'solicitacoes_vistoria') {
+        throw new Error('Falha inesperada de leitura no banco com token Bearer segredo_oculto_999');
+      }
+      return originalFrom(table);
+    };
+    const resException = createMockRes();
+    await solicitacoesVistoriaHandler(
+      createMockReq({
+        method: 'GET',
+        url: '/api/solicitacoesVistoria',
+        headers: { authorization: 'Bearer tok-analyst-a' }
+      }),
+      resException
+    );
+    assert.equal(resException.statusCode, 500);
+    assert.equal(resException.getHeader('content-type'), 'application/json; charset=utf-8');
+    assert.equal(resException._body.success, false);
+    assert.equal(resException._body.code, 'INTERNAL_SERVER_ERROR');
+    assert.equal(typeof resException._body.error, 'string');
+  } finally {
+    setTestSupabaseAdminForSemaAudit(null);
+    if (prevUrl === undefined) delete process.env.SUPABASE_URL;
+    else process.env.SUPABASE_URL = prevUrl;
+    if (prevViteUrl === undefined) delete process.env.VITE_SUPABASE_URL;
+    else process.env.VITE_SUPABASE_URL = prevViteUrl;
+    if (prevSrv === undefined) delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    else process.env.SUPABASE_SERVICE_ROLE_KEY = prevSrv;
+  }
+});
+

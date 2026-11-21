@@ -487,26 +487,54 @@ test('Solicitações Service + UI (regressão): erro HTTP com payload { error: {
   }
 });
 
-test('Solicitações Service: usa rota Vercel /api/solicitacoesVistoria e trata resposta não-JSON sem quebrar', async () => {
+test('Solicitações Service: usa rota Vercel /api/solicitacoesVistoria e trata resposta não-JSON ou HTML sem mascarar falha', async () => {
   assert.equal(SOLICITACOES_API_BASE, '/api/solicitacoesVistoria');
 
   const originalFetch = globalThis.fetch;
   let capturedUrl = '';
-  globalThis.fetch = (async (input: RequestInfo | URL) => {
-    capturedUrl = String(input);
-    return new Response('<!doctype html><html><body>Fallback</body></html>', {
-      status: 200,
-      headers: { 'Content-Type': 'text/html; charset=utf-8' }
-    });
-  }) as typeof fetch;
 
   try {
-    const res = await listarSolicitacoesVistoria({ status: 'solicitada' });
+    // 1. HTML recebido com HTTP 200 (fallback SPA) -> falha explícita
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      capturedUrl = String(input);
+      return new Response('<!doctype html><html><body>Fallback</body></html>', {
+        status: 200,
+        headers: { 'Content-Type': 'text/html; charset=utf-8' }
+      });
+    }) as typeof fetch;
+
+    const htmlRes = await listarSolicitacoesVistoria({ status: 'solicitada' });
     assert.equal(capturedUrl, '/api/solicitacoesVistoria?status=solicitada');
-    assert.equal(res.success, false);
-    assert.equal(Boolean(res.error && res.error.length > 0), true);
-    assert.deepEqual(res.solicitacoes, []);
+    assert.equal(htmlRes.success, false);
+    assert.equal(htmlRes.error, 'Resposta inesperada do servidor ao carregar solicitações de vistoria.');
+    assert.deepEqual(htmlRes.solicitacoes, []);
+
+    // 2. HTTP 200 com JSON inválido -> falha explícita
+    globalThis.fetch = (async () =>
+      new Response('{corrupted-json', {
+        status: 200,
+        headers: { 'Content-Type': 'application/json' }
+      })) as typeof fetch;
+
+    const badJsonRes = await listarSolicitacoesVistoria();
+    assert.equal(badJsonRes.success, false);
+    assert.equal(
+      badJsonRes.error,
+      'Resposta inesperada do servidor ao carregar solicitações de vistoria.'
+    );
+
+    // 3. HTTP 500 com corpo HTML -> preserva status HTTP na mensagem
+    globalThis.fetch = (async () =>
+      new Response('<html><body>500 Internal Server Error</body></html>', {
+        status: 500,
+        headers: { 'Content-Type': 'text/html' }
+      })) as typeof fetch;
+
+    const errHtmlRes = await listarSolicitacoesVistoria();
+    assert.equal(errHtmlRes.success, false);
+    assert.equal(errHtmlRes.error, 'Falha ao carregar solicitações de vistoria (HTTP 500).');
   } finally {
     globalThis.fetch = originalFetch;
   }
 });
+

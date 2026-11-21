@@ -9,7 +9,7 @@ import {
 import {
   isValidUuid,
   sanitizePendenciaTextForResponse
-} from './pendencias.js';
+} from '../src/server/pendenciaSanitizer.js';
 
 /**
  * Variáveis de ambiente utilizadas exclusivamente no servidor:
@@ -166,11 +166,17 @@ function sendJson(
   status: number,
   payload: unknown
 ) {
+  if (typeof res.setHeader === 'function' && !res.headersSent) {
+    res.setHeader('Content-Type', 'application/json; charset=utf-8');
+  }
   if (typeof res.status === 'function' && typeof res.json === 'function') {
-    return res.status(status).json(payload);
+    const statusResult = res.status(status);
+    if (statusResult && typeof statusResult.json === 'function') {
+      return statusResult.json(payload);
+    }
+    return res.json(payload);
   }
   res.statusCode = status;
-  res.setHeader('Content-Type', 'application/json; charset=utf-8');
   res.end(JSON.stringify(payload));
 }
 
@@ -288,7 +294,10 @@ function parseSolicitacoesRoute(
     // Mantém pathname original
   }
 
-  pathname = pathname.replace(/^\/api\/(?:solicitacoes-vistoria|solicitacoesVistoria)\/?/i, '');
+  pathname = pathname.replace(
+    /^\/api\/(?:solicitacoes-vistoria|solicitacoesVistoria)(?:\.(?:ts|js))?\/?/i,
+    ''
+  );
   const segments = pathname.split('/').filter(Boolean);
 
   if (segments.length === 0) {
@@ -816,6 +825,7 @@ export default async function solicitacoesVistoriaHandler(
     if (!res.headersSent) {
       return sendJson(res, 500, {
         success: false,
+        code: 'INTERNAL_SERVER_ERROR',
         error: scrubSensitiveTextForServerLog(
           err?.message || 'Erro interno no servidor de solicitações de vistoria.'
         )
@@ -868,13 +878,15 @@ async function solicitacoesVistoriaHandlerInner(
   if (!authCtx.configured) {
     return sendJson(res, 503, {
       success: false,
-      error: 'Serviço central indisponível no servidor.'
+      code: authCtx.authErrorCode || 'AUTH_NOT_CONFIGURED',
+      error: 'Serviço central de solicitações indisponível: variáveis de servidor não configuradas.'
     });
   }
 
   if (!authCtx.authorized || !authCtx.userId || !isValidUuid(authCtx.userId)) {
     return sendJson(res, authCtx.httpStatus || 401, {
       success: false,
+      ...(authCtx.authErrorCode ? { code: authCtx.authErrorCode } : {}),
       error: authCtx.error || 'Sessão institucional ausente ou inválida.'
     });
   }
@@ -882,7 +894,8 @@ async function solicitacoesVistoriaHandlerInner(
   if (!authCtx.supabaseAdmin) {
     return sendJson(res, 503, {
       success: false,
-      error: 'Serviço central indisponível no servidor.'
+      code: authCtx.authErrorCode || 'AUTH_NOT_CONFIGURED',
+      error: 'Serviço central de solicitações indisponível: variáveis de servidor não configuradas.'
     });
   }
 
@@ -1034,8 +1047,9 @@ async function solicitacoesVistoriaHandlerInner(
         }
         return sendJson(res, 500, {
           success: false,
+          code: 'DB_QUERY_FAILED',
           error: scrubSensitiveTextForServerLog(
-            `Erro ao carregar solicitações de vistoria: ${listErr.message}`
+            `Erro ao carregar solicitações de vistoria: ${listErr.message || listErr.details || listErr.code || 'falha desconhecida'}`
           )
         });
       }
@@ -1076,6 +1090,7 @@ async function solicitacoesVistoriaHandlerInner(
     } catch (err: any) {
       return sendJson(res, 500, {
         success: false,
+        code: 'INTERNAL_SERVER_ERROR',
         error: scrubSensitiveTextForServerLog(
           err?.message || 'Erro interno ao consultar solicitações de vistoria.'
         )

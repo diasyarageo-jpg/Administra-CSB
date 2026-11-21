@@ -489,11 +489,25 @@ async function fetchSolicitacoesApi<T>(
   }
 
   const contentType = String(res.headers?.get?.('content-type') || '').toLowerCase();
-  const rawParsed = await res.json().catch(() => null);
+  const rawText = await res.text().catch(() => '');
+  const trimmedText = rawText.trim();
+  const looksLikeHtml = contentType.includes('html') || trimmedText.startsWith('<');
+
+  let rawParsed: unknown = null;
+  if (!looksLikeHtml && trimmedText) {
+    try {
+      rawParsed = JSON.parse(trimmedText);
+    } catch {
+      rawParsed = null;
+    }
+  }
+
   const isPlainObject =
     rawParsed !== null && typeof rawParsed === 'object' && !Array.isArray(rawParsed);
   const data = (isPlainObject ? rawParsed : null) as T | null;
-  const isJson = Boolean(isPlainObject && (!contentType || contentType.includes('json')));
+  const isJson = Boolean(
+    isPlainObject && !looksLikeHtml && (!contentType || contentType.includes('json'))
+  );
   return { ok: res.ok, status: res.status, data, isJson };
 }
 

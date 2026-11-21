@@ -7,7 +7,29 @@
   ],
   "functions": {
     "api/*.ts": {
-      "includeFiles": "src/server/**"
+      "includeFiles": "{src/server/**,src/config/**}"
     }
-  }
+  },
+  "rewrites": [
+    {
+      "source": "/api/solicitacoes-vistoria",
+      "destination": "/api/solicitacoesVistoria"
+    },
+    {
+      "source": "/api/solicitacoes-vistoria/:id",
+      "destination": "/api/solicitacoesVistoria?id=:id"
+    },
+    {
+      "source": "/api/solicitacoes-vistoria/:id/:action",
+      "destination": "/api/solicitacoesVistoria?id=:id&action=:action"
+    },
+    {
+      "source": "/api/solicitacoesVistoria/:id",
+      "destination": "/api/solicitacoesVistoria?id=:id"
+    },
+    {
+      "source": "/api/solicitacoesVistoria/:id/:action",
+      "destination": "/api/solicitacoesVistoria?id=:id&action=:action"
+    }
+  ]
 }

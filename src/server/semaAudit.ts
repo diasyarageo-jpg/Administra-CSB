@@ -76,25 +76,40 @@ export function setTestSupabaseAdminForSemaAudit(
   testSupabaseAdminOverride = client;
 }
 
+function cleanServerEnvValue(raw: unknown): string {
+  return String(raw || '')
+    .trim()
+    .replace(/^["']|["']$/g, '')
+    .trim();
+}
+
 function getServerSupabaseAdminClient(): SupabaseClient<any, any, any> | null {
   if (testSupabaseAdminOverride) return testSupabaseAdminOverride;
-  const supabaseUrl = (
+  const supabaseUrl = cleanServerEnvValue(
     process.env.SUPABASE_URL ||
-    process.env.VITE_SUPABASE_URL ||
-    process.env.NEXT_PUBLIC_SUPABASE_URL ||
-    process.env.VITE_PUBLIC_SUPABASE_URL ||
-    ''
-  ).trim();
-  const serviceRoleKey = (process.env.SUPABASE_SERVICE_ROLE_KEY || '').trim();
+      process.env.VITE_SUPABASE_URL ||
+      process.env.NEXT_PUBLIC_SUPABASE_URL ||
+      process.env.VITE_PUBLIC_SUPABASE_URL ||
+      ''
+  );
+  const serviceRoleKey = cleanServerEnvValue(process.env.SUPABASE_SERVICE_ROLE_KEY || '');
   if (!supabaseUrl || !serviceRoleKey) {
     return null;
   }
-  return createClient<any>(supabaseUrl, serviceRoleKey, {
-    auth: {
-      autoRefreshToken: false,
-      persistSession: false
+  try {
+    const parsed = new URL(supabaseUrl);
+    if (parsed.protocol !== 'https:' && parsed.protocol !== 'http:') {
+      return null;
     }
-  });
+    return createClient<any>(supabaseUrl, serviceRoleKey, {
+      auth: {
+        autoRefreshToken: false,
+        persistSession: false
+      }
+    });
+  } catch {
+    return null;
+  }
 }
 
 export function sha256HexServer(value: string): string {
