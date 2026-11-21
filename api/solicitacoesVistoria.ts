@@ -272,7 +272,11 @@ type ParsedRoute =
   | { kind: 'unknown'; pathId: null };
 
 function parseSolicitacoesRoute(
-  req: IncomingMessage & { url?: string; originalUrl?: string }
+  req: IncomingMessage & {
+    url?: string;
+    originalUrl?: string;
+    query?: Record<string, string | string[] | undefined>;
+  }
 ): ParsedRoute {
   const rawUrl = String(req.originalUrl || req.url || '/api/solicitacoes-vistoria');
   let pathname = rawUrl.split('?')[0] || '/';
@@ -284,10 +288,15 @@ function parseSolicitacoesRoute(
     // Mantém pathname original
   }
 
-  pathname = pathname.replace(/^\/api\/solicitacoes-vistoria\/?/i, '');
+  pathname = pathname.replace(/^\/api\/(?:solicitacoes-vistoria|solicitacoesVistoria)\/?/i, '');
   const segments = pathname.split('/').filter(Boolean);
 
   if (segments.length === 0) {
+    const query = getQueryParams(req);
+    const action = String(query.get('action') || '').trim().toLowerCase();
+    if (action === 'concluir') return { kind: 'concluir', pathId: null };
+    if (action === 'observacao') return { kind: 'observacao', pathId: null };
+    if (action === 'cancelar') return { kind: 'cancelar', pathId: null };
     return { kind: 'collection', pathId: null };
   }
   if (segments.length === 1) {

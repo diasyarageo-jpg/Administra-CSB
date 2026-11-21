@@ -12,9 +12,12 @@ import {
   SOLICITACAO_STATUS_BADGES,
   SOLICITACAO_STATUS_LABELS,
   SOLICITACAO_STATUS_LIST,
+  SolicitacaoCreatePreFillDraft,
   SolicitacaoUserRefInfo,
   SolicitacaoVistoriaHistoricoRecord,
   SolicitacaoVistoriaRecord,
+  buildBarragemSolicitacaoDraft,
+  canCreateSolicitacaoVistoriaRole,
   cancelarSolicitacaoVistoria,
   containsCpfOrCnpjFrontend,
   criarSolicitacaoVistoria,
@@ -24,7 +27,7 @@ import {
   obterDetalheSolicitacaoVistoria
 } from '../services/solicitacoesVistoriaService';
 
-interface SolicitacoesVistoriaViewProps {
+export interface SolicitacoesVistoriaViewProps {
   userRole: UserRole;
   currentAuthUserId?: string | null;
   currentAuthEmail?: string | null;
@@ -32,9 +35,90 @@ interface SolicitacoesVistoriaViewProps {
   empreendedores: EmpreendedorRecord[];
   barragens: BarragemRecord[];
   onNotify: (message: string) => void;
+  initialCreateDraft?: SolicitacaoCreatePreFillDraft | null;
+  onConsumeInitialDraft?: () => void;
+  initialLoading?: boolean;
+  initialError?: string | null;
+  initialSolicitacoes?: SolicitacaoVistoriaRecord[];
 }
 
 type ModalActionMode = 'historico' | 'editar' | 'cancelar' | 'observacao';
+
+interface ErrorBoundaryProps {
+  children: React.ReactNode;
+  onRetry?: () => void;
+}
+
+interface ErrorBoundaryState {
+  hasError: boolean;
+}
+
+export class SolicitacoesVistoriaErrorBoundary extends React.Component<
+  ErrorBoundaryProps,
+  ErrorBoundaryState
+> {
+  constructor(props: ErrorBoundaryProps) {
+    super(props);
+    this.state = { hasError: false };
+  }
+
+  static getDerivedStateFromError(): ErrorBoundaryState {
+    return { hasError: true };
+  }
+
+  override componentDidCatch(_error: Error, _info: React.ErrorInfo): void {
+    // Falha capturada para impedir tela em branco sem expor dados sensíveis na UI.
+  }
+
+  override render() {
+    if (this.state.hasError) {
+      return (
+        <div>
+          <div className="pagehead">
+            <div>
+              <div className="eyebrow">Gestão de trabalho · Programação e campo</div>
+              <h2>Solicitações de Vistoria</h2>
+              <p>
+                Registro central de solicitações de vistoria, acompanhamento de realização, equipe designada e observações de campo.
+              </p>
+            </div>
+          </div>
+          <div className="panel">
+            <div className="panel-body">
+              <div
+                className="notice amber"
+                style={{
+                  display: 'flex',
+                  alignItems: 'center',
+                  justifyContent: 'space-between',
+                  gap: '12px',
+                  flexWrap: 'wrap'
+                }}
+              >
+                <div>
+                  <strong>Não foi possível exibir o módulo de Solicitações de Vistoria.</strong>{' '}
+                  Ocorreu uma falha inesperada na renderização desta tela.
+                </div>
+                <button
+                  type="button"
+                  className="btn light small"
+                  onClick={() => {
+                    this.setState({ hasError: false });
+                    this.props.onRetry?.();
+                  }}
+                >
+                  Tentar novamente
+                </button>
+              </div>
+            </div>
+          </div>
+        </div>
+      );
+    }
+
+    return this.props.children;
+  }
+}
 
 function formatDateTimePtBr(raw?: string | null): string {
   if (!raw) return '—';
@@ -57,14 +141,19 @@ function normalizeSearch(val: unknown): string {
     .toLowerCase();
 }
 
-export const SolicitacoesVistoriaView: React.FC<SolicitacoesVistoriaViewProps> = ({
+const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
   userRole,
   currentAuthUserId,
   currentAuthEmail,
   currentAuthLogin,
   empreendedores,
   barragens,
-  onNotify
+  onNotify,
+  initialCreateDraft,
+  onConsumeInitialDraft,
+  initialLoading,
+  initialError,
+  initialSolicitacoes
 }) => {
   const isAdmin = userRole === 'Administrador';
   const isReadOnly = userRole === 'Visualizador';
@@ -75,11 +164,20 @@ export const SolicitacoesVistoriaView: React.FC<SolicitacoesVistoriaViewProps> =
   const [page, setPage] = useState<number>(1);
   const [pageSize, setPageSize] = useState<PageSizeOption>(20);
 
-  const [loading, setLoading] = useState<boolean>(true);
-  const [error, setError] = useState<string | null>(null);
-  const [solicitacoes, setSolicitacoes] = useState<SolicitacaoVistoriaRecord[]>([]);
+  const hasInitialStateOverride =
+    initialLoading !== undefined ||
+    initialError !== undefined ||
+    initialSolicitacoes !== undefined;
+
+  const [loading, setLoading] = useState<boolean>(
+    initialLoading !== undefined ? initialLoading : !hasInitialStateOverride
+  );
+  const [error, setError] = useState<string | null>(initialError ?? null);
+  const [solicitacoes, setSolicitacoes] = useState<SolicitacaoVistoriaRecord[]>(
+    () => (Array.isArray(initialSolicitacoes) ? initialSolicitacoes : [])
+  );
   const [counts, setCounts] = useState({
-    total: 0,
+    total: Array.isArray(initialSolicitacoes) ? initialSolicitacoes.length : 0,
     solicitada: 0,
     em_planejamento: 0,
     realizada: 0,
@@ -89,23 +187,42 @@ export const SolicitacoesVistoriaView: React.FC<SolicitacoesVistoriaViewProps> =
   const [serverUserEmail, setServerUserEmail] = useState<string | null>(null);
   const [usuariosNomes, setUsuariosNomes] = useState<Record<string, SolicitacaoUserRefInfo>>({});
 
+  const canPreFillFromShortcut = !isReadOnly && canCreateSolicitacaoVistoriaRole(userRole);
+  const initialPre = canPreFillFromShortcut ? initialCreateDraft?.dados_pre_preenchidos : undefined;
+
   // Modal Nova Solicitação
-  const [showCreateModal, setShowCreateModal] = useState<boolean>(false);
+  const [showCreateModal, setShowCreateModal] = useState<boolean>(
+    Boolean(initialCreateDraft && canPreFillFromShortcut)
+  );
   const [createSubmitting, setCreateSubmitting] = useState<boolean>(false);
   const [createError, setCreateError] = useState<string | null>(null);
   const [createRelato, setCreateRelato] = useState<string>('');
-  const [createBarragemId, setCreateBarragemId] = useState<string>('');
-  const [createEmpreendedorId, setCreateEmpreendedorId] = useState<string>('');
-  const [createProcessoRef, setCreateProcessoRef] = useState<string>('');
+  const [createBarragemId, setCreateBarragemId] = useState<string>(
+    canPreFillFromShortcut ? initialCreateDraft?.barragem_id || '' : ''
+  );
+  const [createEmpreendedorId, setCreateEmpreendedorId] = useState<string>(
+    canPreFillFromShortcut ? initialCreateDraft?.empreendedor_id || '' : ''
+  );
+  const [createProcessoRef, setCreateProcessoRef] = useState<string>(
+    canPreFillFromShortcut ? initialCreateDraft?.processo_referencia || '' : ''
+  );
   const [createOrigemRefId, setCreateOrigemRefId] = useState<string>('');
   const [createMotivo, setCreateMotivo] = useState<string>('');
-  const [createNomeBarragem, setCreateNomeBarragem] = useState<string>('');
-  const [createMunicipio, setCreateMunicipio] = useState<string>('');
-  const [createCursoAgua, setCreateCursoAgua] = useState<string>('');
-  const [createCoordenadas, setCreateCoordenadas] = useState<string>('');
-  const [createUso, setCreateUso] = useState<string>('');
-  const [createClassificacao, setCreateClassificacao] = useState<string>('');
-  const [createNomeEmp, setCreateNomeEmp] = useState<string>('');
+  const [createNomeBarragem, setCreateNomeBarragem] = useState<string>(
+    initialPre?.nome_barragem || ''
+  );
+  const [createMunicipio, setCreateMunicipio] = useState<string>(initialPre?.municipio || '');
+  const [createCursoAgua, setCreateCursoAgua] = useState<string>(initialPre?.curso_agua || '');
+  const [createCoordenadas, setCreateCoordenadas] = useState<string>(
+    initialPre?.coordenadas || ''
+  );
+  const [createUso, setCreateUso] = useState<string>(initialPre?.uso || '');
+  const [createClassificacao, setCreateClassificacao] = useState<string>(
+    initialPre?.classificacao || ''
+  );
+  const [createNomeEmp, setCreateNomeEmp] = useState<string>(
+    initialPre?.nome_empreendedor || ''
+  );
 
   // Modal Detalhe / Edição / Cancelamento / Observação de Campo
   const [selectedItem, setSelectedItem] = useState<SolicitacaoVistoriaRecord | null>(null);
@@ -228,6 +345,35 @@ export const SolicitacoesVistoriaView: React.FC<SolicitacoesVistoriaViewProps> =
     [isAdmin, isReadOnly, userIdentityTokens]
   );
 
+  const applyCreateDraft = useCallback(
+    (draft: SolicitacaoCreatePreFillDraft) => {
+      if (isReadOnly || !canCreateSolicitacaoVistoriaRole(userRole)) return;
+      const pre = draft?.dados_pre_preenchidos || {};
+      setCreateError(null);
+      setCreateRelato('');
+      setCreateBarragemId(draft?.barragem_id || '');
+      setCreateEmpreendedorId(draft?.empreendedor_id || '');
+      setCreateProcessoRef(draft?.processo_referencia || '');
+      setCreateOrigemRefId('');
+      setCreateMotivo('');
+      setCreateNomeBarragem(pre.nome_barragem || '');
+      setCreateMunicipio(pre.municipio || '');
+      setCreateCursoAgua(pre.curso_agua || '');
+      setCreateCoordenadas(pre.coordenadas || '');
+      setCreateUso(pre.uso || '');
+      setCreateClassificacao(pre.classificacao || '');
+      setCreateNomeEmp(pre.nome_empreendedor || '');
+      setShowCreateModal(true);
+    },
+    [isReadOnly, userRole]
+  );
+
+  useEffect(() => {
+    if (!initialCreateDraft) return;
+    applyCreateDraft(initialCreateDraft);
+    onConsumeInitialDraft?.();
+  }, [applyCreateDraft, initialCreateDraft, onConsumeInitialDraft]);
+
   const handleOpenCreateModal = () => {
     if (isReadOnly) return;
     setCreateError(null);
@@ -250,22 +396,40 @@ export const SolicitacoesVistoriaView: React.FC<SolicitacoesVistoriaViewProps> =
   const handleBarragemSelectChange = (barragemId: string) => {
     setCreateBarragemId(barragemId);
     const bar = barragemMap.get(barragemId);
-    if (!bar) return;
-    if (!createNomeBarragem && bar.nome) setCreateNomeBarragem(bar.nome);
-    if (!createMunicipio && bar.municipio) setCreateMunicipio(bar.municipio);
-    if (!createCursoAgua && bar.cursoAgua) setCreateCursoAgua(bar.cursoAgua);
-    if (!createCoordenadas && (bar.latitude || bar.longitude)) {
-      setCreateCoordenadas(`${bar.latitude || ''}, ${bar.longitude || ''}`.trim());
+    if (!bar) {
+      setCreateEmpreendedorId('');
+      setCreateProcessoRef('');
+      setCreateNomeBarragem('');
+      setCreateMunicipio('');
+      setCreateCursoAgua('');
+      setCreateCoordenadas('');
+      setCreateUso('');
+      setCreateClassificacao('');
+      setCreateNomeEmp('');
+      return;
     }
-    if (!createProcessoRef && bar.processo) setCreateProcessoRef(bar.processo);
+    const draft = buildBarragemSolicitacaoDraft(bar, empreendedores);
+    const pre = draft.dados_pre_preenchidos || {};
+    setCreateEmpreendedorId(draft.empreendedor_id || '');
+    setCreateProcessoRef(draft.processo_referencia || '');
+    setCreateNomeBarragem(pre.nome_barragem || '');
+    setCreateMunicipio(pre.municipio || '');
+    setCreateCursoAgua(pre.curso_agua || '');
+    setCreateCoordenadas(pre.coordenadas || '');
+    setCreateUso(pre.uso || '');
+    setCreateClassificacao(pre.classificacao || '');
+    setCreateNomeEmp(pre.nome_empreendedor || '');
   };
 
   const handleEmpreendedorSelectChange = (empId: string) => {
     setCreateEmpreendedorId(empId);
     const emp = empreendedorMap.get(empId);
-    if (emp && !createNomeEmp && (emp.nome || emp.nomeFantasia)) {
-      setCreateNomeEmp(emp.nome || emp.nomeFantasia || '');
+    if (!emp) {
+      setCreateNomeEmp('');
+      return;
     }
+    const rawName = String(emp.nome || emp.nomeFantasia || '').trim();
+    setCreateNomeEmp(rawName && !containsCpfOrCnpjFrontend(rawName) ? rawName : '');
   };
 
   const handleCreateSubmit = async (e: React.FormEvent) => {
@@ -470,16 +634,17 @@ export const SolicitacoesVistoriaView: React.FC<SolicitacoesVistoriaViewProps> =
   };
 
   const filteredSolicitacoes = useMemo(() => {
+    const lista = Array.isArray(solicitacoes) ? solicitacoes : [];
     const q = normalizeSearch(searchTerm);
-    if (!q) return solicitacoes;
-    return solicitacoes.filter(item => {
-      const barragem = item.barragem_id ? barragemMap.get(String(item.barragem_id)) : undefined;
-      const emp = item.empreendedor_id ? empreendedorMap.get(String(item.empreendedor_id)) : undefined;
-      const equipeStr = Array.isArray(item.equipe)
-        ? item.equipe.map(m => m.nome).join(' ')
+    if (!q) return lista;
+    return lista.filter(item => {
+      const barragem = item?.barragem_id ? barragemMap.get(String(item.barragem_id)) : undefined;
+      const emp = item?.empreendedor_id ? empreendedorMap.get(String(item.empreendedor_id)) : undefined;
+      const equipeStr = Array.isArray(item?.equipe)
+        ? item.equipe.map(m => String(m?.nome || '')).join(' ')
         : '';
       const haystack = normalizeSearch(
-        `${item.sistema_origem} ${item.solicitante_nome || ''} ${item.solicitante_perfil || ''} ${item.relato} ${item.processo_referencia || ''} ${item.observacao_campo || ''} ${item.vistoria_id || ''} ${equipeStr} ${barragem?.nome || ''} ${emp?.nome || ''}`
+        `${item?.sistema_origem || ''} ${item?.solicitante_nome || ''} ${item?.solicitante_perfil || ''} ${item?.relato || ''} ${item?.processo_referencia || ''} ${item?.observacao_campo || ''} ${item?.vistoria_id || ''} ${equipeStr} ${barragem?.nome || ''} ${emp?.nome || ''}`
       );
       return haystack.includes(q);
     });
@@ -628,21 +793,24 @@ export const SolicitacoesVistoriaView: React.FC<SolicitacoesVistoriaViewProps> =
                 <tbody>
                   {pagedItems.length > 0 ? (
                     pagedItems.map((item, idx) => {
-                      const barragem = item.barragem_id
+                      const barragem = item?.barragem_id
                         ? barragemMap.get(String(item.barragem_id))
                         : undefined;
-                      const empreendedor = item.empreendedor_id
+                      const empreendedor = item?.empreendedor_id
                         ? empreendedorMap.get(String(item.empreendedor_id))
                         : undefined;
                       const stBadge = SOLICITACAO_STATUS_BADGES[item.status] || 'gray';
-                      const stLabel = SOLICITACAO_STATUS_LABELS[item.status] || item.status;
+                      const stLabel = SOLICITACAO_STATUS_LABELS[item.status] || item.status || 'Solicitada';
+                      const relatoTexto = String(item?.relato || '');
+                      const obsCampoTexto = String(item?.observacao_campo || '');
+                      const equipeLista = Array.isArray(item?.equipe) ? item.equipe : [];
                       const allowEdit = canEditOrCancel(item);
                       const allowObs = canEditObservacao(item);
 
                       return (
-                        <tr key={item.id} className={idx % 2 === 0 ? 'row-even' : 'row-odd'}>
+                        <tr key={item.id || idx} className={idx % 2 === 0 ? 'row-even' : 'row-odd'}>
                           <td>
-                            <div className="td-main">{item.sistema_origem}</div>
+                            <div className="td-main">{item.sistema_origem || 'administra'}</div>
                             {item.origem_ref_id && (
                               <span className="td-sub">Ref.: {item.origem_ref_id}</span>
                             )}
@@ -660,9 +828,9 @@ export const SolicitacoesVistoriaView: React.FC<SolicitacoesVistoriaViewProps> =
                           </td>
                           <td>
                             <div>
-                              {item.relato.length > 140
-                                ? `${item.relato.slice(0, 140)}...`
-                                : item.relato}
+                              {relatoTexto.length > 140
+                                ? `${relatoTexto.slice(0, 140)}...`
+                                : relatoTexto || '—'}
                             </div>
                             {(barragem || item.dados_pre_preenchidos?.nome_barragem) && (
                               <span className="td-sub">
@@ -686,9 +854,13 @@ export const SolicitacoesVistoriaView: React.FC<SolicitacoesVistoriaViewProps> =
                             ) : (
                               <span className="muted">Não realizada</span>
                             )}
-                            {Array.isArray(item.equipe) && item.equipe.length > 0 && (
+                            {equipeLista.length > 0 && (
                               <span className="td-sub">
-                                Equipe: {item.equipe.map(m => m.nome).join(', ')}
+                                Equipe:{' '}
+                                {equipeLista
+                                  .map(m => String(m?.nome || ''))
+                                  .filter(Boolean)
+                                  .join(', ')}
                               </span>
                             )}
                             {item.vistoria_id && (
@@ -696,12 +868,12 @@ export const SolicitacoesVistoriaView: React.FC<SolicitacoesVistoriaViewProps> =
                             )}
                           </td>
                           <td>
-                            {item.observacao_campo ? (
+                            {obsCampoTexto ? (
                               <>
                                 <div>
-                                  {item.observacao_campo.length > 120
-                                    ? `${item.observacao_campo.slice(0, 120)}...`
-                                    : item.observacao_campo}
+                                  {obsCampoTexto.length > 120
+                                    ? `${obsCampoTexto.slice(0, 120)}...`
+                                    : obsCampoTexto}
                                 </div>
                                 {item.observacao_atualizada_em && (
                                   <span className="td-sub">
@@ -1456,3 +1628,9 @@ export const SolicitacoesVistoriaView: React.FC<SolicitacoesVistoriaViewProps> =
     </div>
   );
 };
+
+export const SolicitacoesVistoriaView: React.FC<SolicitacoesVistoriaViewProps> = props => (
+  <SolicitacoesVistoriaErrorBoundary>
+    <SolicitacoesVistoriaContent {...props} />
+  </SolicitacoesVistoriaErrorBoundary>
+);

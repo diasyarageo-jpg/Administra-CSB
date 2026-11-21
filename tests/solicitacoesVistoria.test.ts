@@ -1040,3 +1040,92 @@ test('Solicitações de Vistoria: autenticação entre sistemas (SOLICITACOES_SE
     }
   }
 });
+
+test('Solicitações de Vistoria: rota /api/solicitacoesVistoria (Vercel) com query params de detalhe, edição, cancelamento e observação', async () => {
+  const mock = createSolicitacoesSupabaseMock({ enableRpcs: true });
+  setTestSupabaseAdminForSemaAudit(mock.client);
+
+  try {
+    const resList = createMockRes();
+    await solicitacoesVistoriaHandler(
+      createMockReq({
+        method: 'GET',
+        url: '/api/solicitacoesVistoria?status=todos',
+        headers: { authorization: 'Bearer tok-analyst-a' }
+      }),
+      resList
+    );
+    assert.equal(resList.statusCode, 200);
+    assert.equal(resList._body.success, true);
+    assert.equal(resList._body.solicitacoes.length, 2);
+
+    const resDetail = createMockRes();
+    await solicitacoesVistoriaHandler(
+      createMockReq({
+        method: 'GET',
+        url: `/api/solicitacoesVistoria?solicitacaoId=${SOLIC_ANALYST_A_ID}`,
+        headers: { authorization: 'Bearer tok-viewer' }
+      }),
+      resDetail
+    );
+    assert.equal(resDetail.statusCode, 200);
+    assert.equal(resDetail._body.solicitacao.id, SOLIC_ANALYST_A_ID);
+
+    const resCreate = createMockRes();
+    await solicitacoesVistoriaHandler(
+      createMockReq({
+        method: 'POST',
+        url: '/api/solicitacoesVistoria',
+        headers: { authorization: 'Bearer tok-analyst-a' },
+        body: { relato: 'Solicitação enviada pela rota direta Vercel' }
+      }),
+      resCreate
+    );
+    assert.equal(resCreate.statusCode, 201);
+    assert.equal(resCreate._body.success, true);
+
+    const resPatch = createMockRes();
+    await solicitacoesVistoriaHandler(
+      createMockReq({
+        method: 'PATCH',
+        url: `/api/solicitacoesVistoria?id=${SOLIC_ANALYST_A_ID}`,
+        headers: { authorization: 'Bearer tok-analyst-a' },
+        body: { relato: 'Relato atualizado pela rota direta Vercel' }
+      }),
+      resPatch
+    );
+    assert.equal(resPatch.statusCode, 200);
+    assert.equal(resPatch._body.solicitacao.relato, 'Relato atualizado pela rota direta Vercel');
+
+    const resObs = createMockRes();
+    await solicitacoesVistoriaHandler(
+      createMockReq({
+        method: 'PATCH',
+        url: `/api/solicitacoesVistoria?id=${SOLIC_REALIZADA_ID}&action=observacao`,
+        headers: { authorization: 'Bearer tok-analyst-a' },
+        body: { observacao_campo: 'Observação atualizada via query param' }
+      }),
+      resObs
+    );
+    assert.equal(resObs.statusCode, 200);
+    assert.equal(
+      resObs._body.solicitacao.observacao_campo,
+      'Observação atualizada via query param'
+    );
+
+    const resCancel = createMockRes();
+    await solicitacoesVistoriaHandler(
+      createMockReq({
+        method: 'POST',
+        url: `/api/solicitacoesVistoria?id=${SOLIC_ANALYST_A_ID}&action=cancelar`,
+        headers: { authorization: 'Bearer tok-analyst-a' },
+        body: { motivo: 'Cancelamento via rota Vercel sem conflito' }
+      }),
+      resCancel
+    );
+    assert.equal(resCancel.statusCode, 200);
+    assert.equal(resCancel._body.solicitacao.status, 'cancelada');
+  } finally {
+    setTestSupabaseAdminForSemaAudit(null);
+  }
+});

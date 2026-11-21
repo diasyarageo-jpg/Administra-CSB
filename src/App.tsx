@@ -53,6 +53,11 @@ import {
 } from './components/ConciliacaoCadastrosView';
 import { PendenciasView } from './components/PendenciasView';
 import { SolicitacoesVistoriaView } from './components/SolicitacoesVistoriaView';
+import {
+  SolicitacaoCreatePreFillDraft,
+  buildBarragemSolicitacaoDraft,
+  canCreateSolicitacaoVistoriaRole
+} from './services/solicitacoesVistoriaService';
 import type { ConciliacaoDecisaoSubmission } from './components/ConciliacaoAssistidaModal';
 import { gravarConciliacaoAssistidaServidor } from './utils/conciliacaoEngine';
 import { parseCoordAdvanced } from './services/coordService';
@@ -439,6 +444,8 @@ export default function App() {
     record: any;
     index: number | null;
   } | null>(null);
+  const [pendingVistoriaDraft, setPendingVistoriaDraft] =
+    useState<SolicitacaoCreatePreFillDraft | null>(null);
 
   const [prodModalIndex, setProdModalIndex] = useState<number | null | 'new'>(null);
   const [prodModalRecord, setProdModalRecord] = useState<any>({});
@@ -569,6 +576,7 @@ export default function App() {
       setShowLoginModal(false);
       setModalConfig(null);
       setViewingRecord(null);
+      setPendingVistoriaDraft(null);
       setAuthErrorNotice(notice);
     };
 
@@ -2645,6 +2653,24 @@ export default function App() {
                                             CAR / SEMA
                                           </button>
                                         )}
+                                        {activeView === 'barragens' && canCreateSolicitacaoVistoriaRole(userRole) && (
+                                          <button
+                                            type="button"
+                                            className="iconbtn"
+                                            style={{ color: '#047857', fontWeight: 600 }}
+                                            title="Solicitar vistoria para esta barragem"
+                                            onClick={(e) => {
+                                              e.stopPropagation();
+                                              const draft = buildBarragemSolicitacaoDraft(record, db.empreendedores);
+                                              setViewingRecord(null);
+                                              setPendingVistoriaDraft(draft);
+                                              setActiveView('solicitacoes_vistoria');
+                                              setMenuOpen(false);
+                                            }}
+                                          >
+                                            Solicitar vistoria
+                                          </button>
+                                        )}
                                         {(userRole === 'Administrador' || !record.createdBy || record.createdBy === currentAuthUser?.id) ? (
                                           <button
                                             className="iconbtn"
@@ -3208,6 +3234,8 @@ export default function App() {
               empreendedores={db.empreendedores}
               barragens={db.barragens}
               onNotify={showToast}
+              initialCreateDraft={pendingVistoriaDraft}
+              onConsumeInitialDraft={() => setPendingVistoriaDraft(null)}
             />
           )}
 
@@ -3733,6 +3761,7 @@ export default function App() {
           index={viewingRecord.index}
           db={db}
           canEdit={userRole === 'Administrador' || !viewingRecord.record.createdBy || viewingRecord.record.createdBy === currentAuthUser?.id}
+          canSolicitarVistoria={canCreateSolicitacaoVistoriaRole(userRole)}
           onClose={() => setViewingRecord(null)}
           onEdit={() => {
             const { key, index } = viewingRecord;
@@ -3742,6 +3771,14 @@ export default function App() {
           onOpenSemaDocs={(emp) => {
             setViewingRecord(null);
             setEmpreendedorSemaModal(emp);
+          }}
+          onSolicitarVistoria={(dam) => {
+            if (!canCreateSolicitacaoVistoriaRole(userRole)) return;
+            const draft = buildBarragemSolicitacaoDraft(dam, db.empreendedores);
+            setViewingRecord(null);
+            setPendingVistoriaDraft(draft);
+            setActiveView('solicitacoes_vistoria');
+            setMenuOpen(false);
           }}
         />
       )}

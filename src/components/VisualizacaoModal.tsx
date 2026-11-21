@@ -20,9 +20,11 @@ interface VisualizacaoModalProps {
     portarias?: any[];
   };
   canEdit?: boolean;
+  canSolicitarVistoria?: boolean;
   onClose: () => void;
   onEdit?: () => void;
   onOpenSemaDocs?: (empreendedor: any) => void;
+  onSolicitarVistoria?: (barragem: any) => void;
 }
 
 export function VisualizacaoModal({
@@ -30,9 +32,11 @@ export function VisualizacaoModal({
   record,
   db,
   canEdit = true,
+  canSolicitarVistoria = false,
   onClose,
   onEdit,
-  onOpenSemaDocs
+  onOpenSemaDocs,
+  onSolicitarVistoria
 }: VisualizacaoModalProps) {
   const [activeTab, setActiveTab] = useState<'geral' | 'vinculos' | 'documentos'>('geral');
   const [expandedCards, setExpandedCards] = useState<Record<string, boolean>>({});
@@ -252,7 +256,18 @@ export function VisualizacaoModal({
               </span>
             )}
           </div>
-          {renderExpandArrowButton(expandKey, 'Características e vínculos', 'Suprimir')}
+          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', flexWrap: 'wrap' }}>
+            {canSolicitarVistoria && onSolicitarVistoria && (
+              <button
+                type="button"
+                className="btn soft small"
+                onClick={() => onSolicitarVistoria(bar)}
+              >
+                Solicitar vistoria
+              </button>
+            )}
+            {renderExpandArrowButton(expandKey, 'Características e vínculos', 'Suprimir')}
+          </div>
         </div>
 
         <div style={{ display: 'flex', flexWrap: 'wrap', gap: '10px', marginTop: '4px', color: '#475569', fontSize: '11.5px' }}>
@@ -1184,14 +1199,24 @@ export function VisualizacaoModal({
         </div>
 
         {/* Rodapé do Modal */}
-        <div className="modal-foot" style={{ borderTop: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center' }}>
+        <div className="modal-foot" style={{ borderTop: '1px solid #e2e8f0', display: 'flex', justifyContent: 'space-between', alignItems: 'center', flexWrap: 'wrap', gap: '8px' }}>
           <div style={{ fontSize: '11px', color: '#64748b' }}>
             Somente leitura · Para realizar alterações, utilize o botão Editar.
           </div>
-          <div style={{ display: 'flex', gap: '8px' }}>
+          <div style={{ display: 'flex', gap: '8px', flexWrap: 'wrap' }}>
             <button type="button" className="btn light" onClick={onClose}>
               Fechar
             </button>
+            {moduleKey === 'barragens' && canSolicitarVistoria && onSolicitarVistoria && (
+              <button
+                type="button"
+                className="btn soft"
+                onClick={() => onSolicitarVistoria(record)}
+                style={{ display: 'inline-flex', alignItems: 'center', gap: '6px' }}
+              >
+                <span>◈</span> Solicitar vistoria
+              </button>
+            )}
             {canEdit && onEdit && (
               <button
                 type="button"

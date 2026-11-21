@@ -62,7 +62,8 @@ function registerApiMiddlewares(
     '/api/integracoes-status': '/api/integracoes-status.ts',
     '/api/conciliacao-gravar': '/api/conciliacao-gravar.ts',
     '/api/pendencias': '/api/pendencias.ts',
-    '/api/solicitacoes-vistoria': '/api/solicitacoesVistoria.ts'
+    '/api/solicitacoes-vistoria': '/api/solicitacoesVistoria.ts',
+    '/api/solicitacoesVistoria': '/api/solicitacoesVistoria.ts'
   };
 
   for (const [route, file] of Object.entries(endpoints)) {
