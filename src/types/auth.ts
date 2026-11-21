@@ -3,7 +3,26 @@
  * Coordenadoria de Segurança de Barragens — CSB / SURH / SEMA-MT
  */
 
-export type UserRole = 'Administrador' | 'Usuário' | 'Visualizador';
+export const ALLOWED_USER_ROLES = [
+  'Administrador',
+  'Analista',
+  'Usuário',
+  'Visualizador'
+] as const;
+
+export type UserRole = typeof ALLOWED_USER_ROLES[number];
+
+export type AuthErrorCode =
+  | 'AUTH_NOT_CONFIGURED'
+  | 'INVALID_CREDENTIALS'
+  | 'EMAIL_NOT_CONFIRMED'
+  | 'PROFILE_MISSING'
+  | 'PROFILE_INACTIVE'
+  | 'PROFILE_PENDING'
+  | 'PROFILE_REJECTED'
+  | 'ROLE_INVALID'
+  | 'SESSION_EXPIRED'
+  | 'NETWORK_ERROR';
 
 export const PERFIS_PROFISSIONAIS = [
   'Analista de Meio Ambiente',

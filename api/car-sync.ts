@@ -156,20 +156,6 @@ async function authorizeManualSync(req: VercelLikeRequest): Promise<
       profErr = fallbackColRes.error;
     }
 
-    if (!profile && !profErr && userData.user.email) {
-      const cleanEmail = String(userData.user.email).trim();
-      if (cleanEmail) {
-        const byEmailRes = await supabaseAdmin
-          .from('usuarios')
-          .select('id, papel, situacao, auth_user_id')
-          .ilike('email', cleanEmail)
-          .maybeSingle();
-        if (byEmailRes.data && !byEmailRes.error) {
-          profile = byEmailRes.data;
-        }
-      }
-    }
-
     if (profErr) {
       if (isMissingSchemaOrColumnError(profErr)) {
         return {

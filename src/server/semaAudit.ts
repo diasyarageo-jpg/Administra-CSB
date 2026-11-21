@@ -4,15 +4,32 @@ import type { IncomingMessage } from 'http';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
 import { sanitizeSemaProperties, stripOuterQuotesAndBrackets } from '../config/carCampos';
 
+export type ServerAuthErrorCode =
+  | 'AUTH_NOT_CONFIGURED'
+  | 'SESSION_REQUIRED'
+  | 'SESSION_INVALID'
+  | 'PROFILE_MISSING'
+  | 'PROFILE_INACTIVE'
+  | 'PROFILE_PENDING'
+  | 'PROFILE_REJECTED'
+  | 'ROLE_INVALID'
+  | 'SERVER_ERROR';
+
 export interface SemaAuthContext {
   configured: boolean;
   authorized: boolean;
   httpStatus?: number;
   error?: string;
+  authErrorCode?: ServerAuthErrorCode;
   userId: string | null;
+  usuarioId?: string | null;
   role: string | null;
+  situacao?: string | null;
   login?: string | null;
   userName?: string | null;
+  matricula?: string | null;
+  perfilProfissional?: string | null;
+  setor?: string | null;
   supabaseAdmin: SupabaseClient<any, any, any> | null;
 }
 
@@ -105,17 +122,37 @@ export function parseSemaAuditTargetContext(raw: {
   };
 }
 
-function normalizeRoleLabel(rawRole: unknown): string {
+export const SERVER_ALLOWED_ROLES = [
+  'Administrador',
+  'Analista',
+  'Usuário',
+  'Visualizador'
+] as const;
+
+export function normalizeRoleLabel(rawRole: unknown): string {
   const norm = String(rawRole || '')
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .trim()
     .toLowerCase();
-  if (norm === 'administrador' || norm === 'admin') return 'Administrador';
+  if (norm === 'administrador') return 'Administrador';
   if (norm === 'analista') return 'Analista';
   if (norm === 'usuario') return 'Usuário';
   if (norm === 'visualizador') return 'Visualizador';
-  return String(rawRole || '').trim();
+  return '';
+}
+
+function normalizeSituacaoLabel(rawSituacao: unknown): string {
+  const norm = String(rawSituacao || '')
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .trim()
+    .toLowerCase();
+  if (norm === 'ativo') return 'Ativo';
+  if (norm === 'inativo') return 'Inativo';
+  if (norm === 'pendente') return 'Pendente';
+  if (norm === 'recusado') return 'Recusado';
+  return '';
 }
 
 export async function authorizeSemaLookupRequest(
@@ -126,8 +163,11 @@ export async function authorizeSemaLookupRequest(
     return {
       configured: false,
       authorized: true,
+      authErrorCode: 'AUTH_NOT_CONFIGURED',
       userId: null,
+      usuarioId: null,
       role: null,
+      situacao: null,
       login: null,
       userName: null,
       supabaseAdmin: null
@@ -144,9 +184,12 @@ export async function authorizeSemaLookupRequest(
       configured: true,
       authorized: false,
       httpStatus: 401,
-      error: 'Autenticação obrigatória para consultar e auditar dados da SEMA-MT.',
+      authErrorCode: 'SESSION_REQUIRED',
+      error: 'Autenticação obrigatória para acessar o sistema.',
       userId: null,
+      usuarioId: null,
       role: null,
+      situacao: null,
       login: null,
       userName: null,
       supabaseAdmin: null
@@ -160,9 +203,12 @@ export async function authorizeSemaLookupRequest(
         configured: true,
         authorized: false,
         httpStatus: 401,
+        authErrorCode: 'SESSION_INVALID',
         error: 'Sessão inválida ou expirada. Faça login novamente.',
         userId: null,
+        usuarioId: null,
         role: null,
+        situacao: null,
         login: null,
         userName: null,
         supabaseAdmin: null
@@ -172,16 +218,16 @@ export async function authorizeSemaLookupRequest(
     let profile: any = null;
     let profErr: any = null;
 
+    // Vinculo estrito por auth_user_id = auth.uid() (sem fallback por e-mail nem user_metadata)
     const primaryRes = await supabaseAdmin
       .from('usuarios')
-      .select('id, papel, situacao, status, auth_user_id, login, nome, email')
+      .select('id, papel, situacao, status, auth_user_id, login, nome, matricula, perfil_profissional, setor')
       .eq('auth_user_id', userData.user.id)
       .maybeSingle();
 
     profile = primaryRes.data;
     profErr = primaryRes.error;
 
-    // Compatibilidade com bases onde colunas opcionais ainda não existem
     if (profErr) {
       const fallbackColRes = await supabaseAdmin
         .from('usuarios')
@@ -192,78 +238,108 @@ export async function authorizeSemaLookupRequest(
       profErr = fallbackColRes.error;
     }
 
-    // Fallback por e-mail institucional quando auth_user_id ainda estiver nulo no cadastro
-    if (!profile && !profErr && userData.user.email) {
-      const cleanEmail = String(userData.user.email).trim();
-      if (cleanEmail) {
-        const emailQuery = supabaseAdmin
-          .from('usuarios')
-          .select('id, papel, situacao, auth_user_id, login, nome, email');
-        if (typeof (emailQuery as any).ilike === 'function') {
-          const byEmailRes = await (emailQuery as any).ilike('email', cleanEmail).maybeSingle();
-          if (byEmailRes?.data && !byEmailRes?.error) {
-            profile = byEmailRes.data;
-            if (!profile.auth_user_id && profile.id) {
-              try {
-                await supabaseAdmin
-                  .from('usuarios')
-                  .update({ auth_user_id: userData.user.id, updated_at: new Date().toISOString() })
-                  .eq('id', profile.id);
-              } catch {
-                // Vinculação automática é melhor-esforço
-              }
-            }
-          }
-        }
-      }
-    }
-
-    if (profErr || !profile) {
+    if (profErr) {
       return {
         configured: true,
         authorized: false,
-        httpStatus: 403,
-        error: 'Usuário não habilitado na base institucional.',
+        httpStatus: 500,
+        authErrorCode: 'SERVER_ERROR',
+        error: 'Não foi possível consultar o cadastro institucional no servidor.',
         userId: null,
+        usuarioId: null,
         role: null,
+        situacao: null,
         login: null,
         userName: null,
         supabaseAdmin: null
       };
     }
 
-    const rawSituacao = String(profile.situacao ?? profile.status ?? '')
-      .trim()
-      .toLowerCase();
-    const isActive = rawSituacao === 'ativo';
+    if (!profile || String(profile.auth_user_id || '').trim() !== String(userData.user.id).trim()) {
+      return {
+        configured: true,
+        authorized: false,
+        httpStatus: 403,
+        authErrorCode: 'PROFILE_MISSING',
+        error: 'Conta autenticada sem cadastro institucional vinculado na tabela de usuários.',
+        userId: null,
+        usuarioId: null,
+        role: null,
+        situacao: null,
+        login: null,
+        userName: null,
+        supabaseAdmin: null
+      };
+    }
+
+    const normalizedSituacao = normalizeSituacaoLabel(profile.situacao ?? profile.status);
+    if (normalizedSituacao !== 'Ativo') {
+      const code: ServerAuthErrorCode =
+        normalizedSituacao === 'Pendente'
+          ? 'PROFILE_PENDING'
+          : normalizedSituacao === 'Recusado'
+          ? 'PROFILE_REJECTED'
+          : 'PROFILE_INACTIVE';
+      const msg =
+        code === 'PROFILE_PENDING'
+          ? 'Cadastro institucional pendente de aprovação pela Administração.'
+          : code === 'PROFILE_REJECTED'
+          ? 'Cadastro institucional recusado pela Administração.'
+          : 'Cadastro institucional inativo ou bloqueado. Contate a Administração.';
+      return {
+        configured: true,
+        authorized: false,
+        httpStatus: 403,
+        authErrorCode: code,
+        error: msg,
+        userId: null,
+        usuarioId: null,
+        role: null,
+        situacao: normalizedSituacao || null,
+        login: null,
+        userName: null,
+        supabaseAdmin: null
+      };
+    }
+
     const role = normalizeRoleLabel(profile.papel);
-    const allowedRoles = ['Administrador', 'Analista', 'Usuário', 'Visualizador'];
-
-    if (!isActive || !allowedRoles.includes(role)) {
+    if (!role || !(SERVER_ALLOWED_ROLES as readonly string[]).includes(role)) {
       return {
         configured: true,
         authorized: false,
         httpStatus: 403,
-        error: 'Perfil sem autorização para consultas SEMA-MT.',
+        authErrorCode: 'ROLE_INVALID',
+        error: 'Cadastro institucional sem perfil de acesso válido configurado.',
         userId: null,
+        usuarioId: null,
         role: null,
+        situacao: normalizedSituacao,
         login: null,
         userName: null,
         supabaseAdmin: null
       };
     }
 
-    const resolvedLogin = String(
-      profile.login || profile.email || userData.user.email || userData.user.id
-    ).trim();
+    const resolvedLogin = profile.login
+      ? String(profile.login).trim()
+      : profile.id
+      ? String(profile.id).trim()
+      : null;
 
     return {
       configured: true,
       authorized: true,
       userId: String(userData.user.id),
+      usuarioId: profile.id ? String(profile.id) : null,
       role,
+      situacao: normalizedSituacao,
       login: resolvedLogin,
       userName: profile.nome ? String(profile.nome).trim() : null,
+      matricula: profile.matricula ? String(profile.matricula).trim() : null,
+      perfilProfissional: profile.perfil_profissional
+        ? String(profile.perfil_profissional).trim()
+        : null,
+      setor: profile.setor ? String(profile.setor).trim() : null,
       supabaseAdmin
     };
   } catch {
@@ -271,9 +347,12 @@ export async function authorizeSemaLookupRequest(
       configured: true,
       authorized: false,
       httpStatus: 500,
+      authErrorCode: 'SERVER_ERROR',
       error: 'Não foi possível validar a sessão institucional no servidor.',
       userId: null,
+      usuarioId: null,
       role: null,
+      situacao: null,
       login: null,
       userName: null,
       supabaseAdmin: null

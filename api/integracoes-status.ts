@@ -113,9 +113,21 @@ export default async function handler(
   }
 
   const auth = await authorizeSemaLookupRequest(req);
-  if (auth.configured && !auth.authorized) {
+  if (!auth.configured) {
+    sendJson(res, 503, {
+      error: 'Serviço de autenticação indisponível no servidor para verificar integrações.'
+    });
+    return;
+  }
+  if (!auth.authorized) {
     sendJson(res, auth.httpStatus || 401, {
       error: auth.error || 'Autenticação obrigatória para verificar o status das integrações.'
+    });
+    return;
+  }
+  if (auth.role !== 'Administrador') {
+    sendJson(res, 403, {
+      error: 'Apenas Administradores ativos podem consultar o status de configuração das integrações.'
     });
     return;
   }

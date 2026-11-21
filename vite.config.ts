@@ -9,6 +9,7 @@ function registerApiMiddlewares(
   loadModule: (file: string) => Promise<any>
 ) {
   const endpoints: Record<string, string> = {
+    '/api/auth-session': '/api/auth-session.ts',
     '/api/car-lookup': '/api/car-lookup.ts',
     '/api/car-sync': '/api/car-sync.ts',
     '/api/sema-documentos': '/api/sema-documentos.ts',

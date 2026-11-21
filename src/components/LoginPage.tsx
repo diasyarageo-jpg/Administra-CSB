@@ -1,27 +1,24 @@
 import React, { useState } from 'react';
 import { authService } from '../services/authService';
-import { PERFIS_PROFISSIONAIS, SETORES, PerfilProfissional, SetorLotacao } from '../types/auth';
+import { isSupabaseConfigured } from '../services/supabaseClient';
 
 interface LoginPageProps {
   onLoginSuccess: (user: any, profile: any) => void;
   pendingNotice?: string | null;
+  authConfigured?: boolean;
 }
 
-export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
-  const [tab, setTab] = useState<'login' | 'request' | 'forgot'>('login');
+export function LoginPage({
+  onLoginSuccess,
+  pendingNotice,
+  authConfigured = isSupabaseConfigured()
+}: LoginPageProps) {
+  const [tab, setTab] = useState<'login' | 'forgot'>('login');
 
   // Estados do formulário de login
   const [loginEmail, setLoginEmail] = useState('');
   const [loginPassword, setLoginPassword] = useState('');
   const [showLoginPassword, setShowLoginPassword] = useState(false);
-
-  // Estados do formulário "Solicitar novo acesso"
-  const [reqNome, setReqNome] = useState('');
-  const [reqMatricula, setReqMatricula] = useState('');
-  const [reqEmail, setReqEmail] = useState('');
-  const [reqLogin, setReqLogin] = useState('');
-  const [reqPerfil, setReqPerfil] = useState<string>(PERFIS_PROFISSIONAIS[0]);
-  const [reqSetor, setReqSetor] = useState<string>(SETORES[0]);
 
   // Estados de recuperação de senha
   const [forgotEmail, setForgotEmail] = useState('');
@@ -31,11 +28,17 @@ export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
   const [successMsg, setSuccessMsg] = useState<string | null>(null);
 
-  // Submissão de login
   const handleLoginSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
     setSuccessMsg(null);
+
+    if (!authConfigured) {
+      setErrorMsg(
+        'Serviço de autenticação não configurado no ambiente. Contate o administrador técnico.'
+      );
+      return;
+    }
 
     if (!loginEmail.trim() || !loginPassword) {
       setErrorMsg('Informe o e-mail institucional e a senha.');
@@ -45,73 +48,27 @@ export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
     setLoading(true);
     try {
       const res = await authService.loginWithPassword(loginEmail, loginPassword);
-      if (!res.success) {
-        setErrorMsg(res.error || 'Credenciais inválidas.');
+      if (!res.success || !res.profile) {
+        setErrorMsg(res.error || 'Não foi possível validar seu acesso.');
       } else {
         onLoginSuccess(res.user, res.profile);
       }
     } catch (err: any) {
-      setErrorMsg(err?.message || 'Falha ao autenticar.');
+      setErrorMsg(err?.message || 'Falha temporária ao autenticar.');
     } finally {
       setLoading(false);
     }
   };
 
-  // Submissão de Solicitação de Novo Acesso
-  const handleRequestSubmit = async (e: React.FormEvent) => {
-    e.preventDefault();
-    setErrorMsg(null);
-    setSuccessMsg(null);
-
-    if (!reqNome.trim()) {
-      setErrorMsg('Informe seu nome completo.');
-      return;
-    }
-    if (!reqMatricula.trim()) {
-      setErrorMsg('Informe sua matrícula funcional.');
-      return;
-    }
-    if (!reqEmail.trim()) {
-      setErrorMsg('Informe seu e-mail institucional.');
-      return;
-    }
-
-    setLoading(true);
-    try {
-      const res = await authService.requestAccess({
-        nome: reqNome.trim(),
-        matricula: reqMatricula.trim(),
-        email: reqEmail.trim(),
-        login: reqLogin.trim() || reqEmail.trim().split('@')[0],
-        perfilProfissional: reqPerfil,
-        setor: reqSetor
-      });
-
-      if (!res.success) {
-        setErrorMsg(res.error || 'Não foi possível registrar a solicitação.');
-      } else {
-        setSuccessMsg(
-          res.message ||
-            'Solicitação registrada com sucesso! Seu acesso está registrado como Pendente e será avaliado pela Administração da CSB.'
-        );
-        // Limpa campos
-        setReqNome('');
-        setReqMatricula('');
-        setReqEmail('');
-        setReqLogin('');
-      }
-    } catch (err: any) {
-      setErrorMsg(err?.message || 'Falha ao enviar a solicitação.');
-    } finally {
-      setLoading(false);
-    }
-  };
-
-  // Submissão de Recuperação de Senha
   const handleForgotSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     setErrorMsg(null);
     setSuccessMsg(null);
+
+    if (!authConfigured) {
+      setErrorMsg('Serviço de autenticação não configurado no ambiente.');
+      return;
+    }
 
     if (!forgotEmail.trim()) {
       setErrorMsg('Informe o e-mail institucional cadastrado.');
@@ -124,7 +81,9 @@ export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
       if (!res.success) {
         setErrorMsg(res.error || 'Falha ao solicitar recuperação.');
       } else {
-        setSuccessMsg('Link de recuperação enviado com sucesso para o seu e-mail institucional.');
+        setSuccessMsg(
+          'Se o e-mail estiver habilitado, enviaremos as instruções de redefinição de senha.'
+        );
       }
     } catch (err: any) {
       setErrorMsg(err?.message || 'Erro ao processar solicitação de recuperação.');
@@ -150,7 +109,7 @@ export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
       <div
         style={{
           width: '100%',
-          maxWidth: tab === 'request' ? '540px' : '430px',
+          maxWidth: '430px',
           background: '#ffffff',
           borderRadius: '20px',
           boxShadow: '0 25px 60px -15px rgba(0, 0, 0, 0.65)',
@@ -181,7 +140,7 @@ export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
           </span>
         </div>
 
-        {/* Abas Superiores de Navegação */}
+        {/* Abas Superiores de Navegação (sem autocadastro público) */}
         <div
           style={{
             display: 'flex',
@@ -214,7 +173,8 @@ export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
           <button
             type="button"
             onClick={() => {
-              setTab('request');
+              setTab('forgot');
+              setForgotEmail(loginEmail);
               setErrorMsg(null);
               setSuccessMsg(null);
             }}
@@ -222,22 +182,21 @@ export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
               flex: 1,
               padding: '12px 16px',
               border: 'none',
-              background: tab === 'request' ? '#ffffff' : '#f8fafc',
-              borderBottom: tab === 'request' ? '2.5px solid #00875a' : '1px solid transparent',
-              fontWeight: tab === 'request' ? 700 : 500,
-              color: tab === 'request' ? '#00875a' : '#64748b',
+              background: tab === 'forgot' ? '#ffffff' : '#f8fafc',
+              borderBottom: tab === 'forgot' ? '2.5px solid #00875a' : '1px solid transparent',
+              fontWeight: tab === 'forgot' ? 700 : 500,
+              color: tab === 'forgot' ? '#00875a' : '#64748b',
               cursor: 'pointer',
               fontSize: '13px',
               transition: 'all 0.15s ease'
             }}
           >
-            Solicitar novo acesso
+            Redefinir Senha
           </button>
         </div>
 
         {/* Conteúdo Principal */}
         <div style={{ padding: '32px 32px 28px' }}>
-          {/* Bloco de Ícone de Cadeado & Títulos Estilo Imagem de Referência */}
           <div style={{ textAlign: 'center', marginBottom: '20px' }}>
             <div
               style={{
@@ -287,7 +246,6 @@ export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
             </p>
           </div>
 
-          {/* Banner de Aviso Auditoria Estilo Imagem de Referência */}
           <div
             style={{
               marginBottom: '22px',
@@ -308,13 +266,32 @@ export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
                 fontWeight: 500
               }}
             >
-              Este sistema é de uso institucional. Todas as tentativas de acesso são registradas e auditadas.
+              Este sistema é de uso institucional. O acesso exige sessão autenticada e cadastro ativo vinculado.
             </p>
           </div>
 
-          {/* Mensagens de Notificação */}
+          {!authConfigured && (
+            <div
+              role="alert"
+              style={{
+                marginBottom: '16px',
+                padding: '12px',
+                background: '#fee2e2',
+                border: '1px solid #ef4444',
+                color: '#991b1b',
+                borderRadius: '8px',
+                fontSize: '12px',
+                fontWeight: 600,
+                lineHeight: '1.45'
+              }}
+            >
+              Serviço de autenticação indisponível: verifique a configuração de ambiente (VITE_SUPABASE_URL e VITE_SUPABASE_ANON_KEY). Acesso bloqueado por segurança.
+            </div>
+          )}
+
           {pendingNotice && (
             <div
+              role="alert"
               style={{
                 marginBottom: '16px',
                 padding: '12px',
@@ -323,7 +300,8 @@ export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
                 color: '#92400e',
                 borderRadius: '8px',
                 fontSize: '12px',
-                fontWeight: 600
+                fontWeight: 600,
+                lineHeight: '1.45'
               }}
             >
               {pendingNotice}
@@ -332,6 +310,7 @@ export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
 
           {errorMsg && (
             <div
+              role="alert"
               style={{
                 marginBottom: '16px',
                 padding: '12px',
@@ -340,7 +319,8 @@ export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
                 color: '#b91c1c',
                 borderRadius: '8px',
                 fontSize: '12px',
-                fontWeight: 600
+                fontWeight: 600,
+                lineHeight: '1.45'
               }}
             >
               {errorMsg}
@@ -357,18 +337,19 @@ export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
                 color: '#166534',
                 borderRadius: '8px',
                 fontSize: '12px',
-                fontWeight: 600
+                fontWeight: 600,
+                lineHeight: '1.45'
               }}
             >
               {successMsg}
             </div>
           )}
 
-          {/* ABA 1: LOGIN */}
           {tab === 'login' && (
             <form onSubmit={handleLoginSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
               <div>
                 <label
+                  htmlFor="login-email-input"
                   style={{
                     display: 'block',
                     fontSize: '13px',
@@ -377,7 +358,7 @@ export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
                     marginBottom: '6px'
                   }}
                 >
-                  Usuário
+                  E-mail institucional *
                 </label>
                 <div style={{ position: 'relative' }}>
                   <span
@@ -407,13 +388,14 @@ export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
                     </svg>
                   </span>
                   <input
+                    id="login-email-input"
                     type="email"
                     required
                     autoComplete="username"
                     value={loginEmail}
                     onChange={e => setLoginEmail(e.target.value)}
-                    placeholder="nome.usuario"
-                    disabled={loading}
+                    placeholder="servidor@sema.mt.gov.br"
+                    disabled={loading || !authConfigured}
                     style={{
                       width: '100%',
                       height: '46px',
@@ -430,9 +412,6 @@ export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
                     onBlur={e => (e.currentTarget.style.borderColor = '#cbd5e1')}
                   />
                 </div>
-                <div style={{ fontSize: '11px', color: '#64748b', marginTop: '4px' }}>
-                  E-mail institucional (@sema.mt.gov.br) *
-                </div>
               </div>
 
               <div>
@@ -444,8 +423,11 @@ export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
                     marginBottom: '6px'
                   }}
                 >
-                  <label style={{ fontSize: '13px', fontWeight: 600, color: '#334155' }}>
-                    Senha
+                  <label
+                    htmlFor="login-password-input"
+                    style={{ fontSize: '13px', fontWeight: 600, color: '#334155' }}
+                  >
+                    Senha *
                   </label>
                   <button
                     type="button"
@@ -496,13 +478,14 @@ export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
                     </svg>
                   </span>
                   <input
+                    id="login-password-input"
                     type={showLoginPassword ? 'text' : 'password'}
                     required
                     autoComplete="current-password"
                     value={loginPassword}
                     onChange={e => setLoginPassword(e.target.value)}
                     placeholder="••••••••"
-                    disabled={loading}
+                    disabled={loading || !authConfigured}
                     style={{
                       width: '100%',
                       height: '46px',
@@ -552,15 +535,11 @@ export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
                     </svg>
                   </button>
                 </div>
-                <div style={{ fontSize: '11px', color: '#64748b', marginTop: '4px' }}>
-                  Senha *
-                </div>
               </div>
 
-              {/* Botão Principal Estilo Verde da Imagem */}
               <button
                 type="submit"
-                disabled={loading}
+                disabled={loading || !authConfigured}
                 style={{
                   marginTop: '8px',
                   width: '100%',
@@ -572,8 +551,8 @@ export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
                   borderRadius: '10px',
                   fontWeight: 700,
                   fontSize: '14px',
-                  cursor: loading ? 'not-allowed' : 'pointer',
-                  opacity: loading ? 0.75 : 1,
+                  cursor: loading || !authConfigured ? 'not-allowed' : 'pointer',
+                  opacity: loading || !authConfigured ? 0.65 : 1,
                   display: 'flex',
                   alignItems: 'center',
                   justifyContent: 'center',
@@ -581,263 +560,35 @@ export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
                   boxShadow: '0 4px 12px rgba(0, 135, 90, 0.25)',
                   transition: 'background-color 0.15s ease'
                 }}
-                onMouseEnter={e => {
-                  if (!loading) (e.currentTarget.style.background = '#00784e');
-                }}
-                onMouseLeave={e => {
-                  if (!loading) (e.currentTarget.style.background = '#00875a');
-                }}
               >
                 {loading ? 'Validando autenticação...' : 'Entrar'}
               </button>
 
-              <div style={{ marginTop: '6px', textAlign: 'center', fontSize: '12px', color: '#64748b' }}>
-                Primeiro acesso institucional?{' '}
-                <button
-                  type="button"
-                  onClick={() => {
-                    setTab('request');
-                    setErrorMsg(null);
-                    setSuccessMsg(null);
-                  }}
-                  style={{
-                    background: 'none',
-                    border: 'none',
-                    color: '#00875a',
-                    fontWeight: 700,
-                    cursor: 'pointer',
-                    padding: 0
-                  }}
-                >
-                  Solicitar novo acesso
-                </button>
-              </div>
-            </form>
-          )}
-
-          {/* ABA 2: SOLICITAR NOVO ACESSO */}
-          {tab === 'request' && (
-            <form onSubmit={handleRequestSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '14px' }}>
-              <div
+              <p
                 style={{
-                  background: '#f0fdf4',
-                  border: '1px solid #bbf7d0',
-                  borderRadius: '10px',
-                  padding: '12px 14px',
+                  margin: '4px 0 0',
+                  textAlign: 'center',
                   fontSize: '11.5px',
-                  color: '#166534',
+                  color: '#64748b',
                   lineHeight: '1.45'
                 }}
               >
-                <strong>Acesso Institucional:</strong> Sua solicitação será registrada como <em>Pendente</em> e enviada para o <em>Gerenciamento de Usuários</em> para análise da administração. Após a aprovação do seu perfil, você receberá um link oficial por e-mail para definição segura da sua senha.
-              </div>
-
-              <div style={{ display: 'grid', gridTemplateColumns: '1fr', gap: '12px' }}>
-                <div>
-                  <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: '#334155', marginBottom: '4px' }}>
-                    Nome completo *
-                  </label>
-                  <input
-                    type="text"
-                    required
-                    value={reqNome}
-                    onChange={e => setReqNome(e.target.value)}
-                    placeholder="Ex.: Carlos Eduardo da Silva"
-                    disabled={loading}
-                    style={{
-                      width: '100%',
-                      height: '42px',
-                      padding: '8px 12px',
-                      borderRadius: '8px',
-                      border: '1.5px solid #cbd5e1',
-                      fontSize: '13px',
-                      boxSizing: 'border-box',
-                      outline: 'none'
-                    }}
-                  />
-                </div>
-
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: '10px' }}>
-                  <div>
-                    <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: '#334155', marginBottom: '4px' }}>
-                      Matrícula funcional *
-                    </label>
-                    <input
-                      type="text"
-                      required
-                      value={reqMatricula}
-                      onChange={e => setReqMatricula(e.target.value)}
-                      placeholder="Ex.: 248910"
-                      disabled={loading}
-                      style={{
-                        width: '100%',
-                        height: '42px',
-                        padding: '8px 12px',
-                        borderRadius: '8px',
-                        border: '1.5px solid #cbd5e1',
-                        fontSize: '13px',
-                        boxSizing: 'border-box',
-                        outline: 'none'
-                      }}
-                    />
-                  </div>
-                  <div>
-                    <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: '#334155', marginBottom: '4px' }}>
-                      Login desejado
-                    </label>
-                    <input
-                      type="text"
-                      value={reqLogin}
-                      onChange={e => setReqLogin(e.target.value)}
-                      placeholder="Ex.: carlos.silva"
-                      disabled={loading}
-                      style={{
-                        width: '100%',
-                        height: '42px',
-                        padding: '8px 12px',
-                        borderRadius: '8px',
-                        border: '1.5px solid #cbd5e1',
-                        fontSize: '13px',
-                        boxSizing: 'border-box',
-                        outline: 'none'
-                      }}
-                    />
-                  </div>
-                </div>
-
-                <div>
-                  <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: '#334155', marginBottom: '4px' }}>
-                    E-mail institucional (@sema.mt.gov.br) *
-                  </label>
-                  <input
-                    type="email"
-                    required
-                    value={reqEmail}
-                    onChange={e => setReqEmail(e.target.value)}
-                    placeholder="carlos.silva@sema.mt.gov.br"
-                    disabled={loading}
-                    style={{
-                      width: '100%',
-                      height: '42px',
-                      padding: '8px 12px',
-                      borderRadius: '8px',
-                      border: '1.5px solid #cbd5e1',
-                      fontSize: '13px',
-                      boxSizing: 'border-box',
-                      outline: 'none'
-                    }}
-                  />
-                </div>
-
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fit, minmax(190px, 1fr))', gap: '10px' }}>
-                  <div>
-                    <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: '#334155', marginBottom: '4px' }}>
-                      Perfil profissional *
-                    </label>
-                    <select
-                      value={reqPerfil}
-                      onChange={e => setReqPerfil(e.target.value)}
-                      disabled={loading}
-                      style={{
-                        width: '100%',
-                        height: '42px',
-                        padding: '8px 12px',
-                        borderRadius: '8px',
-                        border: '1.5px solid #cbd5e1',
-                        fontSize: '13px',
-                        background: '#ffffff',
-                        boxSizing: 'border-box',
-                        outline: 'none'
-                      }}
-                    >
-                      {PERFIS_PROFISSIONAIS.map(p => (
-                        <option key={p} value={p}>
-                          {p}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                  <div>
-                    <label style={{ display: 'block', fontSize: '12px', fontWeight: 600, color: '#334155', marginBottom: '4px' }}>
-                      Setor de lotação *
-                    </label>
-                    <select
-                      value={reqSetor}
-                      onChange={e => setReqSetor(e.target.value)}
-                      disabled={loading}
-                      style={{
-                        width: '100%',
-                        height: '42px',
-                        padding: '8px 12px',
-                        borderRadius: '8px',
-                        border: '1.5px solid #cbd5e1',
-                        fontSize: '13px',
-                        background: '#ffffff',
-                        boxSizing: 'border-box',
-                        outline: 'none'
-                      }}
-                    >
-                      {SETORES.map(s => (
-                        <option key={s} value={s}>
-                          {s}
-                        </option>
-                      ))}
-                    </select>
-                  </div>
-                </div>
-
-              </div>
-
-              <div style={{ display: 'flex', gap: '10px', marginTop: '12px' }}>
-                <button
-                  type="button"
-                  onClick={() => setTab('login')}
-                  disabled={loading}
-                  style={{
-                    padding: '11px 18px',
-                    background: '#f1f5f9',
-                    color: '#334155',
-                    border: '1px solid #cbd5e1',
-                    borderRadius: '8px',
-                    fontSize: '13px',
-                    fontWeight: 600,
-                    cursor: 'pointer'
-                  }}
-                >
-                  Voltar
-                </button>
-                <button
-                  type="submit"
-                  disabled={loading}
-                  style={{
-                    flex: 1,
-                    padding: '11px 18px',
-                    background: '#00875a',
-                    color: '#ffffff',
-                    border: 'none',
-                    borderRadius: '8px',
-                    fontSize: '13px',
-                    fontWeight: 700,
-                    cursor: loading ? 'not-allowed' : 'pointer',
-                    opacity: loading ? 0.7 : 1,
-                    boxShadow: '0 4px 12px rgba(0, 135, 90, 0.2)'
-                  }}
-                >
-                  {loading ? 'Registrando...' : 'Enviar solicitação de acesso'}
-                </button>
-              </div>
+                Cadastro público desativado. Novos acessos são habilitados exclusivamente pela Administração da CSB.
+              </p>
             </form>
           )}
 
-          {/* ABA 3: RECUPERAÇÃO DE SENHA */}
           {tab === 'forgot' && (
             <form onSubmit={handleForgotSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
               <p style={{ fontSize: '12.5px', color: '#475569', margin: 0, lineHeight: '1.45' }}>
-                Informe seu e-mail institucional cadastrado. Enviaremos um link de recuperação para você redefinir sua senha.
+                Informe seu e-mail institucional cadastrado. Enviaremos um link de recuperação para redefinir sua senha.
               </p>
 
               <div>
-                <label style={{ display: 'block', fontSize: '13px', fontWeight: 600, color: '#334155', marginBottom: '6px' }}>
+                <label
+                  htmlFor="forgot-email-input"
+                  style={{ display: 'block', fontSize: '13px', fontWeight: 600, color: '#334155', marginBottom: '6px' }}
+                >
                   E-mail institucional cadastrado *
                 </label>
                 <div style={{ position: 'relative' }}>
@@ -868,12 +619,13 @@ export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
                     </svg>
                   </span>
                   <input
+                    id="forgot-email-input"
                     type="email"
                     required
                     value={forgotEmail}
                     onChange={e => setForgotEmail(e.target.value)}
-                    placeholder="usuario@sema.mt.gov.br"
-                    disabled={loading}
+                    placeholder="servidor@sema.mt.gov.br"
+                    disabled={loading || !authConfigured}
                     style={{
                       width: '100%',
                       height: '46px',
@@ -905,11 +657,11 @@ export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
                     cursor: 'pointer'
                   }}
                 >
-                  Cancelar
+                  Voltar
                 </button>
                 <button
                   type="submit"
-                  disabled={loading}
+                  disabled={loading || !authConfigured}
                   style={{
                     flex: 1,
                     padding: '11px 18px',
@@ -919,7 +671,8 @@ export function LoginPage({ onLoginSuccess, pendingNotice }: LoginPageProps) {
                     borderRadius: '8px',
                     fontSize: '13px',
                     fontWeight: 700,
-                    cursor: loading ? 'not-allowed' : 'pointer',
+                    cursor: loading || !authConfigured ? 'not-allowed' : 'pointer',
+                    opacity: loading || !authConfigured ? 0.65 : 1,
                     boxShadow: '0 4px 12px rgba(0, 135, 90, 0.2)'
                   }}
                 >

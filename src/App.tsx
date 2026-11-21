@@ -28,7 +28,13 @@ import {
   GenericRecordModal
 } from './components/CadastrosModals';
 import { authService } from './services/authService';
-import { UserRole, AuthUserProfile, PERFIS_PROFISSIONAIS, SETORES } from './types/auth';
+import {
+  ALLOWED_USER_ROLES,
+  UserRole,
+  AuthUserProfile,
+  PERFIS_PROFISSIONAIS,
+  SETORES
+} from './types/auth';
 import { DocumentosView } from './components/DocumentosView';
 import { PaginationBar, PageSizeOption, paginateList } from './components/PaginationBar';
 import { LoginModal } from './components/LoginModal';
@@ -363,7 +369,7 @@ const modules: Record<string, ModuleConfig> = {
       { name: 'email', label: 'E-mail institucional', type: 'email', required: true },
       { name: 'perfilProfissional', label: 'Perfil profissional', type: 'select', options: [...PERFIS_PROFISSIONAIS] },
       { name: 'setor', label: 'Setor de lotação', type: 'select', options: [...SETORES] },
-      { name: 'papel', label: 'Papel de acesso (RBAC)', type: 'select', options: ['Administrador', 'Usuário', 'Visualizador'] },
+      { name: 'papel', label: 'Papel de acesso (RBAC)', type: 'select', options: ['Administrador', 'Analista', 'Usuário', 'Visualizador'] },
       { name: 'situacao', label: 'Situação funcional', type: 'select', options: ['Ativo', 'Inativo', 'Pendente', 'Recusado'] },
       { name: 'observacoes', label: 'Observações', type: 'textarea', full: true }
     ],
@@ -387,12 +393,13 @@ export default function App() {
   const [searchTerms, setSearchTerms] = useState<Record<string, string>>({});
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  // Estado de Autenticação e RBAC
+  // Estado de Autenticação e RBAC (inicia fechado com menor privilégio)
   const [currentAuthUser, setCurrentAuthUser] = useState<any | null>(null);
   const [currentUserProfile, setCurrentUserProfile] = useState<AuthUserProfile | null>(null);
-  const [userRole, setUserRole] = useState<UserRole>('Administrador');
+  const [userRole, setUserRole] = useState<UserRole>('Visualizador');
   const [showLoginModal, setShowLoginModal] = useState(false);
   const [isAuthChecking, setIsAuthChecking] = useState(true);
+  const [authErrorNotice, setAuthErrorNotice] = useState<string | null>(null);
 
   // Estados para aprovação e recusa de solicitações de usuários por Administradores
   const [userToApprove, setUserToApprove] = useState<any | null>(null);
@@ -534,72 +541,130 @@ export default function App() {
   };
 
   useEffect(() => {
-    if (activeView === 'integracao') {
+    if (
+      activeView === 'integracao' &&
+      userRole === 'Administrador' &&
+      currentAuthUser &&
+      currentUserProfile?.situacao === 'Ativo'
+    ) {
       fetchExternalIntegrationsStatus();
     }
-  }, [activeView]);
+  }, [activeView, userRole, currentAuthUser, currentUserProfile]);
 
-  // Inicialização do Supabase Auth e verificação de sessão (sem carregar dados operacionais antes do login)
+  // Inicialização do Supabase Auth e verificação estrita da sessão e perfil institucional
   useEffect(() => {
+    let active = true;
+    let subscription: { unsubscribe: () => void } | null = null;
+
+    const clearSessionState = (notice: string | null = null) => {
+      if (!active) return;
+      setCurrentAuthUser(null);
+      setCurrentUserProfile(null);
+      setUserRole('Visualizador');
+      setActiveView('home');
+      setShowLoginModal(false);
+      setModalConfig(null);
+      setViewingRecord(null);
+      setAuthErrorNotice(notice);
+    };
+
     async function initAuth() {
-      if (isSupabaseConfigured() && supabase) {
-        try {
-          const { user } = await authService.getSession();
-          if (user) {
-            setCurrentAuthUser(user);
-            const prof = await authService.getUserProfile(user.id, user.email);
-            setCurrentUserProfile(prof);
-            setUserRole(prof?.papel || 'Usuário');
-          } else {
-            setCurrentAuthUser(null);
-            setCurrentUserProfile(null);
+      if (!isSupabaseConfigured() || !supabase) {
+        clearSessionState(
+          'Serviço de autenticação não configurado no ambiente. O acesso permanece bloqueado até a configuração.'
+        );
+        if (active) setIsAuthChecking(false);
+        return;
+      }
+
+      try {
+        const restored = await authService.restoreVerifiedSession();
+        if (!active) return;
+
+        if (restored.status === 'authenticated' && restored.user && restored.profile) {
+          setCurrentAuthUser(restored.user);
+          setCurrentUserProfile(restored.profile);
+          setUserRole(restored.profile.papel);
+          setAuthErrorNotice(null);
+        } else if (restored.status === 'blocked' || restored.status === 'expired') {
+          clearSessionState(restored.error || 'Sessão inválida ou perfil sem permissão.');
+        } else {
+          clearSessionState(null);
+        }
+
+        const { data: authListener } = supabase.auth.onAuthStateChange(async (event, session) => {
+          if (!active) return;
+
+          if (event === 'SIGNED_OUT' || !session?.user) {
+            clearSessionState(null);
+            return;
           }
 
-          const { data: authListener } = supabase.auth.onAuthStateChange(async (event, session) => {
-            if (event === 'SIGNED_IN' && session?.user) {
-              setCurrentAuthUser(session.user);
-              const prof = await authService.getUserProfile(session.user.id, session.user.email);
-              setCurrentUserProfile(prof);
-              setUserRole(prof?.papel || 'Usuário');
-              setShowLoginModal(false);
-            } else if (event === 'SIGNED_OUT') {
-              setCurrentAuthUser(null);
-              setCurrentUserProfile(null);
-              setUserRole('Visualizador');
-            }
-          });
+          if (
+            event === 'INITIAL_SESSION' ||
+            event === 'SIGNED_IN' ||
+            event === 'TOKEN_REFRESHED' ||
+            event === 'USER_UPDATED'
+          ) {
+            const profRes = await authService.resolveVerifiedProfile(
+              session.user.id,
+              session.access_token
+            );
+            if (!active) return;
 
-          return () => {
-            authListener?.subscription?.unsubscribe();
-          };
-        } catch (err) {
-          console.warn('[App] Erro na verificação de sessão:', err);
-        } finally {
-          setIsAuthChecking(false);
-        }
-      } else {
-        // Modo local offline (sem Supabase configurado)
-        setUserRole('Administrador');
-        setIsAuthChecking(false);
+            if (profRes.profile) {
+              setCurrentAuthUser(session.user);
+              setCurrentUserProfile(profRes.profile);
+              setUserRole(profRes.profile.papel);
+              setAuthErrorNotice(null);
+              setShowLoginModal(false);
+            } else {
+              if (profRes.code !== 'NETWORK_ERROR') {
+                await authService.logout();
+              }
+              clearSessionState(
+                profRes.error || 'Conta autenticada sem perfil institucional ativo autorizado.'
+              );
+            }
+          }
+        });
+
+        subscription = authListener?.subscription ?? null;
+      } catch {
+        clearSessionState(
+          'Não foi possível validar a sessão institucional no momento. Faça login novamente.'
+        );
+      } finally {
+        if (active) setIsAuthChecking(false);
       }
     }
 
     initAuth();
+
+    return () => {
+      active = false;
+      subscription?.unsubscribe();
+    };
   }, []);
 
-  // Proteção de rota do módulo Usuários
+  // Proteção de rotas administrativas (Usuários e Estrutura de Integração)
   useEffect(() => {
-    if (activeView === 'usuarios' && userRole !== 'Administrador') {
+    if ((activeView === 'usuarios' || activeView === 'integracao') && userRole !== 'Administrador') {
       setActiveView('home');
-      showToast('Acesso restrito: o módulo Usuários é restrito a Administradores.');
+      showToast('Acesso restrito: este módulo é exclusivo de Administradores.');
     }
   }, [activeView, userRole]);
 
   // Consulta e sincronização de dados com Supabase:
-  // EXCLUSIVAMENTE executada após autenticação válida com perfil Ativo.
-  // Nenhum dado operacional é consultado ou carregado antes da autenticação.
+  // EXCLUSIVAMENTE executada após autenticação válida com perfil Ativo e papel válido.
   useEffect(() => {
-    if (isSupabaseConfigured() && currentAuthUser && currentUserProfile?.situacao === 'Ativo') {
+    const isVerifiedActive =
+      isSupabaseConfigured() &&
+      Boolean(currentAuthUser) &&
+      currentUserProfile?.situacao === 'Ativo' &&
+      Boolean(currentUserProfile?.papel && (ALLOWED_USER_ROLES as readonly string[]).includes(currentUserProfile.papel));
+
+    if (isVerifiedActive) {
       checkSupabaseConnection().then(status => {
         setSupabaseStatus(status);
         if (status.connected) {
@@ -646,6 +711,14 @@ export default function App() {
 
   // General Collection Modal
   const handleOpenRecordModal = (key: string, index: number | null = null) => {
+    if (userRole === 'Visualizador') {
+      showToast('Perfil Visualizador possui acesso somente leitura.');
+      return;
+    }
+    if (key === 'usuarios' && userRole !== 'Administrador') {
+      showToast('Apenas Administradores têm permissão para gerenciar usuários.');
+      return;
+    }
     const list = db[key as keyof typeof db] || [];
     const record = index === null ? {} : { ...(list[index] as any) };
     if (key === 'barragens' && record.empreendedor) {
@@ -660,6 +733,14 @@ export default function App() {
   const handleSaveRecord = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
     if (!modalConfig) return;
+    if (userRole === 'Visualizador') {
+      showToast('Perfil Visualizador não possui permissão para salvar alterações.');
+      return;
+    }
+    if (modalConfig.key === 'usuarios' && userRole !== 'Administrador') {
+      showToast('Apenas Administradores têm permissão para alterar usuários.');
+      return;
+    }
 
     const { key, index } = modalConfig;
     const formData = new FormData(e.currentTarget);
@@ -715,7 +796,15 @@ export default function App() {
 
   const handleSaveCustomRecord = (savedRecord: any) => {
     if (!modalConfig) return;
+    if (userRole === 'Visualizador') {
+      showToast('Perfil Visualizador não possui permissão para salvar alterações.');
+      return;
+    }
     const { key, index } = modalConfig;
+    if (key === 'usuarios' && userRole !== 'Administrador') {
+      showToast('Apenas Administradores têm permissão para alterar usuários.');
+      return;
+    }
 
     savedRecord.id = savedRecord.id || modalConfig.record.id || (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()));
     savedRecord.createdAt = modalConfig.record.createdAt || new Date().toISOString();
@@ -866,11 +955,19 @@ export default function App() {
   };
 
   const handleArchiveRecord = (key: string, index: number) => {
+    if (userRole === 'Visualizador') {
+      showToast('Perfil Visualizador não possui permissão para inativar registros.');
+      return;
+    }
+    if (key === 'usuarios' && userRole !== 'Administrador') {
+      showToast('Apenas Administradores têm permissão para inativar usuários.');
+      return;
+    }
     const list = [...(db[key as keyof typeof db] || [])];
     const record: any = list[index];
 
     // Verificação de permissão para Usuário
-    if (userRole === 'Usuário' && record.createdBy && currentAuthUser?.id && record.createdBy !== currentAuthUser.id) {
+    if ((userRole === 'Usuário' || userRole === 'Analista') && record.createdBy && currentAuthUser?.id && record.createdBy !== currentAuthUser.id) {
       showToast('Apenas o autor do registro ou um Administrador pode inativar este item.');
       return;
     }
@@ -920,6 +1017,10 @@ export default function App() {
 
   // Productivity
   const handleOpenProductivityModal = (index: number | null = null) => {
+    if (userRole === 'Visualizador') {
+      showToast('Perfil Visualizador possui acesso somente leitura.');
+      return;
+    }
     const record = index === null ? {} : { ...db.produtividades[index] };
     setProdModalIndex(index === null ? 'new' : index);
     setProdModalRecord(record);
@@ -927,6 +1028,10 @@ export default function App() {
 
   const handleSaveProductivity = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+    if (userRole === 'Visualizador') {
+      showToast('Perfil Visualizador não possui permissão para salvar lançamentos.');
+      return;
+    }
     const formData = new FormData(e.currentTarget);
     const kind = String(formData.get('kind') || 'scored') as 'scored' | 'unscored' | 'extra';
     const serverName = String(formData.get('serverName') || '').trim();
@@ -1102,6 +1207,10 @@ export default function App() {
   };
 
   const handleToggleOfficialSheet = (index: number, checked: boolean) => {
+    if (userRole === 'Visualizador') {
+      showToast('Perfil Visualizador possui acesso somente leitura.');
+      return;
+    }
     const list = [...db.produtividades];
     const record = list[index];
     if (!record) return;
@@ -1121,6 +1230,10 @@ export default function App() {
   };
 
   const handleDeleteProductivity = (index: number) => {
+    if (userRole === 'Visualizador') {
+      showToast('Perfil Visualizador não possui permissão para excluir lançamentos.');
+      return;
+    }
     if (!confirm('Excluir este lançamento de produtividade?')) return;
     const list = [...db.produtividades];
     list.splice(index, 1);
@@ -1139,6 +1252,10 @@ export default function App() {
 
   // Portarias
   const handleOpenPortariaModal = (index: number | null = null) => {
+    if (userRole === 'Visualizador') {
+      showToast('Perfil Visualizador possui acesso somente leitura.');
+      return;
+    }
     const record = index === null ? {} : { ...db.portarias[index] };
     setPortariaModalIndex(index === null ? 'new' : index);
     setPortariaModalRecord(record);
@@ -1146,6 +1263,10 @@ export default function App() {
 
   const handleSavePortaria = (e: React.FormEvent<HTMLFormElement>) => {
     e.preventDefault();
+    if (userRole === 'Visualizador') {
+      showToast('Perfil Visualizador não possui permissão para salvar Portarias.');
+      return;
+    }
     const formData = new FormData(e.currentTarget);
     const prior: any = portariaModalIndex === 'new' ? {} : db.portarias[portariaModalIndex as number] || {};
 
@@ -1191,6 +1312,10 @@ export default function App() {
   };
 
   const handleDeletePortaria = (index: number) => {
+    if (userRole === 'Visualizador') {
+      showToast('Perfil Visualizador não possui permissão para excluir trâmites.');
+      return;
+    }
     if (!confirm('Excluir este trâmite de Portaria?')) return;
     const list = [...db.portarias];
     list.splice(index, 1);
@@ -1278,9 +1403,20 @@ export default function App() {
     conciliacaoPendencias.empreendedoresSemBarragens.length +
     conciliacaoPendencias.barragensSemEmpreendedor.length;
 
-  // Se o Supabase estiver configurado e o usuário NÃO estiver autenticado ou seu perfil não for Ativo:
-  // Renderiza EXCLUSIVAMENTE a página de login isolada (sem carregar dados ou telas do sistema)
-  if (isSupabaseConfigured() && (!currentAuthUser || currentUserProfile?.situacao !== 'Ativo')) {
+  // Proteção fail-closed de toda a aplicação:
+  // Só renderiza telas internas quando Supabase Auth estiver configurado E houver sessão ativa
+  // com cadastro institucional Ativo e papel válido em public.usuarios (via auth_user_id).
+  const hasValidAuthenticatedAccess =
+    isSupabaseConfigured() &&
+    Boolean(currentAuthUser) &&
+    Boolean(currentUserProfile) &&
+    currentUserProfile?.situacao === 'Ativo' &&
+    Boolean(
+      currentUserProfile?.papel &&
+        (ALLOWED_USER_ROLES as readonly string[]).includes(currentUserProfile.papel)
+    );
+
+  if (!hasValidAuthenticatedAccess) {
     if (isAuthChecking) {
       return (
         <div
@@ -1302,20 +1438,28 @@ export default function App() {
       );
     }
 
-    const pendingNotice = (currentAuthUser && currentUserProfile?.situacao === 'Pendente')
-      ? 'Sua solicitação de acesso está aguardando aprovação da Administração da CSB. Você poderá acessar o sistema assim que seu cadastro for ativado.'
-      : (currentAuthUser && currentUserProfile?.situacao === 'Recusado')
-      ? 'Sua solicitação de acesso foi recusada pela Administração da CSB.'
-      : null;
+    const pendingNotice =
+      authErrorNotice ||
+      (currentAuthUser && currentUserProfile?.situacao === 'Pendente'
+        ? 'Sua solicitação de acesso está aguardando aprovação da Administração da CSB. Você poderá acessar o sistema assim que seu cadastro for ativado.'
+        : currentAuthUser && currentUserProfile?.situacao === 'Recusado'
+        ? 'Sua solicitação de acesso foi recusada pela Administração da CSB.'
+        : null);
 
     return (
       <LoginPage
         onLoginSuccess={(user, profile) => {
+          if (!profile || profile.situacao !== 'Ativo' || !(ALLOWED_USER_ROLES as readonly string[]).includes(profile.papel)) {
+            setAuthErrorNotice('Perfil institucional inválido ou inativo.');
+            return;
+          }
+          setAuthErrorNotice(null);
           setCurrentAuthUser(user);
           setCurrentUserProfile(profile);
-          setUserRole(profile?.papel || 'Usuário');
+          setUserRole(profile.papel);
         }}
         pendingNotice={pendingNotice}
+        authConfigured={isSupabaseConfigured()}
       />
     );
   }
@@ -1370,10 +1514,10 @@ export default function App() {
 
         <div className="userbox">
           <div className="avatar" id="sideAvatar">
-            {db.usuarios[0]?.nome?.charAt(0) || 'A'}
+            {currentUserProfile?.nome?.charAt(0)?.toUpperCase() || 'S'}
           </div>
           <div>
-            <strong id="sideName">{currentUserProfile?.nome || currentAuthUser?.email || 'Servidor SEMA'}</strong>
+            <strong id="sideName">{currentUserProfile?.nome || currentUserProfile?.login || 'Servidor SEMA'}</strong>
             <small id="sideRole">{currentUserProfile?.perfilProfissional || (userRole === 'Administrador' ? 'Administrador do Sistema' : userRole)}</small>
           </div>
         </div>
@@ -1480,25 +1624,27 @@ export default function App() {
 
           <div className="nav-label">Administração</div>
           {userRole === 'Administrador' && (
-            <button
-              className={`navbtn ${activeView === 'usuarios' ? 'active' : ''}`}
-              onClick={() => {
-                setActiveView('usuarios');
-                setMenuOpen(false);
-              }}
-            >
-              <span className="nav-ico">♙</span>Usuários
-            </button>
+            <>
+              <button
+                className={`navbtn ${activeView === 'usuarios' ? 'active' : ''}`}
+                onClick={() => {
+                  setActiveView('usuarios');
+                  setMenuOpen(false);
+                }}
+              >
+                <span className="nav-ico">♙</span>Usuários
+              </button>
+              <button
+                className={`navbtn ${activeView === 'integracao' ? 'active' : ''}`}
+                onClick={() => {
+                  setActiveView('integracao');
+                  setMenuOpen(false);
+                }}
+              >
+                <span className="nav-ico">⛓</span>Estrutura de integração
+              </button>
+            </>
           )}
-          <button
-            className={`navbtn ${activeView === 'integracao' ? 'active' : ''}`}
-            onClick={() => {
-              setActiveView('integracao');
-              setMenuOpen(false);
-            }}
-          >
-            <span className="nav-ico">⛓</span>Estrutura de integração
-          </button>
           <button
             className={`navbtn ${activeView === 'referencias' ? 'active' : ''}`}
             onClick={() => {
@@ -1568,7 +1714,7 @@ export default function App() {
             <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
               <div className="top-user-meta" style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', lineHeight: 1.2 }}>
                 <span className="topname" style={{ fontWeight: 600 }}>
-                  {currentUserProfile?.nome || currentAuthUser?.email || 'Servidor SEMA-MT'}
+                  {currentUserProfile?.nome || currentUserProfile?.login || 'Servidor SEMA-MT'}
                 </span>
                 <span style={{ fontSize: '10px', color: '#64748b', whiteSpace: 'nowrap' }}>
                   {currentUserProfile?.matricula ? (
@@ -1580,6 +1726,8 @@ export default function App() {
                       color:
                         userRole === 'Administrador'
                           ? '#7c3aed'
+                          : userRole === 'Analista'
+                          ? '#0369a1'
                           : userRole === 'Usuário'
                           ? '#0284c7'
                           : '#475569'
@@ -1590,43 +1738,23 @@ export default function App() {
                 </span>
               </div>
 
-              {currentAuthUser ? (
-                <button
-                  type="button"
-                  className="btn soft small"
-                  style={{ padding: '4px 8px', fontSize: '11px' }}
-                  onClick={async () => {
-                    await authService.logout();
-                    setCurrentAuthUser(null);
-                    setCurrentUserProfile(null);
-                    setShowLoginModal(true);
-                  }}
-                  title="Encerrar sessão"
-                >
-                  Sair
-                </button>
-              ) : isSupabaseConfigured() ? (
-                <button
-                  type="button"
-                  className="btn green small"
-                  style={{ padding: '4px 8px', fontSize: '11px' }}
-                  onClick={() => setShowLoginModal(true)}
-                >
-                  Entrar
-                </button>
-              ) : (
-                <select
-                  className="select"
-                  style={{ padding: '2px 6px', fontSize: '11px', height: '26px' }}
-                  value={userRole}
-                  onChange={e => setUserRole(e.target.value as UserRole)}
-                  title="Simular papel localmente (modo offline)"
-                >
-                  <option value="Administrador">Admin (Simulado)</option>
-                  <option value="Usuário">Usuário (Simulado)</option>
-                  <option value="Visualizador">Visualizador (Simulado)</option>
-                </select>
-              )}
+              <button
+                type="button"
+                className="btn soft small"
+                style={{ padding: '4px 8px', fontSize: '11px' }}
+                onClick={async () => {
+                  await authService.logout();
+                  setCurrentAuthUser(null);
+                  setCurrentUserProfile(null);
+                  setUserRole('Visualizador');
+                  setActiveView('home');
+                  setAuthErrorNotice(null);
+                  setShowLoginModal(false);
+                }}
+                title="Encerrar sessão"
+              >
+                Sair
+              </button>
             </div>
           </div>
         </header>
@@ -1644,11 +1772,13 @@ export default function App() {
                     Segurança de Barragens.
                   </p>
                 </div>
-                <div className="actions">
-                  <button className="btn light" onClick={() => setActiveView('integracao')}>
-                    Estrutura de integração
-                  </button>
-                </div>
+                {userRole === 'Administrador' && (
+                  <div className="actions">
+                    <button className="btn light" onClick={() => setActiveView('integracao')}>
+                      Estrutura de integração
+                    </button>
+                  </div>
+                )}
               </div>
 
               {!supabaseStatus.connected && (
@@ -2599,9 +2729,11 @@ export default function App() {
                     <p>Registre produtos realizados, atividades sem pontuação e atividades extras de gestão.</p>
                   </div>
                   <div className="actions">
-                    <button className="btn green" onClick={() => handleOpenProductivityModal()}>
-                      ＋ Novo lançamento
-                    </button>
+                    {userRole !== 'Visualizador' && (
+                      <button className="btn green" onClick={() => handleOpenProductivityModal()}>
+                        ＋ Novo lançamento
+                      </button>
+                    )}
                   </div>
                 </div>
 
@@ -2652,7 +2784,9 @@ export default function App() {
                         setAdvancedOpen(prev => ({ ...prev, produtividade: !prev.produtividade }))
                       }
                     />
-                    <span className="micro muted">Sem autenticação ativa: a identificação é informada no lançamento e no filtro.</span>
+                    <span className="micro muted">
+                      Usuário autenticado: {currentUserProfile?.nome || currentUserProfile?.login || 'Servidor SEMA-MT'}.
+                    </span>
                   </div>
                   {isProdAdvOpen && (
                     <ProdutividadeAdvancedPanel
@@ -2749,9 +2883,10 @@ export default function App() {
                                   )}
                                 </td>
                                 <td>
-                                  <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '10px', whiteSpace: 'nowrap', cursor: 'pointer' }}>
+                                  <label style={{ display: 'flex', alignItems: 'center', gap: '6px', fontSize: '10px', whiteSpace: 'nowrap', cursor: userRole === 'Visualizador' ? 'not-allowed' : 'pointer' }}>
                                     <input
                                       type="checkbox"
+                                      disabled={userRole === 'Visualizador'}
                                       checked={Boolean(record.inOfficialSheet)}
                                       onChange={e => handleToggleOfficialSheet(originalIndex, e.target.checked)}
                                     />
@@ -2762,16 +2897,20 @@ export default function App() {
                                   )}
                                 </td>
                                 <td>
-                                  <div className="row-actions">
-                                    {canApprove && (
-                                      <>
-                                        <button className="iconbtn" onClick={() => handleReviewExtra(originalIndex, true)}>Validar</button>
-                                        <button className="iconbtn" onClick={() => handleReviewExtra(originalIndex, false)}>Recusar</button>
-                                      </>
-                                    )}
-                                    <button className="iconbtn" onClick={() => handleOpenProductivityModal(originalIndex)}>Editar</button>
-                                    <button className="iconbtn" onClick={() => handleDeleteProductivity(originalIndex)}>Excluir</button>
-                                  </div>
+                                  {userRole !== 'Visualizador' ? (
+                                    <div className="row-actions">
+                                      {canApprove && (
+                                        <>
+                                          <button className="iconbtn" onClick={() => handleReviewExtra(originalIndex, true)}>Validar</button>
+                                          <button className="iconbtn" onClick={() => handleReviewExtra(originalIndex, false)}>Recusar</button>
+                                        </>
+                                      )}
+                                      <button className="iconbtn" onClick={() => handleOpenProductivityModal(originalIndex)}>Editar</button>
+                                      <button className="iconbtn" onClick={() => handleDeleteProductivity(originalIndex)}>Excluir</button>
+                                    </div>
+                                  ) : (
+                                    <span className="micro muted">Somente leitura</span>
+                                  )}
                                 </td>
                               </tr>
                             );
@@ -2867,9 +3006,11 @@ export default function App() {
                     <p>Acompanhe os processos, a assinatura e as publicações das Portarias.</p>
                   </div>
                   <div className="actions">
-                    <button className="btn green" onClick={() => handleOpenPortariaModal()}>
-                      ＋ Novo trâmite
-                    </button>
+                    {userRole !== 'Visualizador' && (
+                      <button className="btn green" onClick={() => handleOpenPortariaModal()}>
+                        ＋ Novo trâmite
+                      </button>
+                    )}
                   </div>
                 </div>
 
@@ -2964,10 +3105,14 @@ export default function App() {
                                 </td>
                                 <td><span className={`badge ${statusClass}`}>{status}</span></td>
                                 <td>
-                                  <div className="row-actions">
-                                    <button className="iconbtn" onClick={() => handleOpenPortariaModal(originalIndex)}>Editar</button>
-                                    <button className="iconbtn" onClick={() => handleDeletePortaria(originalIndex)}>Excluir</button>
-                                  </div>
+                                  {userRole !== 'Visualizador' ? (
+                                    <div className="row-actions">
+                                      <button className="iconbtn" onClick={() => handleOpenPortariaModal(originalIndex)}>Editar</button>
+                                      <button className="iconbtn" onClick={() => handleDeletePortaria(originalIndex)}>Excluir</button>
+                                    </div>
+                                  ) : (
+                                    <span className="micro muted">Somente leitura</span>
+                                  )}
                                 </td>
                               </tr>
                             );
@@ -3139,7 +3284,7 @@ export default function App() {
                     <strong style={{ display: 'block', marginBottom: '4px' }}>
                       Política de Segurança e Controle de Acesso:
                     </strong>
-                    As permissões de leitura e escrita seguem perfis institucionais autenticados (Administrador, Usuário e Visualizador), garantindo rastreabilidade e proteção dos cadastros centrais.
+                    As permissões de leitura e escrita seguem perfis institucionais autenticados (Administrador, Analista, Usuário e Visualizador), garantindo rastreabilidade e proteção dos cadastros centrais.
                   </div>
 
                   {/* PAINEL DE MIGRAÇÃO E CONTROLE LOCAL */}
@@ -3631,6 +3776,7 @@ export default function App() {
                   disabled={isApproving}
                 >
                   <option value="Administrador">Administrador (Acesso total)</option>
+                  <option value="Analista">Analista (Conciliação e consultas SEMA-MT)</option>
                   <option value="Usuário">Usuário (Operacional: cria e edita próprios)</option>
                   <option value="Visualizador">Visualizador (Somente leitura)</option>
                 </select>

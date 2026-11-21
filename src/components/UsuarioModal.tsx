@@ -230,6 +230,7 @@ export function UsuarioModal({ record, isNew, onClose, onSave }: UsuarioModalPro
                 disabled={loading}
               >
                 <option value="Administrador">Administrador (Acesso total)</option>
+                <option value="Analista">Analista (Conciliação e consultas SEMA-MT)</option>
                 <option value="Usuário">Usuário (Operacional: cria e edita próprios)</option>
                 <option value="Visualizador">Visualizador (Somente leitura)</option>
               </select>
