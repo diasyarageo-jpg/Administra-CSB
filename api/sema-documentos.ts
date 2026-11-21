@@ -11,7 +11,7 @@ import {
   preserveSemaProperties,
   sanitizeSemaProperties,
   stripOuterQuotesAndBrackets
-} from '../src/config/carCampos';
+} from '../src/config/carCampos.js';
 import {
   authorizeSemaLookupRequest,
   canViewFullSemaPersonalData,
@@ -20,7 +20,7 @@ import {
   scrubSensitiveTextForServerLog,
   sha256HexServer,
   validateTargetEntityAccess
-} from '../src/server/semaAudit';
+} from '../src/server/semaAudit.js';
 import {
   SemaAttrFilterClause,
   SemaCoordPoint,
@@ -29,7 +29,7 @@ import {
   executeSemaGetFeature,
   getSemaCapabilities,
   queryGeoportalCacheFallback
-} from '../src/server/semaGeoserver';
+} from '../src/server/semaGeoserver.js';
 
 interface VercelLikeRequest extends IncomingMessage {
   query?: Record<string, string | string[]>;

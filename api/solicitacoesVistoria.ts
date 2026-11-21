@@ -5,11 +5,11 @@ import {
   authorizeSemaLookupRequest,
   scrubSensitiveTextForServerLog,
   type SemaAuthContext
-} from '../src/server/semaAudit';
+} from '../src/server/semaAudit.js';
 import {
   isValidUuid,
   sanitizePendenciaTextForResponse
-} from './pendencias';
+} from './pendencias.js';
 
 /**
  * Variáveis de ambiente utilizadas exclusivamente no servidor:

@@ -1,6 +1,6 @@
 // api/integracoes-status.ts
 import type { IncomingMessage, ServerResponse } from 'http';
-import { authorizeSemaLookupRequest } from '../src/server/semaAudit';
+import { authorizeSemaLookupRequest } from '../src/server/semaAudit.js';
 
 interface VercelLikeRequest extends IncomingMessage {
   method?: string;

@@ -4,7 +4,7 @@ import {
   authorizeSemaLookupRequest,
   scrubSensitiveTextForServerLog,
   validateTargetEntityAccess
-} from '../src/server/semaAudit';
+} from '../src/server/semaAudit.js';
 
 const VALID_ACOES = new Set(['vincular', 'rejeitar', 'encaminhar_analise']);
 const VALID_CLASSIFICACOES = new Set([

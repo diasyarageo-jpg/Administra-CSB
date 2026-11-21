@@ -8,13 +8,13 @@ import {
   extractConfirmedFieldValue,
   collectConfirmedPropertyNames,
   sanitizeSemaProperties
-} from '../src/config/carCampos';
+} from '../src/config/carCampos.js';
 import {
   describeSemaLayerXml,
   executeSemaPagedGetFeature,
   getSemaCapabilities,
   sanitizeSemaServerText
-} from '../src/server/semaGeoserver';
+} from '../src/server/semaGeoserver.js';
 
 interface VercelLikeRequest extends IncomingMessage {
   query?: Record<string, string | string[]>;

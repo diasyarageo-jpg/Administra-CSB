@@ -2,7 +2,7 @@
 import crypto from 'crypto';
 import type { IncomingMessage } from 'http';
 import { createClient, SupabaseClient } from '@supabase/supabase-js';
-import { sanitizeSemaProperties, stripOuterQuotesAndBrackets } from '../config/carCampos';
+import { sanitizeSemaProperties, stripOuterQuotesAndBrackets } from '../config/carCampos.js';
 
 export type ServerAuthErrorCode =
   | 'AUTH_NOT_CONFIGURED'

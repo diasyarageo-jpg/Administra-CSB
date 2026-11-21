@@ -4,7 +4,7 @@ import {
   authorizeSemaLookupRequest,
   scrubSensitiveTextForServerLog,
   type SemaAuthContext
-} from '../src/server/semaAudit';
+} from '../src/server/semaAudit.js';
 
 export const PENDENCIA_ORIGEM = 'administra' as const;
 export const MUTATIONS_ENABLED = false;

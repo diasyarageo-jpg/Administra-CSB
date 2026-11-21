@@ -6,7 +6,7 @@ import {
   formatCpfCnpjReadable,
   sanitizeSemaProperties,
   stripOuterQuotesAndBrackets
-} from '../config/carCampos';
+} from '../config/carCampos.js';
 
 export interface SemaCoordPoint {
   lat: number;
