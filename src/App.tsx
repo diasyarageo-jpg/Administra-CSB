@@ -3231,8 +3231,8 @@ export default function App() {
               currentAuthUserId={currentAuthUser?.id || currentUserProfile?.authUserId || null}
               currentAuthEmail={currentAuthUser?.email || currentUserProfile?.email || null}
               currentAuthLogin={currentUserProfile?.login || null}
-              empreendedores={db.empreendedores}
-              barragens={db.barragens}
+              empreendedores={Array.isArray(db?.empreendedores) ? db.empreendedores : []}
+              barragens={Array.isArray(db?.barragens) ? db.barragens : []}
               onNotify={showToast}
               initialCreateDraft={pendingVistoriaDraft}
               onConsumeInitialDraft={() => setPendingVistoriaDraft(null)}

@@ -21,10 +21,11 @@ export function paginateList<T>(
   startIndex: number;
   endIndex: number;
 } {
-  const total = items.length;
+  const safeItems = Array.isArray(items) ? items : [];
+  const total = safeItems.length;
   if (pageSize === 'all' || total === 0) {
     return {
-      pagedItems: items,
+      pagedItems: safeItems,
       totalPages: 1,
       safePage: 1,
       startIndex: total === 0 ? 0 : 1,
@@ -38,7 +39,7 @@ export function paginateList<T>(
   const end = Math.min(start + pageSize, total);
 
   return {
-    pagedItems: items.slice(start, end),
+    pagedItems: safeItems.slice(start, end),
     totalPages,
     safePage,
     startIndex: start + 1,
@@ -53,8 +54,12 @@ export const PaginationBar: React.FC<PaginationBarProps> = ({
   onPageChange,
   onPageSizeChange
 }) => {
+  const safeTotal =
+    Number.isFinite(Number(totalItems)) && Number(totalItems) > 0
+      ? Math.floor(Number(totalItems))
+      : 0;
   const { totalPages, safePage, startIndex, endIndex } = paginateList(
-    Array.from({ length: totalItems }),
+    Array.from({ length: safeTotal }),
     currentPage,
     pageSize
   );

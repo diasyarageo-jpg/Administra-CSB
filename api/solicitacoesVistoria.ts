@@ -725,6 +725,21 @@ export function isMissingDatabaseFunctionError(err: any): boolean {
   return false;
 }
 
+export function isMissingDatabaseTableError(err: any): boolean {
+  if (!err) return false;
+  const code = String(err.code || '').toUpperCase();
+  const msg = String(err.message || err.details || err.hint || '').toLowerCase();
+  if (code === '42P01' || code === 'PGRST205') return true;
+  if (
+    msg.includes('could not find the table') ||
+    (msg.includes('relation') && msg.includes('does not exist')) ||
+    (msg.includes('tabela') && msg.includes('não existe'))
+  ) {
+    return true;
+  }
+  return false;
+}
+
 async function invokeTransactionalRpc(
   supabaseAdmin: NonNullable<SemaAuthContext['supabaseAdmin']>,
   fnName: string,
@@ -785,6 +800,31 @@ function normalizeOptionalRef(val: unknown, maxLen: number): string | null {
 }
 
 export default async function solicitacoesVistoriaHandler(
+  req: IncomingMessage & {
+    body?: any;
+    method?: string;
+    url?: string;
+    originalUrl?: string;
+    query?: Record<string, string | string[] | undefined>;
+    headers?: Record<string, string | string[] | undefined>;
+  },
+  res: ServerResponse & { status?: any; json?: any }
+) {
+  try {
+    return await solicitacoesVistoriaHandlerInner(req, res);
+  } catch (err: any) {
+    if (!res.headersSent) {
+      return sendJson(res, 500, {
+        success: false,
+        error: scrubSensitiveTextForServerLog(
+          err?.message || 'Erro interno no servidor de solicitações de vistoria.'
+        )
+      });
+    }
+  }
+}
+
+async function solicitacoesVistoriaHandlerInner(
   req: IncomingMessage & {
     body?: any;
     method?: string;
@@ -922,6 +962,14 @@ export default async function solicitacoesVistoriaHandler(
           .maybeSingle();
 
         if (itemErr) {
+          if (isMissingDatabaseTableError(itemErr)) {
+            return sendJson(res, 503, {
+              success: false,
+              code: 'DB_TABLE_NOT_AVAILABLE',
+              error:
+                'Módulo de solicitações de vistoria aguardando criação das tabelas no banco de dados.'
+            });
+          }
           return sendJson(res, 500, {
             success: false,
             error: scrubSensitiveTextForServerLog(
@@ -944,6 +992,14 @@ export default async function solicitacoesVistoriaHandler(
           .order('created_at', { ascending: false });
 
         if (histErr) {
+          if (isMissingDatabaseTableError(histErr)) {
+            return sendJson(res, 503, {
+              success: false,
+              code: 'DB_TABLE_NOT_AVAILABLE',
+              error:
+                'Tabela de histórico de solicitações ainda não foi criada no banco de dados.'
+            });
+          }
           return sendJson(res, 500, {
             success: false,
             error: scrubSensitiveTextForServerLog(
@@ -968,6 +1024,14 @@ export default async function solicitacoesVistoriaHandler(
         .order('updated_at', { ascending: false });
 
       if (listErr) {
+        if (isMissingDatabaseTableError(listErr)) {
+          return sendJson(res, 503, {
+            success: false,
+            code: 'DB_TABLE_NOT_AVAILABLE',
+            error:
+              'Módulo de solicitações de vistoria aguardando criação das tabelas no banco de dados.'
+          });
+        }
         return sendJson(res, 500, {
           success: false,
           error: scrubSensitiveTextForServerLog(

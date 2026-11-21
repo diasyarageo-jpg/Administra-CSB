@@ -263,43 +263,184 @@ export function buildBarragemSolicitacaoDraft(
   };
 }
 
+function toSafeText(raw: unknown): string {
+  if (raw === null || raw === undefined) return '';
+  if (typeof raw === 'string') return raw;
+  if (typeof raw === 'number') return Number.isFinite(raw) ? String(raw) : '';
+  if (typeof raw === 'boolean') return String(raw);
+  return '';
+}
+
+function toSafeOptionalText(raw: unknown): string | null {
+  if (raw === null || raw === undefined) return null;
+  const text = toSafeText(raw);
+  return text ? text : null;
+}
+
+function scrubErrorSecrets(message: string): string {
+  return message
+    .replace(/Bearer\s+[A-Za-z0-9\-._~+/]+=*/gi, 'Bearer [oculto]')
+    .replace(/eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}/g, '[token oculto]')
+    .replace(/sb_secret_[A-Za-z0-9_-]+/g, '[segredo oculto]');
+}
+
+export function extractSafeErrorMessage(
+  rawError: unknown,
+  fallback: string,
+  depth = 0
+): string {
+  if (depth > 2 || rawError === null || rawError === undefined) {
+    return fallback;
+  }
+  if (typeof rawError === 'string') {
+    const clean = scrubErrorSecrets(rawError.trim());
+    return clean || fallback;
+  }
+  if (typeof rawError === 'number' || typeof rawError === 'boolean') {
+    return String(rawError);
+  }
+  if (typeof rawError === 'object' && !Array.isArray(rawError)) {
+    const obj = rawError as Record<string, unknown>;
+    const candidate = obj.message ?? obj.error ?? obj.details ?? obj.hint;
+    if (candidate !== undefined && candidate !== null) {
+      return extractSafeErrorMessage(candidate, fallback, depth + 1);
+    }
+    const code = toSafeText(obj.code).trim();
+    if (code) {
+      return `${fallback} (${code})`;
+    }
+  }
+  return fallback;
+}
+
+function normalizeDadosPrePreenchidos(raw: unknown): DadosPrePreenchidos | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const src = raw as Record<string, unknown>;
+  const out: DadosPrePreenchidos = {};
+  const nomeBarragem = toSafeOptionalText(src.nome_barragem);
+  const municipio = toSafeOptionalText(src.municipio);
+  const cursoAgua = toSafeOptionalText(src.curso_agua);
+  const coordenadas = toSafeOptionalText(src.coordenadas);
+  const uso = toSafeOptionalText(src.uso);
+  const classificacao = toSafeOptionalText(src.classificacao);
+  const nomeEmp = toSafeOptionalText(src.nome_empreendedor);
+
+  if (nomeBarragem !== null) out.nome_barragem = nomeBarragem;
+  if (municipio !== null) out.municipio = municipio;
+  if (cursoAgua !== null) out.curso_agua = cursoAgua;
+  if (coordenadas !== null) out.coordenadas = coordenadas;
+  if (uso !== null) out.uso = uso;
+  if (classificacao !== null) out.classificacao = classificacao;
+  if (nomeEmp !== null) out.nome_empreendedor = nomeEmp;
+
+  return Object.keys(out).length > 0 ? out : null;
+}
+
+function normalizeEquipe(raw: unknown): EquipeVistoriaMembro[] {
+  if (!Array.isArray(raw)) return [];
+  const out: EquipeVistoriaMembro[] = [];
+  for (const item of raw) {
+    if (!item) continue;
+    if (typeof item === 'string') {
+      const clean = item.trim();
+      if (clean) out.push({ id: clean, nome: clean });
+      continue;
+    }
+    if (typeof item === 'object' && !Array.isArray(item)) {
+      const obj = item as Record<string, unknown>;
+      const id = toSafeText(obj.id).trim();
+      const nome = toSafeText(obj.nome).trim();
+      if (id || nome) {
+        out.push({ id, nome: nome || id || 'Integrante' });
+      }
+    }
+  }
+  return out;
+}
+
 function normalizeSolicitacaoRecord(raw: any): SolicitacaoVistoriaRecord {
-  const r = raw && typeof raw === 'object' ? raw : {};
+  const r = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  const rawStatus = toSafeText(r.status).trim() as SolicitacaoVistoriaStatus;
+  const status = SOLICITACAO_STATUS_LIST.includes(rawStatus) ? rawStatus : 'solicitada';
+
   return {
-    id: String(r.id || ''),
-    sistema_origem: String(r.sistema_origem || 'administra'),
-    origem_ref_id: r.origem_ref_id ?? null,
-    solicitante_id: String(r.solicitante_id || ''),
-    solicitante_nome: r.solicitante_nome ?? null,
-    solicitante_perfil: r.solicitante_perfil ?? null,
-    relato: String(r.relato ?? ''),
-    empreendedor_id: r.empreendedor_id ?? null,
-    barragem_id: r.barragem_id ?? null,
-    processo_referencia: r.processo_referencia ?? null,
-    dados_pre_preenchidos:
-      r.dados_pre_preenchidos && typeof r.dados_pre_preenchidos === 'object'
-        ? r.dados_pre_preenchidos
-        : null,
-    status: (r.status || 'solicitada') as SolicitacaoVistoriaStatus,
-    vistoria_id: r.vistoria_id ?? null,
-    data_realizacao: r.data_realizacao ?? null,
-    equipe: Array.isArray(r.equipe) ? r.equipe : [],
-    observacao_campo: r.observacao_campo ?? null,
-    observacao_atualizada_em: r.observacao_atualizada_em ?? null,
-    observacao_atualizada_por: r.observacao_atualizada_por ?? null,
-    created_at: String(r.created_at || ''),
-    updated_at: r.updated_at ?? null
+    id: toSafeText(r.id),
+    sistema_origem: toSafeText(r.sistema_origem) || 'administra',
+    origem_ref_id: toSafeOptionalText(r.origem_ref_id),
+    solicitante_id: toSafeText(r.solicitante_id),
+    solicitante_nome: toSafeOptionalText(r.solicitante_nome),
+    solicitante_perfil: toSafeOptionalText(r.solicitante_perfil),
+    relato: toSafeText(r.relato),
+    empreendedor_id: toSafeOptionalText(r.empreendedor_id),
+    barragem_id: toSafeOptionalText(r.barragem_id),
+    processo_referencia: toSafeOptionalText(r.processo_referencia),
+    dados_pre_preenchidos: normalizeDadosPrePreenchidos(r.dados_pre_preenchidos),
+    status,
+    vistoria_id: toSafeOptionalText(r.vistoria_id),
+    data_realizacao: toSafeOptionalText(r.data_realizacao),
+    equipe: normalizeEquipe(r.equipe),
+    observacao_campo: toSafeOptionalText(r.observacao_campo),
+    observacao_atualizada_em: toSafeOptionalText(r.observacao_atualizada_em),
+    observacao_atualizada_por: toSafeOptionalText(r.observacao_atualizada_por),
+    created_at: toSafeText(r.created_at),
+    updated_at: toSafeOptionalText(r.updated_at)
   };
 }
 
-function normalizeCounts(raw: any): SolicitacoesListResponse['counts'] {
-  const c = raw && typeof raw === 'object' ? raw : {};
+function normalizeHistoricoRecord(raw: unknown): SolicitacaoVistoriaHistoricoRecord | null {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return null;
+  const h = raw as Record<string, unknown>;
   return {
-    total: Number(c.total) || 0,
-    solicitada: Number(c.solicitada) || 0,
-    em_planejamento: Number(c.em_planejamento) || 0,
-    realizada: Number(c.realizada) || 0,
-    cancelada: Number(c.cancelada) || 0
+    id: toSafeText(h.id),
+    solicitacao_id: toSafeText(h.solicitacao_id),
+    acao: toSafeText(h.acao),
+    campo: toSafeOptionalText(h.campo),
+    valor_anterior: toSafeOptionalText(h.valor_anterior),
+    valor_novo: toSafeOptionalText(h.valor_novo),
+    usuario_id: toSafeOptionalText(h.usuario_id),
+    motivo: toSafeOptionalText(h.motivo),
+    created_at: toSafeText(h.created_at)
+  };
+}
+
+function normalizeUsuariosNomes(raw: unknown): Record<string, SolicitacaoUserRefInfo> {
+  if (!raw || typeof raw !== 'object' || Array.isArray(raw)) return {};
+  const out: Record<string, SolicitacaoUserRefInfo> = {};
+  for (const [key, val] of Object.entries(raw as Record<string, unknown>)) {
+    if (!key) continue;
+    if (typeof val === 'string') {
+      const clean = val.trim();
+      if (clean) out[key] = { id: key, nome: clean };
+      continue;
+    }
+    if (val && typeof val === 'object' && !Array.isArray(val)) {
+      const obj = val as Record<string, unknown>;
+      const nome = toSafeText(obj.nome).trim();
+      const setor = toSafeText(obj.setor).trim();
+      const papel = toSafeText(obj.papel).trim();
+      out[key] = {
+        id: toSafeText(obj.id).trim() || key,
+        nome: nome || key,
+        ...(setor ? { setor } : {}),
+        ...(papel ? { papel } : {})
+      };
+    }
+  }
+  return out;
+}
+
+function normalizeCounts(raw: any): SolicitacoesListResponse['counts'] {
+  const c = raw && typeof raw === 'object' && !Array.isArray(raw) ? raw : {};
+  const safeNum = (v: unknown) => {
+    const n = Number(v);
+    return Number.isFinite(n) && n >= 0 ? n : 0;
+  };
+  return {
+    total: safeNum(c.total),
+    solicitada: safeNum(c.solicitada),
+    em_planejamento: safeNum(c.em_planejamento),
+    realizada: safeNum(c.realizada),
+    cancelada: safeNum(c.cancelada)
   };
 }
 
@@ -348,8 +489,11 @@ async function fetchSolicitacoesApi<T>(
   }
 
   const contentType = String(res.headers?.get?.('content-type') || '').toLowerCase();
-  const data = (await res.json().catch(() => null)) as T | null;
-  const isJson = Boolean(data !== null && (!contentType || contentType.includes('json')));
+  const rawParsed = await res.json().catch(() => null);
+  const isPlainObject =
+    rawParsed !== null && typeof rawParsed === 'object' && !Array.isArray(rawParsed);
+  const data = (isPlainObject ? rawParsed : null) as T | null;
+  const isJson = Boolean(isPlainObject && (!contentType || contentType.includes('json')));
   return { ok: res.ok, status: res.status, data, isJson };
 }
 
@@ -372,18 +516,28 @@ export async function listarSolicitacoesVistoria(params?: {
     });
 
     if (!ok || !data || !isJson || data.success === false) {
+      const fallback =
+        ok && !isJson
+          ? 'Resposta inesperada do servidor ao carregar solicitações de vistoria.'
+          : `Falha ao carregar solicitações de vistoria (HTTP ${status}).`;
       return {
         success: false,
-        error:
-          data?.error ||
-          (ok && !isJson
-            ? 'Resposta inesperada do servidor ao carregar solicitações de vistoria.'
-            : `Falha ao carregar solicitações de vistoria (HTTP ${status}).`),
+        error: extractSafeErrorMessage((data as any)?.error, fallback),
         solicitacoes: [],
         counts: { total: 0, solicitada: 0, em_planejamento: 0, realizada: 0, cancelada: 0 },
         usuariosNomes: {}
       };
     }
+
+    const rawCurrent = (data as any).currentUser;
+    const currentUser =
+      rawCurrent && typeof rawCurrent === 'object' && !Array.isArray(rawCurrent)
+        ? {
+            userId: toSafeText(rawCurrent.userId),
+            nome: toSafeText(rawCurrent.nome) || undefined,
+            email: toSafeText(rawCurrent.email) || undefined
+          }
+        : undefined;
 
     return {
       success: true,
@@ -391,13 +545,16 @@ export async function listarSolicitacoesVistoria(params?: {
         ? data.solicitacoes.map(normalizeSolicitacaoRecord)
         : [],
       counts: normalizeCounts(data.counts),
-      currentUser: data.currentUser,
-      usuariosNomes: data.usuariosNomes || {}
+      currentUser,
+      usuariosNomes: normalizeUsuariosNomes(data.usuariosNomes)
     };
   } catch (err: any) {
     return {
       success: false,
-      error: err?.message || 'Erro de comunicação ao carregar solicitações de vistoria.',
+      error: extractSafeErrorMessage(
+        err?.message || err,
+        'Erro de comunicação ao carregar solicitações de vistoria.'
+      ),
       solicitacoes: [],
       counts: { total: 0, solicitada: 0, em_planejamento: 0, realizada: 0, cancelada: 0 },
       usuariosNomes: {}
@@ -418,24 +575,37 @@ export async function obterDetalheSolicitacaoVistoria(
     if (!ok || !data || !isJson || data.success === false) {
       return {
         success: false,
-        error:
-          data?.error ||
-          `Falha ao carregar histórico da solicitação (HTTP ${status}).`,
+        error: extractSafeErrorMessage(
+          (data as any)?.error,
+          `Falha ao carregar histórico da solicitação (HTTP ${status}).`
+        ),
         historico: [],
         usuariosNomes: {}
       };
     }
 
+    const historico = Array.isArray(data.historico)
+      ? data.historico
+          .map(normalizeHistoricoRecord)
+          .filter((h): h is SolicitacaoVistoriaHistoricoRecord => h !== null)
+      : [];
+
     return {
       success: true,
-      solicitacao: data.solicitacao ? normalizeSolicitacaoRecord(data.solicitacao) : undefined,
-      historico: Array.isArray(data.historico) ? data.historico : [],
-      usuariosNomes: data.usuariosNomes || {}
+      solicitacao:
+        data.solicitacao && typeof data.solicitacao === 'object'
+          ? normalizeSolicitacaoRecord(data.solicitacao)
+          : undefined,
+      historico,
+      usuariosNomes: normalizeUsuariosNomes(data.usuariosNomes)
     };
   } catch (err: any) {
     return {
       success: false,
-      error: err?.message || 'Erro de comunicação ao carregar detalhes da solicitação.',
+      error: extractSafeErrorMessage(
+        err?.message || err,
+        'Erro de comunicação ao carregar detalhes da solicitação.'
+      ),
       historico: [],
       usuariosNomes: {}
     };
@@ -464,19 +634,28 @@ export async function criarSolicitacaoVistoria(payload: {
     if (!ok || !data || !isJson || data.success === false) {
       return {
         success: false,
-        code: data?.code,
-        error: data?.error || `Não foi possível registrar a solicitação (HTTP ${status}).`
+        code: toSafeText((data as any)?.code) || undefined,
+        error: extractSafeErrorMessage(
+          (data as any)?.error,
+          `Não foi possível registrar a solicitação (HTTP ${status}).`
+        )
       };
     }
 
     return {
       success: true,
-      solicitacao: data.solicitacao ? normalizeSolicitacaoRecord(data.solicitacao) : null
+      solicitacao:
+        data.solicitacao && typeof data.solicitacao === 'object'
+          ? normalizeSolicitacaoRecord(data.solicitacao)
+          : null
     };
   } catch (err: any) {
     return {
       success: false,
-      error: err?.message || 'Erro de comunicação ao registrar solicitação de vistoria.'
+      error: extractSafeErrorMessage(
+        err?.message || err,
+        'Erro de comunicação ao registrar solicitação de vistoria.'
+      )
     };
   }
 }
@@ -508,19 +687,28 @@ export async function editarSolicitacaoVistoria(
     if (!ok || !data || !isJson || data.success === false) {
       return {
         success: false,
-        code: data?.code,
-        error: data?.error || `Não foi possível editar a solicitação (HTTP ${status}).`
+        code: toSafeText((data as any)?.code) || undefined,
+        error: extractSafeErrorMessage(
+          (data as any)?.error,
+          `Não foi possível editar a solicitação (HTTP ${status}).`
+        )
       };
     }
 
     return {
       success: true,
-      solicitacao: data.solicitacao ? normalizeSolicitacaoRecord(data.solicitacao) : null
+      solicitacao:
+        data.solicitacao && typeof data.solicitacao === 'object'
+          ? normalizeSolicitacaoRecord(data.solicitacao)
+          : null
     };
   } catch (err: any) {
     return {
       success: false,
-      error: err?.message || 'Erro de comunicação ao editar solicitação de vistoria.'
+      error: extractSafeErrorMessage(
+        err?.message || err,
+        'Erro de comunicação ao editar solicitação de vistoria.'
+      )
     };
   }
 }
@@ -543,19 +731,28 @@ export async function cancelarSolicitacaoVistoria(
     if (!ok || !data || !isJson || data.success === false) {
       return {
         success: false,
-        code: data?.code,
-        error: data?.error || `Não foi possível cancelar a solicitação (HTTP ${status}).`
+        code: toSafeText((data as any)?.code) || undefined,
+        error: extractSafeErrorMessage(
+          (data as any)?.error,
+          `Não foi possível cancelar a solicitação (HTTP ${status}).`
+        )
       };
     }
 
     return {
       success: true,
-      solicitacao: data.solicitacao ? normalizeSolicitacaoRecord(data.solicitacao) : null
+      solicitacao:
+        data.solicitacao && typeof data.solicitacao === 'object'
+          ? normalizeSolicitacaoRecord(data.solicitacao)
+          : null
     };
   } catch (err: any) {
     return {
       success: false,
-      error: err?.message || 'Erro de comunicação ao cancelar solicitação de vistoria.'
+      error: extractSafeErrorMessage(
+        err?.message || err,
+        'Erro de comunicação ao cancelar solicitação de vistoria.'
+      )
     };
   }
 }
@@ -578,19 +775,28 @@ export async function editarObservacaoCampoSolicitacao(
     if (!ok || !data || !isJson || data.success === false) {
       return {
         success: false,
-        code: data?.code,
-        error: data?.error || `Não foi possível atualizar a observação de campo (HTTP ${status}).`
+        code: toSafeText((data as any)?.code) || undefined,
+        error: extractSafeErrorMessage(
+          (data as any)?.error,
+          `Não foi possível atualizar a observação de campo (HTTP ${status}).`
+        )
       };
     }
 
     return {
       success: true,
-      solicitacao: data.solicitacao ? normalizeSolicitacaoRecord(data.solicitacao) : null
+      solicitacao:
+        data.solicitacao && typeof data.solicitacao === 'object'
+          ? normalizeSolicitacaoRecord(data.solicitacao)
+          : null
     };
   } catch (err: any) {
     return {
       success: false,
-      error: err?.message || 'Erro de comunicação ao atualizar observação de campo.'
+      error: extractSafeErrorMessage(
+        err?.message || err,
+        'Erro de comunicação ao atualizar observação de campo.'
+      )
     };
   }
 }

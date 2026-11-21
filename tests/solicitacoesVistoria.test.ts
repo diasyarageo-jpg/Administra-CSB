@@ -1129,3 +1129,45 @@ test('Solicitações de Vistoria: rota /api/solicitacoesVistoria (Vercel) com qu
     setTestSupabaseAdminForSemaAudit(null);
   }
 });
+
+test('Solicitações de Vistoria: retorna HTTP 503 JSON amigável quando a tabela solicitacoes_vistoria ainda não foi criada (42P01/PGRST205)', async () => {
+  const mock = createSolicitacoesSupabaseMock({ enableRpcs: false });
+  const originalFrom = mock.client.from.bind(mock.client);
+  mock.client.from = (table: string) => {
+    if (table === 'solicitacoes_vistoria') {
+      const missingTableErr = {
+        code: 'PGRST205',
+        message: "Could not find the table 'public.solicitacoes_vistoria' in the schema cache"
+      };
+      const queryResult = Promise.resolve({ data: null, error: missingTableErr });
+      const chain: any = {
+        select: () => chain,
+        eq: () => chain,
+        order: () => queryResult,
+        maybeSingle: () => queryResult,
+        then: (resolve: any, reject: any) => queryResult.then(resolve, reject)
+      };
+      return chain;
+    }
+    return originalFrom(table);
+  };
+  setTestSupabaseAdminForSemaAudit(mock.client);
+
+  try {
+    const resList = createMockRes();
+    await solicitacoesVistoriaHandler(
+      createMockReq({
+        method: 'GET',
+        url: '/api/solicitacoesVistoria',
+        headers: { authorization: 'Bearer tok-analyst-a' }
+      }),
+      resList
+    );
+    assert.equal(resList.statusCode, 503);
+    assert.equal(resList._body.success, false);
+    assert.equal(resList._body.code, 'DB_TABLE_NOT_AVAILABLE');
+    assert.equal(typeof resList._body.error, 'string');
+  } finally {
+    setTestSupabaseAdminForSemaAudit(null);
+  }
+});

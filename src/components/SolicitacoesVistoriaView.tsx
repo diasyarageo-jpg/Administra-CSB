@@ -23,6 +23,7 @@ import {
   criarSolicitacaoVistoria,
   editarObservacaoCampoSolicitacao,
   editarSolicitacaoVistoria,
+  extractSafeErrorMessage,
   listarSolicitacoesVistoria,
   obterDetalheSolicitacaoVistoria
 } from '../services/solicitacoesVistoriaService';
@@ -53,6 +54,33 @@ interface ErrorBoundaryState {
   hasError: boolean;
 }
 
+function scrubDiagnosticText(raw: unknown): string {
+  const text = typeof raw === 'string' ? raw : raw instanceof Error ? raw.message : '';
+  return text
+    .replace(/Bearer\s+[A-Za-z0-9\-._~+/]+=*/gi, 'Bearer [oculto]')
+    .replace(/eyJ[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{4,}/g, '[token oculto]')
+    .replace(/sb_secret_[A-Za-z0-9_-]+/g, '[segredo oculto]')
+    .replace(/\b\d{3}\.?\d{3}\.?\d{3}-?\d{2}\b/g, '[cpf oculto]')
+    .replace(/\b\d{2}\.?\d{3}\.?\d{3}\/?\d{4}-?\d{2}\b/g, '[cnpj oculto]');
+}
+
+function toSafeString(val: unknown, fallback = ''): string {
+  if (val === null || val === undefined) return fallback;
+  if (typeof val === 'string') return val;
+  if (typeof val === 'number') return Number.isFinite(val) ? String(val) : fallback;
+  if (typeof val === 'boolean') return String(val);
+  return fallback;
+}
+
+function toSafeNumber(val: unknown, fallback = 0): number {
+  const n = Number(val);
+  return Number.isFinite(n) && n >= 0 ? n : fallback;
+}
+
+function hasOwn(obj: unknown, key: string): boolean {
+  return Boolean(obj && typeof obj === 'object' && Object.prototype.hasOwnProperty.call(obj, key));
+}
+
 export class SolicitacoesVistoriaErrorBoundary extends React.Component<
   ErrorBoundaryProps,
   ErrorBoundaryState
@@ -66,8 +94,13 @@ export class SolicitacoesVistoriaErrorBoundary extends React.Component<
     return { hasError: true };
   }
 
-  override componentDidCatch(_error: Error, _info: React.ErrorInfo): void {
-    // Falha capturada para impedir tela em branco sem expor dados sensíveis na UI.
+  override componentDidCatch(error: Error, info: React.ErrorInfo): void {
+    // Registro exclusivo para diagnóstico no console do navegador (sem exibir na interface).
+    console.error('[SolicitacoesVistoriaErrorBoundary]', {
+      name: toSafeString(error?.name, 'Error'),
+      message: scrubDiagnosticText(error?.message || 'Erro de renderização desconhecido'),
+      componentStack: scrubDiagnosticText(info?.componentStack || '')
+    });
   }
 
   override render() {
@@ -120,10 +153,11 @@ export class SolicitacoesVistoriaErrorBoundary extends React.Component<
   }
 }
 
-function formatDateTimePtBr(raw?: string | null): string {
-  if (!raw) return '—';
-  const d = new Date(raw);
-  if (Number.isNaN(d.getTime())) return String(raw);
+function formatDateTimePtBr(raw?: unknown): string {
+  const text = toSafeString(raw).trim();
+  if (!text) return '—';
+  const d = new Date(text);
+  if (Number.isNaN(d.getTime())) return text;
   return d.toLocaleString('pt-BR', {
     day: '2-digit',
     month: '2-digit',
@@ -134,7 +168,7 @@ function formatDateTimePtBr(raw?: string | null): string {
 }
 
 function normalizeSearch(val: unknown): string {
-  return String(val || '')
+  return toSafeString(val)
     .normalize('NFD')
     .replace(/[\u0300-\u036f]/g, '')
     .trim()
@@ -170,11 +204,20 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
     initialSolicitacoes !== undefined;
 
   const [loading, setLoading] = useState<boolean>(
-    initialLoading !== undefined ? initialLoading : !hasInitialStateOverride
+    initialLoading !== undefined ? Boolean(initialLoading) : !hasInitialStateOverride
   );
-  const [error, setError] = useState<string | null>(initialError ?? null);
-  const [solicitacoes, setSolicitacoes] = useState<SolicitacaoVistoriaRecord[]>(
-    () => (Array.isArray(initialSolicitacoes) ? initialSolicitacoes : [])
+  const [error, setError] = useState<string | null>(() =>
+    initialError !== undefined && initialError !== null
+      ? extractSafeErrorMessage(initialError, 'Não foi possível carregar as solicitações de vistoria.')
+      : null
+  );
+  const [solicitacoes, setSolicitacoes] = useState<SolicitacaoVistoriaRecord[]>(() =>
+    Array.isArray(initialSolicitacoes)
+      ? initialSolicitacoes.filter(
+          (item): item is SolicitacaoVistoriaRecord =>
+            Boolean(item && typeof item === 'object' && !Array.isArray(item))
+        )
+      : []
   );
   const [counts, setCounts] = useState({
     total: Array.isArray(initialSolicitacoes) ? initialSolicitacoes.length : 0,
@@ -188,7 +231,14 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
   const [usuariosNomes, setUsuariosNomes] = useState<Record<string, SolicitacaoUserRefInfo>>({});
 
   const canPreFillFromShortcut = !isReadOnly && canCreateSolicitacaoVistoriaRole(userRole);
-  const initialPre = canPreFillFromShortcut ? initialCreateDraft?.dados_pre_preenchidos : undefined;
+  const initialPre =
+    canPreFillFromShortcut &&
+    initialCreateDraft &&
+    typeof initialCreateDraft === 'object' &&
+    initialCreateDraft.dados_pre_preenchidos &&
+    typeof initialCreateDraft.dados_pre_preenchidos === 'object'
+      ? initialCreateDraft.dados_pre_preenchidos
+      : undefined;
 
   // Modal Nova Solicitação
   const [showCreateModal, setShowCreateModal] = useState<boolean>(
@@ -198,30 +248,34 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
   const [createError, setCreateError] = useState<string | null>(null);
   const [createRelato, setCreateRelato] = useState<string>('');
   const [createBarragemId, setCreateBarragemId] = useState<string>(
-    canPreFillFromShortcut ? initialCreateDraft?.barragem_id || '' : ''
+    canPreFillFromShortcut ? toSafeString(initialCreateDraft?.barragem_id) : ''
   );
   const [createEmpreendedorId, setCreateEmpreendedorId] = useState<string>(
-    canPreFillFromShortcut ? initialCreateDraft?.empreendedor_id || '' : ''
+    canPreFillFromShortcut ? toSafeString(initialCreateDraft?.empreendedor_id) : ''
   );
   const [createProcessoRef, setCreateProcessoRef] = useState<string>(
-    canPreFillFromShortcut ? initialCreateDraft?.processo_referencia || '' : ''
+    canPreFillFromShortcut ? toSafeString(initialCreateDraft?.processo_referencia) : ''
   );
   const [createOrigemRefId, setCreateOrigemRefId] = useState<string>('');
   const [createMotivo, setCreateMotivo] = useState<string>('');
   const [createNomeBarragem, setCreateNomeBarragem] = useState<string>(
-    initialPre?.nome_barragem || ''
+    toSafeString(initialPre?.nome_barragem)
   );
-  const [createMunicipio, setCreateMunicipio] = useState<string>(initialPre?.municipio || '');
-  const [createCursoAgua, setCreateCursoAgua] = useState<string>(initialPre?.curso_agua || '');
+  const [createMunicipio, setCreateMunicipio] = useState<string>(
+    toSafeString(initialPre?.municipio)
+  );
+  const [createCursoAgua, setCreateCursoAgua] = useState<string>(
+    toSafeString(initialPre?.curso_agua)
+  );
   const [createCoordenadas, setCreateCoordenadas] = useState<string>(
-    initialPre?.coordenadas || ''
+    toSafeString(initialPre?.coordenadas)
   );
-  const [createUso, setCreateUso] = useState<string>(initialPre?.uso || '');
+  const [createUso, setCreateUso] = useState<string>(toSafeString(initialPre?.uso));
   const [createClassificacao, setCreateClassificacao] = useState<string>(
-    initialPre?.classificacao || ''
+    toSafeString(initialPre?.classificacao)
   );
   const [createNomeEmp, setCreateNomeEmp] = useState<string>(
-    initialPre?.nome_empreendedor || ''
+    toSafeString(initialPre?.nome_empreendedor)
   );
 
   // Modal Detalhe / Edição / Cancelamento / Observação de Campo
@@ -247,98 +301,195 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
     setPage(1);
   }, [statusFiltro, origemFiltro, searchTerm]);
 
+  const safeBarragens = useMemo(
+    () =>
+      Array.isArray(barragens)
+        ? barragens.filter(
+            (b): b is BarragemRecord => Boolean(b && typeof b === 'object' && !Array.isArray(b))
+          )
+        : [],
+    [barragens]
+  );
+
+  const safeEmpreendedores = useMemo(
+    () =>
+      Array.isArray(empreendedores)
+        ? empreendedores.filter(
+            (e): e is EmpreendedorRecord =>
+              Boolean(e && typeof e === 'object' && !Array.isArray(e))
+          )
+        : [],
+    [empreendedores]
+  );
+
   const barragemMap = useMemo(() => {
     const map = new Map<string, BarragemRecord>();
-    for (const b of barragens || []) {
-      if (b?.id) map.set(String(b.id), b);
+    for (const b of safeBarragens) {
+      const bId = toSafeString(b?.id).trim();
+      if (bId) map.set(bId, b);
     }
     return map;
-  }, [barragens]);
+  }, [safeBarragens]);
 
   const empreendedorMap = useMemo(() => {
     const map = new Map<string, EmpreendedorRecord>();
-    for (const e of empreendedores || []) {
-      if (e?.id) map.set(String(e.id), e);
+    for (const e of safeEmpreendedores) {
+      const eId = toSafeString(e?.id).trim();
+      if (eId) map.set(eId, e);
     }
     return map;
-  }, [empreendedores]);
+  }, [safeEmpreendedores]);
+
+  const safeSolicitacoes = useMemo(
+    () =>
+      Array.isArray(solicitacoes)
+        ? solicitacoes.filter(
+            (item): item is SolicitacaoVistoriaRecord =>
+              Boolean(item && typeof item === 'object' && !Array.isArray(item))
+          )
+        : [],
+    [solicitacoes]
+  );
+
+  const safeHistorico = useMemo(
+    () =>
+      Array.isArray(historico)
+        ? historico.filter(
+            (h): h is SolicitacaoVistoriaHistoricoRecord =>
+              Boolean(h && typeof h === 'object' && !Array.isArray(h))
+          )
+        : [],
+    [historico]
+  );
+
+  const safeUsuariosNomes = useMemo(
+    () =>
+      usuariosNomes && typeof usuariosNomes === 'object' && !Array.isArray(usuariosNomes)
+        ? usuariosNomes
+        : {},
+    [usuariosNomes]
+  );
+
+  const safeCounts = useMemo(
+    () => ({
+      total: toSafeNumber(counts?.total, 0),
+      solicitada: toSafeNumber(counts?.solicitada, 0),
+      em_planejamento: toSafeNumber(counts?.em_planejamento, 0),
+      realizada: toSafeNumber(counts?.realizada, 0),
+      cancelada: toSafeNumber(counts?.cancelada, 0)
+    }),
+    [counts]
+  );
 
   const loadSolicitacoes = useCallback(async () => {
     setLoading(true);
     setError(null);
 
-    const res = await listarSolicitacoesVistoria({
-      status: statusFiltro,
-      sistema_origem: origemFiltro
-    });
+    try {
+      const res = await listarSolicitacoesVistoria({
+        status: statusFiltro,
+        sistema_origem: origemFiltro
+      });
 
-    if (!res.success) {
-      setError(res.error || 'Não foi possível carregar as solicitações de vistoria.');
+      if (!res || !res.success) {
+        setError(
+          extractSafeErrorMessage(
+            res?.error,
+            'Não foi possível carregar as solicitações de vistoria.'
+          )
+        );
+        setSolicitacoes([]);
+        return;
+      }
+
+      setSolicitacoes(Array.isArray(res.solicitacoes) ? res.solicitacoes : []);
+      setCounts(
+        res.counts && typeof res.counts === 'object'
+          ? {
+              total: toSafeNumber(res.counts.total, 0),
+              solicitada: toSafeNumber(res.counts.solicitada, 0),
+              em_planejamento: toSafeNumber(res.counts.em_planejamento, 0),
+              realizada: toSafeNumber(res.counts.realizada, 0),
+              cancelada: toSafeNumber(res.counts.cancelada, 0)
+            }
+          : { total: 0, solicitada: 0, em_planejamento: 0, realizada: 0, cancelada: 0 }
+      );
+      setUsuariosNomes(
+        res.usuariosNomes && typeof res.usuariosNomes === 'object' && !Array.isArray(res.usuariosNomes)
+          ? res.usuariosNomes
+          : {}
+      );
+      setServerUserId(toSafeString(res.currentUser?.userId).trim() || null);
+      setServerUserEmail(toSafeString(res.currentUser?.email).trim() || null);
+    } catch (err) {
+      setError(
+        extractSafeErrorMessage(err, 'Não foi possível carregar as solicitações de vistoria.')
+      );
       setSolicitacoes([]);
+    } finally {
       setLoading(false);
-      return;
     }
-
-    setSolicitacoes(res.solicitacoes);
-    setCounts(res.counts);
-    setUsuariosNomes(res.usuariosNomes || {});
-    setServerUserId(res.currentUser?.userId ? String(res.currentUser.userId) : null);
-    setServerUserEmail(res.currentUser?.email ? String(res.currentUser.email) : null);
-    setLoading(false);
   }, [origemFiltro, statusFiltro]);
 
   useEffect(() => {
-    loadSolicitacoes();
+    void loadSolicitacoes();
   }, [loadSolicitacoes]);
 
-  const effectiveUserId = serverUserId || currentAuthUserId || null;
+  const effectiveUserId = toSafeString(serverUserId || currentAuthUserId).trim() || null;
 
   const userIdentityTokens = useMemo(() => {
     const tokens = new Set<string>();
     for (const raw of [effectiveUserId, serverUserEmail, currentAuthEmail, currentAuthLogin]) {
-      const val = String(raw || '').trim().toLowerCase();
+      const val = toSafeString(raw).trim().toLowerCase();
       if (val) tokens.add(val);
     }
     return tokens;
   }, [currentAuthEmail, currentAuthLogin, effectiveUserId, serverUserEmail]);
 
   const resolveUserName = useCallback(
-    (userId?: string | null, fallbackName?: string | null): string => {
-      if (fallbackName && String(fallbackName).trim()) {
-        return String(fallbackName).trim();
+    (userId?: unknown, fallbackName?: unknown): string => {
+      const cleanFallback = toSafeString(fallbackName).trim();
+      if (cleanFallback) return cleanFallback;
+      const cleanUserId = toSafeString(userId).trim();
+      if (!cleanUserId) return '—';
+      const info = hasOwn(safeUsuariosNomes, cleanUserId)
+        ? safeUsuariosNomes[cleanUserId]
+        : undefined;
+      const infoNome = toSafeString(info?.nome).trim();
+      const infoSetor = toSafeString(info?.setor).trim();
+      if (infoNome) {
+        return infoSetor ? `${infoNome} (${infoSetor})` : infoNome;
       }
-      if (!userId) return '—';
-      const info = usuariosNomes[String(userId)];
-      if (info?.nome) {
-        return info.setor ? `${info.nome} (${info.setor})` : info.nome;
-      }
-      return String(userId);
+      return cleanUserId;
     },
-    [usuariosNomes]
+    [safeUsuariosNomes]
   );
 
   const canEditOrCancel = useCallback(
-    (item: SolicitacaoVistoriaRecord): boolean => {
-      if (isReadOnly) return false;
-      if (item.status === 'realizada' || item.status === 'cancelada') return false;
+    (item: SolicitacaoVistoriaRecord | null | undefined): boolean => {
+      if (isReadOnly || !item || typeof item !== 'object') return false;
+      const status = toSafeString(item.status).trim().toLowerCase();
+      if (status === 'realizada' || status === 'cancelada') return false;
       if (isAdmin) return true;
-      return Boolean(
-        effectiveUserId &&
-          String(item.solicitante_id || '').trim().toLowerCase() ===
-            effectiveUserId.trim().toLowerCase()
-      );
+      const solicitanteId = toSafeString(item.solicitante_id).trim().toLowerCase();
+      return Boolean(effectiveUserId && solicitanteId === effectiveUserId.toLowerCase());
     },
     [effectiveUserId, isAdmin, isReadOnly]
   );
 
   const canEditObservacao = useCallback(
-    (item: SolicitacaoVistoriaRecord): boolean => {
-      if (isReadOnly) return false;
-      if (item.status === 'cancelada') return false;
+    (item: SolicitacaoVistoriaRecord | null | undefined): boolean => {
+      if (isReadOnly || !item || typeof item !== 'object') return false;
+      const status = toSafeString(item.status).trim().toLowerCase();
+      if (status === 'cancelada') return false;
       if (isAdmin) return true;
       if (!Array.isArray(item.equipe) || item.equipe.length === 0) return false;
       return item.equipe.some(member => {
-        const mId = String(member?.id || '').trim().toLowerCase();
+        if (!member) return false;
+        const mId =
+          typeof member === 'string'
+            ? toSafeString(member).trim().toLowerCase()
+            : toSafeString((member as any).id).trim().toLowerCase();
         return Boolean(mId && userIdentityTokens.has(mId));
       });
     },
@@ -347,22 +498,27 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
 
   const applyCreateDraft = useCallback(
     (draft: SolicitacaoCreatePreFillDraft) => {
-      if (isReadOnly || !canCreateSolicitacaoVistoriaRole(userRole)) return;
-      const pre = draft?.dados_pre_preenchidos || {};
+      if (isReadOnly || !canCreateSolicitacaoVistoriaRole(userRole) || !draft || typeof draft !== 'object') {
+        return;
+      }
+      const pre =
+        draft.dados_pre_preenchidos && typeof draft.dados_pre_preenchidos === 'object'
+          ? draft.dados_pre_preenchidos
+          : {};
       setCreateError(null);
       setCreateRelato('');
-      setCreateBarragemId(draft?.barragem_id || '');
-      setCreateEmpreendedorId(draft?.empreendedor_id || '');
-      setCreateProcessoRef(draft?.processo_referencia || '');
+      setCreateBarragemId(toSafeString(draft.barragem_id));
+      setCreateEmpreendedorId(toSafeString(draft.empreendedor_id));
+      setCreateProcessoRef(toSafeString(draft.processo_referencia));
       setCreateOrigemRefId('');
       setCreateMotivo('');
-      setCreateNomeBarragem(pre.nome_barragem || '');
-      setCreateMunicipio(pre.municipio || '');
-      setCreateCursoAgua(pre.curso_agua || '');
-      setCreateCoordenadas(pre.coordenadas || '');
-      setCreateUso(pre.uso || '');
-      setCreateClassificacao(pre.classificacao || '');
-      setCreateNomeEmp(pre.nome_empreendedor || '');
+      setCreateNomeBarragem(toSafeString(pre.nome_barragem));
+      setCreateMunicipio(toSafeString(pre.municipio));
+      setCreateCursoAgua(toSafeString(pre.curso_agua));
+      setCreateCoordenadas(toSafeString(pre.coordenadas));
+      setCreateUso(toSafeString(pre.uso));
+      setCreateClassificacao(toSafeString(pre.classificacao));
+      setCreateNomeEmp(toSafeString(pre.nome_empreendedor));
       setShowCreateModal(true);
     },
     [isReadOnly, userRole]
@@ -408,17 +564,17 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
       setCreateNomeEmp('');
       return;
     }
-    const draft = buildBarragemSolicitacaoDraft(bar, empreendedores);
+    const draft = buildBarragemSolicitacaoDraft(bar, safeEmpreendedores);
     const pre = draft.dados_pre_preenchidos || {};
-    setCreateEmpreendedorId(draft.empreendedor_id || '');
-    setCreateProcessoRef(draft.processo_referencia || '');
-    setCreateNomeBarragem(pre.nome_barragem || '');
-    setCreateMunicipio(pre.municipio || '');
-    setCreateCursoAgua(pre.curso_agua || '');
-    setCreateCoordenadas(pre.coordenadas || '');
-    setCreateUso(pre.uso || '');
-    setCreateClassificacao(pre.classificacao || '');
-    setCreateNomeEmp(pre.nome_empreendedor || '');
+    setCreateEmpreendedorId(toSafeString(draft.empreendedor_id));
+    setCreateProcessoRef(toSafeString(draft.processo_referencia));
+    setCreateNomeBarragem(toSafeString(pre.nome_barragem));
+    setCreateMunicipio(toSafeString(pre.municipio));
+    setCreateCursoAgua(toSafeString(pre.curso_agua));
+    setCreateCoordenadas(toSafeString(pre.coordenadas));
+    setCreateUso(toSafeString(pre.uso));
+    setCreateClassificacao(toSafeString(pre.classificacao));
+    setCreateNomeEmp(toSafeString(pre.nome_empreendedor));
   };
 
   const handleEmpreendedorSelectChange = (empId: string) => {
@@ -428,7 +584,7 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
       setCreateNomeEmp('');
       return;
     }
-    const rawName = String(emp.nome || emp.nomeFantasia || '').trim();
+    const rawName = (toSafeString(emp.nome) || toSafeString(emp.nomeFantasia)).trim();
     setCreateNomeEmp(rawName && !containsCpfOrCnpjFrontend(rawName) ? rawName : '');
   };
 
@@ -473,64 +629,90 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
     if (createNomeEmp.trim()) dadosPre.nome_empreendedor = createNomeEmp.trim();
 
     setCreateSubmitting(true);
-    const res = await criarSolicitacaoVistoria({
-      relato,
-      barragem_id: createBarragemId || undefined,
-      empreendedor_id: createEmpreendedorId || undefined,
-      processo_referencia: createProcessoRef.trim() || undefined,
-      origem_ref_id: createOrigemRefId.trim() || undefined,
-      motivo: createMotivo.trim() || undefined,
-      dados_pre_preenchidos: Object.keys(dadosPre).length > 0 ? dadosPre : undefined
-    });
-    setCreateSubmitting(false);
+    try {
+      const res = await criarSolicitacaoVistoria({
+        relato,
+        barragem_id: createBarragemId || undefined,
+        empreendedor_id: createEmpreendedorId || undefined,
+        processo_referencia: createProcessoRef.trim() || undefined,
+        origem_ref_id: createOrigemRefId.trim() || undefined,
+        motivo: createMotivo.trim() || undefined,
+        dados_pre_preenchidos: Object.keys(dadosPre).length > 0 ? dadosPre : undefined
+      });
 
-    if (!res.success) {
-      setCreateError(res.error || 'Falha ao registrar solicitação de vistoria.');
-      return;
+      if (!res || !res.success) {
+        setCreateError(
+          extractSafeErrorMessage(res?.error, 'Falha ao registrar solicitação de vistoria.')
+        );
+        return;
+      }
+
+      setShowCreateModal(false);
+      onNotify('Solicitação de vistoria registrada.');
+      await loadSolicitacoes();
+    } catch (err) {
+      setCreateError(
+        extractSafeErrorMessage(err, 'Falha ao registrar solicitação de vistoria.')
+      );
+    } finally {
+      setCreateSubmitting(false);
     }
-
-    setShowCreateModal(false);
-    onNotify('Solicitação de vistoria registrada.');
-    await loadSolicitacoes();
   };
 
   const openDetailModal = async (
     item: SolicitacaoVistoriaRecord,
     mode: ModalActionMode = 'historico'
   ) => {
+    if (!item || typeof item !== 'object') return;
     setSelectedItem(item);
     setModalMode(mode);
     setDetailLoading(true);
     setDetailError(null);
     setActionError(null);
-    setEditRelato(item.relato || '');
+    setEditRelato(toSafeString(item.relato));
     setEditStatus(item.status === 'em_planejamento' ? 'em_planejamento' : 'solicitada');
-    setEditBarragemId(item.barragem_id || '');
-    setEditEmpreendedorId(item.empreendedor_id || '');
-    setEditProcessoRef(item.processo_referencia || '');
-    setEditOrigemRefId(item.origem_ref_id || '');
+    setEditBarragemId(toSafeString(item.barragem_id));
+    setEditEmpreendedorId(toSafeString(item.empreendedor_id));
+    setEditProcessoRef(toSafeString(item.processo_referencia));
+    setEditOrigemRefId(toSafeString(item.origem_ref_id));
     setEditMotivo('');
     setCancelMotivo('');
-    setObsTexto(item.observacao_campo || '');
+    setObsTexto(toSafeString(item.observacao_campo));
     setHistorico([]);
 
-    const detail = await obterDetalheSolicitacaoVistoria(item.id);
-    if (!detail.success) {
-      setDetailError(detail.error || 'Erro ao carregar detalhes e histórico.');
+    const itemId = toSafeString(item.id).trim();
+    if (!itemId) {
+      setDetailError('Solicitação sem identificador válido.');
       setDetailLoading(false);
       return;
     }
 
-    if (detail.solicitacao) {
-      setSelectedItem(detail.solicitacao);
-      setEditRelato(detail.solicitacao.relato || '');
-      setObsTexto(detail.solicitacao.observacao_campo || '');
+    try {
+      const detail = await obterDetalheSolicitacaoVistoria(itemId);
+      if (!detail || !detail.success) {
+        setDetailError(
+          extractSafeErrorMessage(detail?.error, 'Erro ao carregar detalhes e histórico.')
+        );
+        return;
+      }
+
+      if (detail.solicitacao && typeof detail.solicitacao === 'object') {
+        setSelectedItem(detail.solicitacao);
+        setEditRelato(toSafeString(detail.solicitacao.relato));
+        setObsTexto(toSafeString(detail.solicitacao.observacao_campo));
+      }
+      setHistorico(Array.isArray(detail.historico) ? detail.historico : []);
+      if (detail.usuariosNomes && typeof detail.usuariosNomes === 'object') {
+        setUsuariosNomes(prev => ({
+          ...(prev && typeof prev === 'object' ? prev : {}),
+          ...detail.usuariosNomes
+        }));
+      }
+    } catch (err) {
+      setDetailError(extractSafeErrorMessage(err, 'Erro ao carregar detalhes e histórico.'));
+    } finally {
+      setDetailLoading(false);
     }
-    setHistorico(detail.historico || []);
-    if (detail.usuariosNomes) {
-      setUsuariosNomes(prev => ({ ...prev, ...detail.usuariosNomes }));
-    }
-    setDetailLoading(false);
   };
 
   const handleEditSubmit = async (e: React.FormEvent) => {
@@ -554,25 +736,30 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
     }
 
     setActionSubmitting(true);
-    const res = await editarSolicitacaoVistoria(selectedItem.id, {
-      relato,
-      status: editStatus,
-      barragem_id: editBarragemId || null,
-      empreendedor_id: editEmpreendedorId || null,
-      processo_referencia: editProcessoRef.trim() || null,
-      origem_ref_id: editOrigemRefId.trim() || null,
-      motivo: editMotivo.trim() || undefined
-    });
-    setActionSubmitting(false);
+    try {
+      const res = await editarSolicitacaoVistoria(toSafeString(selectedItem.id), {
+        relato,
+        status: editStatus,
+        barragem_id: editBarragemId || null,
+        empreendedor_id: editEmpreendedorId || null,
+        processo_referencia: editProcessoRef.trim() || null,
+        origem_ref_id: editOrigemRefId.trim() || null,
+        motivo: editMotivo.trim() || undefined
+      });
 
-    if (!res.success) {
-      setActionError(res.error || 'Falha ao salvar alterações.');
-      return;
+      if (!res || !res.success) {
+        setActionError(extractSafeErrorMessage(res?.error, 'Falha ao salvar alterações.'));
+        return;
+      }
+
+      onNotify('Solicitação de vistoria atualizada.');
+      await loadSolicitacoes();
+      await openDetailModal(res.solicitacao || selectedItem, 'historico');
+    } catch (err) {
+      setActionError(extractSafeErrorMessage(err, 'Falha ao salvar alterações.'));
+    } finally {
+      setActionSubmitting(false);
     }
-
-    onNotify('Solicitação de vistoria atualizada.');
-    await loadSolicitacoes();
-    await openDetailModal(res.solicitacao || selectedItem, 'historico');
   };
 
   const handleCancelSubmit = async (e: React.FormEvent) => {
@@ -591,17 +778,22 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
     }
 
     setActionSubmitting(true);
-    const res = await cancelarSolicitacaoVistoria(selectedItem.id, motivo);
-    setActionSubmitting(false);
+    try {
+      const res = await cancelarSolicitacaoVistoria(toSafeString(selectedItem.id), motivo);
 
-    if (!res.success) {
-      setActionError(res.error || 'Falha ao cancelar solicitação.');
-      return;
+      if (!res || !res.success) {
+        setActionError(extractSafeErrorMessage(res?.error, 'Falha ao cancelar solicitação.'));
+        return;
+      }
+
+      onNotify('Solicitação de vistoria cancelada.');
+      await loadSolicitacoes();
+      await openDetailModal(res.solicitacao || selectedItem, 'historico');
+    } catch (err) {
+      setActionError(extractSafeErrorMessage(err, 'Falha ao cancelar solicitação.'));
+    } finally {
+      setActionSubmitting(false);
     }
-
-    onNotify('Solicitação de vistoria cancelada.');
-    await loadSolicitacoes();
-    await openDetailModal(res.solicitacao || selectedItem, 'historico');
   };
 
   const handleObservacaoSubmit = async (e: React.FormEvent) => {
@@ -620,40 +812,78 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
     }
 
     setActionSubmitting(true);
-    const res = await editarObservacaoCampoSolicitacao(selectedItem.id, texto);
-    setActionSubmitting(false);
+    try {
+      const res = await editarObservacaoCampoSolicitacao(toSafeString(selectedItem.id), texto);
 
-    if (!res.success) {
-      setActionError(res.error || 'Falha ao atualizar observação de campo.');
-      return;
+      if (!res || !res.success) {
+        setActionError(
+          extractSafeErrorMessage(res?.error, 'Falha ao atualizar observação de campo.')
+        );
+        return;
+      }
+
+      onNotify('Observação de campo atualizada.');
+      await loadSolicitacoes();
+      await openDetailModal(res.solicitacao || selectedItem, 'historico');
+    } catch (err) {
+      setActionError(
+        extractSafeErrorMessage(err, 'Falha ao atualizar observação de campo.')
+      );
+    } finally {
+      setActionSubmitting(false);
     }
-
-    onNotify('Observação de campo atualizada.');
-    await loadSolicitacoes();
-    await openDetailModal(res.solicitacao || selectedItem, 'historico');
   };
 
   const filteredSolicitacoes = useMemo(() => {
-    const lista = Array.isArray(solicitacoes) ? solicitacoes : [];
     const q = normalizeSearch(searchTerm);
-    if (!q) return lista;
-    return lista.filter(item => {
-      const barragem = item?.barragem_id ? barragemMap.get(String(item.barragem_id)) : undefined;
-      const emp = item?.empreendedor_id ? empreendedorMap.get(String(item.empreendedor_id)) : undefined;
+    if (!q) return safeSolicitacoes;
+    return safeSolicitacoes.filter(item => {
+      const bId = toSafeString(item?.barragem_id).trim();
+      const eId = toSafeString(item?.empreendedor_id).trim();
+      const barragem = bId ? barragemMap.get(bId) : undefined;
+      const emp = eId ? empreendedorMap.get(eId) : undefined;
+      const pre =
+        item?.dados_pre_preenchidos && typeof item.dados_pre_preenchidos === 'object'
+          ? item.dados_pre_preenchidos
+          : null;
       const equipeStr = Array.isArray(item?.equipe)
-        ? item.equipe.map(m => String(m?.nome || '')).join(' ')
+        ? item.equipe
+            .map(m => (typeof m === 'string' ? m : toSafeString((m as any)?.nome || (m as any)?.id)))
+            .join(' ')
         : '';
       const haystack = normalizeSearch(
-        `${item?.sistema_origem || ''} ${item?.solicitante_nome || ''} ${item?.solicitante_perfil || ''} ${item?.relato || ''} ${item?.processo_referencia || ''} ${item?.observacao_campo || ''} ${item?.vistoria_id || ''} ${equipeStr} ${barragem?.nome || ''} ${emp?.nome || ''}`
+        [
+          toSafeString(item?.sistema_origem),
+          toSafeString(item?.solicitante_nome),
+          toSafeString(item?.solicitante_perfil),
+          toSafeString(item?.relato),
+          toSafeString(item?.processo_referencia),
+          toSafeString(item?.observacao_campo),
+          toSafeString(item?.vistoria_id),
+          equipeStr,
+          toSafeString(barragem?.nome) || toSafeString(pre?.nome_barragem),
+          toSafeString(emp?.nome) || toSafeString(pre?.nome_empreendedor)
+        ].join(' ')
       );
       return haystack.includes(q);
     });
-  }, [barragemMap, empreendedorMap, searchTerm, solicitacoes]);
+  }, [barragemMap, empreendedorMap, safeSolicitacoes, searchTerm]);
 
   const { pagedItems } = useMemo(
     () => paginateList(filteredSolicitacoes, page, pageSize),
     [filteredSolicitacoes, page, pageSize]
   );
+
+  const safeErrorMsg = error ? toSafeString(error, 'Erro ao carregar as solicitações de vistoria.') : null;
+  const safeCreateErrorMsg = createError
+    ? toSafeString(createError, 'Falha ao registrar solicitação de vistoria.')
+    : null;
+  const safeDetailErrorMsg = detailError
+    ? toSafeString(detailError, 'Erro ao carregar detalhes e histórico.')
+    : null;
+  const safeActionErrorMsg = actionError
+    ? toSafeString(actionError, 'Falha ao executar ação na solicitação.')
+    : null;
 
   return (
     <div>
@@ -681,28 +911,28 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
         <div className="stat">
           <div>
             <div className="label">Total</div>
-            <div className="value">{counts.total}</div>
+            <div className="value">{safeCounts.total}</div>
           </div>
           <div className="stat-ico">▤</div>
         </div>
         <div className="stat">
           <div>
             <div className="label">Solicitadas</div>
-            <div className="value">{counts.solicitada}</div>
+            <div className="value">{safeCounts.solicitada}</div>
           </div>
           <div className="stat-ico">⚑</div>
         </div>
         <div className="stat">
           <div>
             <div className="label">Em planejamento</div>
-            <div className="value">{counts.em_planejamento}</div>
+            <div className="value">{safeCounts.em_planejamento}</div>
           </div>
           <div className="stat-ico">◷</div>
         </div>
         <div className="stat">
           <div>
             <div className="label">Realizadas</div>
-            <div className="value">{counts.realizada}</div>
+            <div className="value">{safeCounts.realizada}</div>
           </div>
           <div className="stat-ico">✓</div>
         </div>
@@ -753,7 +983,7 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
           </div>
         )}
 
-        {!loading && error && (
+        {!loading && safeErrorMsg && (
           <div className="panel-body">
             <div
               className="notice amber"
@@ -766,7 +996,7 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
               }}
             >
               <div>
-                <strong>Não foi possível carregar as solicitações:</strong> {error}
+                <strong>Não foi possível carregar as solicitações:</strong> {safeErrorMsg}
               </div>
               <button type="button" className="btn light small" onClick={loadSolicitacoes}>
                 Tentar novamente
@@ -775,7 +1005,7 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
           </div>
         )}
 
-        {!loading && !error && (
+        {!loading && !safeErrorMsg && (
           <>
             <div className="tablewrap">
               <table>
@@ -793,37 +1023,67 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
                 <tbody>
                   {pagedItems.length > 0 ? (
                     pagedItems.map((item, idx) => {
-                      const barragem = item?.barragem_id
-                        ? barragemMap.get(String(item.barragem_id))
-                        : undefined;
-                      const empreendedor = item?.empreendedor_id
-                        ? empreendedorMap.get(String(item.empreendedor_id))
-                        : undefined;
-                      const stBadge = SOLICITACAO_STATUS_BADGES[item.status] || 'gray';
-                      const stLabel = SOLICITACAO_STATUS_LABELS[item.status] || item.status || 'Solicitada';
-                      const relatoTexto = String(item?.relato || '');
-                      const obsCampoTexto = String(item?.observacao_campo || '');
+                      const itemId = toSafeString(item?.id).trim();
+                      const bId = toSafeString(item?.barragem_id).trim();
+                      const eId = toSafeString(item?.empreendedor_id).trim();
+                      const barragem = bId ? barragemMap.get(bId) : undefined;
+                      const empreendedor = eId ? empreendedorMap.get(eId) : undefined;
+                      const pre =
+                        item?.dados_pre_preenchidos &&
+                        typeof item.dados_pre_preenchidos === 'object' &&
+                        !Array.isArray(item.dados_pre_preenchidos)
+                          ? item.dados_pre_preenchidos
+                          : null;
+
+                      const statusStr = toSafeString(item?.status).trim();
+                      const stBadge = hasOwn(SOLICITACAO_STATUS_BADGES, statusStr)
+                        ? SOLICITACAO_STATUS_BADGES[statusStr as keyof typeof SOLICITACAO_STATUS_BADGES]
+                        : 'gray';
+                      const stLabel = hasOwn(SOLICITACAO_STATUS_LABELS, statusStr)
+                        ? SOLICITACAO_STATUS_LABELS[statusStr as keyof typeof SOLICITACAO_STATUS_LABELS]
+                        : statusStr || 'Solicitada';
+
+                      const sistemaOrigem = toSafeString(item?.sistema_origem).trim() || 'administra';
+                      const origemRefId = toSafeString(item?.origem_ref_id).trim();
+                      const processoRef = toSafeString(item?.processo_referencia).trim();
+                      const solicitantePerfil = toSafeString(item?.solicitante_perfil).trim();
+                      const relatoTexto = toSafeString(item?.relato);
+                      const obsCampoTexto = toSafeString(item?.observacao_campo);
+                      const vistoriaId = toSafeString(item?.vistoria_id).trim();
+                      const barragemNome =
+                        toSafeString(barragem?.nome).trim() ||
+                        toSafeString(pre?.nome_barragem).trim();
+                      const empreendedorNome =
+                        toSafeString(empreendedor?.nome).trim() ||
+                        toSafeString(empreendedor?.nomeFantasia).trim() ||
+                        toSafeString(pre?.nome_empreendedor).trim();
+
                       const equipeLista = Array.isArray(item?.equipe) ? item.equipe : [];
+                      const equipeNomes = equipeLista
+                        .map(m => {
+                          if (!m) return '';
+                          if (typeof m === 'string') return toSafeString(m).trim();
+                          return toSafeString((m as any).nome || (m as any).id).trim();
+                        })
+                        .filter(Boolean)
+                        .join(', ');
+
                       const allowEdit = canEditOrCancel(item);
                       const allowObs = canEditObservacao(item);
 
                       return (
-                        <tr key={item.id || idx} className={idx % 2 === 0 ? 'row-even' : 'row-odd'}>
+                        <tr key={itemId || `sol-${idx}`} className={idx % 2 === 0 ? 'row-even' : 'row-odd'}>
                           <td>
-                            <div className="td-main">{item.sistema_origem || 'administra'}</div>
-                            {item.origem_ref_id && (
-                              <span className="td-sub">Ref.: {item.origem_ref_id}</span>
-                            )}
-                            {item.processo_referencia && (
-                              <span className="td-sub">Proc.: {item.processo_referencia}</span>
-                            )}
+                            <div className="td-main">{sistemaOrigem}</div>
+                            {origemRefId && <span className="td-sub">Ref.: {origemRefId}</span>}
+                            {processoRef && <span className="td-sub">Proc.: {processoRef}</span>}
                           </td>
                           <td>
                             <div className="td-main">
-                              {resolveUserName(item.solicitante_id, item.solicitante_nome)}
+                              {resolveUserName(item?.solicitante_id, item?.solicitante_nome)}
                             </div>
                             <span className="td-sub">
-                              {item.solicitante_perfil || '—'} · {formatDateTimePtBr(item.created_at)}
+                              {solicitantePerfil || '—'} · {formatDateTimePtBr(item?.created_at)}
                             </span>
                           </td>
                           <td>
@@ -832,40 +1092,24 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
                                 ? `${relatoTexto.slice(0, 140)}...`
                                 : relatoTexto || '—'}
                             </div>
-                            {(barragem || item.dados_pre_preenchidos?.nome_barragem) && (
-                              <span className="td-sub">
-                                Barragem:{' '}
-                                {barragem?.nome || item.dados_pre_preenchidos?.nome_barragem}
-                              </span>
+                            {barragemNome && (
+                              <span className="td-sub">Barragem: {barragemNome}</span>
                             )}
-                            {(empreendedor || item.dados_pre_preenchidos?.nome_empreendedor) && (
-                              <span className="td-sub">
-                                Empreendedor:{' '}
-                                {empreendedor?.nome || item.dados_pre_preenchidos?.nome_empreendedor}
-                              </span>
+                            {empreendedorNome && (
+                              <span className="td-sub">Empreendedor: {empreendedorNome}</span>
                             )}
                           </td>
                           <td>
                             <span className={`badge ${stBadge}`}>{stLabel}</span>
                           </td>
                           <td>
-                            {item.data_realizacao ? (
+                            {toSafeString(item?.data_realizacao).trim() ? (
                               <div>{formatDateTimePtBr(item.data_realizacao)}</div>
                             ) : (
                               <span className="muted">Não realizada</span>
                             )}
-                            {equipeLista.length > 0 && (
-                              <span className="td-sub">
-                                Equipe:{' '}
-                                {equipeLista
-                                  .map(m => String(m?.nome || ''))
-                                  .filter(Boolean)
-                                  .join(', ')}
-                              </span>
-                            )}
-                            {item.vistoria_id && (
-                              <span className="td-sub">Registro: {item.vistoria_id}</span>
-                            )}
+                            {equipeNomes && <span className="td-sub">Equipe: {equipeNomes}</span>}
+                            {vistoriaId && <span className="td-sub">Registro: {vistoriaId}</span>}
                           </td>
                           <td>
                             {obsCampoTexto ? (
@@ -875,7 +1119,7 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
                                     ? `${obsCampoTexto.slice(0, 120)}...`
                                     : obsCampoTexto}
                                 </div>
-                                {item.observacao_atualizada_em && (
+                                {toSafeString(item?.observacao_atualizada_em).trim() && (
                                   <span className="td-sub">
                                     Atualizada em {formatDateTimePtBr(item.observacao_atualizada_em)}
                                   </span>
@@ -975,9 +1219,9 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
               </button>
             </div>
             <div className="modal-body">
-              {createError && (
+              {safeCreateErrorMsg && (
                 <div className="notice amber" style={{ marginBottom: '14px' }}>
-                  {createError}
+                  {safeCreateErrorMsg}
                 </div>
               )}
 
@@ -1007,12 +1251,18 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
                     onChange={e => handleBarragemSelectChange(e.target.value)}
                   >
                     <option value="">Sem vínculo direto</option>
-                    {(barragens || []).map(b => (
-                      <option key={b.id} value={b.id}>
-                        {b.nome || b.id}
-                        {b.municipio ? ` · ${b.municipio}` : ''}
-                      </option>
-                    ))}
+                    {safeBarragens.map((b, bIdx) => {
+                      const bId = toSafeString(b?.id).trim();
+                      if (!bId) return null;
+                      const bNome = toSafeString(b?.nome).trim() || bId;
+                      const bMunicipio = toSafeString(b?.municipio).trim();
+                      return (
+                        <option key={`${bId}-${bIdx}`} value={bId}>
+                          {bNome}
+                          {bMunicipio ? ` · ${bMunicipio}` : ''}
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
 
@@ -1024,11 +1274,19 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
                     onChange={e => handleEmpreendedorSelectChange(e.target.value)}
                   >
                     <option value="">Sem vínculo direto</option>
-                    {(empreendedores || []).map(emp => (
-                      <option key={emp.id} value={emp.id}>
-                        {emp.nome || emp.nomeFantasia || emp.id}
-                      </option>
-                    ))}
+                    {safeEmpreendedores.map((emp, eIdx) => {
+                      const eId = toSafeString(emp?.id).trim();
+                      if (!eId) return null;
+                      const eNome =
+                        toSafeString(emp?.nome).trim() ||
+                        toSafeString(emp?.nomeFantasia).trim() ||
+                        eId;
+                      return (
+                        <option key={`${eId}-${eIdx}`} value={eId}>
+                          {eNome}
+                        </option>
+                      );
+                    })}
                   </select>
                 </div>
 
@@ -1170,7 +1428,8 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
               <div>
                 <h3>Solicitação de Vistoria</h3>
                 <span className="micro muted">
-                  ID: {selectedItem.id} · Origem: {selectedItem.sistema_origem}
+                  ID: {toSafeString(selectedItem.id, '—')} · Origem:{' '}
+                  {toSafeString(selectedItem.sistema_origem, 'administra') || 'administra'}
                 </span>
               </div>
               <button
@@ -1189,132 +1448,167 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
                   Carregando detalhes e histórico...
                 </div>
               )}
-              {detailError && (
+              {safeDetailErrorMsg && (
                 <div className="notice amber" style={{ marginBottom: '12px' }}>
-                  {detailError}
+                  {safeDetailErrorMsg}
                 </div>
               )}
 
-              <div
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
-                  gap: '10px',
-                  padding: '12px',
-                  borderRadius: '10px',
-                  background: '#f8fafc',
-                  border: '1px solid #e2e8f0',
-                  marginBottom: '14px',
-                  fontSize: '11px'
-                }}
-              >
-                <div>
-                  <span className="muted">Status atual:</span>
-                  <div>
-                    <span
-                      className={`badge ${SOLICITACAO_STATUS_BADGES[selectedItem.status] || 'gray'}`}
+              {(() => {
+                const selStatus = toSafeString(selectedItem.status).trim();
+                const selBadge = hasOwn(SOLICITACAO_STATUS_BADGES, selStatus)
+                  ? SOLICITACAO_STATUS_BADGES[selStatus as keyof typeof SOLICITACAO_STATUS_BADGES]
+                  : 'gray';
+                const selLabel = hasOwn(SOLICITACAO_STATUS_LABELS, selStatus)
+                  ? SOLICITACAO_STATUS_LABELS[selStatus as keyof typeof SOLICITACAO_STATUS_LABELS]
+                  : selStatus || 'Solicitada';
+                const selVistoriaId = toSafeString(selectedItem.vistoria_id).trim();
+                const selEquipeStr = Array.isArray(selectedItem.equipe)
+                  ? selectedItem.equipe
+                      .map(m =>
+                        typeof m === 'string'
+                          ? toSafeString(m).trim()
+                          : toSafeString((m as any)?.nome || (m as any)?.id).trim()
+                      )
+                      .filter(Boolean)
+                      .join(', ')
+                  : '';
+                const selObs = toSafeString(selectedItem.observacao_campo).trim();
+                const selPre =
+                  selectedItem.dados_pre_preenchidos &&
+                  typeof selectedItem.dados_pre_preenchidos === 'object' &&
+                  !Array.isArray(selectedItem.dados_pre_preenchidos)
+                    ? selectedItem.dados_pre_preenchidos
+                    : null;
+
+                return (
+                  <>
+                    <div
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: 'repeat(auto-fit, minmax(200px, 1fr))',
+                        gap: '10px',
+                        padding: '12px',
+                        borderRadius: '10px',
+                        background: '#f8fafc',
+                        border: '1px solid #e2e8f0',
+                        marginBottom: '14px',
+                        fontSize: '11px'
+                      }}
                     >
-                      {SOLICITACAO_STATUS_LABELS[selectedItem.status] || selectedItem.status}
-                    </span>
-                  </div>
-                </div>
-                <div>
-                  <span className="muted">Quem enviou:</span>
-                  <div>
-                    <b>{resolveUserName(selectedItem.solicitante_id, selectedItem.solicitante_nome)}</b>
-                    <div className="micro muted">
-                      {selectedItem.solicitante_perfil || '—'} ·{' '}
-                      {formatDateTimePtBr(selectedItem.created_at)}
+                      <div>
+                        <span className="muted">Status atual:</span>
+                        <div>
+                          <span className={`badge ${selBadge}`}>{selLabel}</span>
+                        </div>
+                      </div>
+                      <div>
+                        <span className="muted">Quem enviou:</span>
+                        <div>
+                          <b>
+                            {resolveUserName(
+                              selectedItem.solicitante_id,
+                              selectedItem.solicitante_nome
+                            )}
+                          </b>
+                          <div className="micro muted">
+                            {toSafeString(selectedItem.solicitante_perfil, '—') || '—'} ·{' '}
+                            {formatDateTimePtBr(selectedItem.created_at)}
+                          </div>
+                        </div>
+                      </div>
+                      <div>
+                        <span className="muted">Data de realização:</span>
+                        <div>
+                          <b>{formatDateTimePtBr(selectedItem.data_realizacao)}</b>
+                          {selVistoriaId && (
+                            <div className="micro muted">Registro: {selVistoriaId}</div>
+                          )}
+                        </div>
+                      </div>
+                      <div>
+                        <span className="muted">Equipe designada:</span>
+                        <div>
+                          <b>{selEquipeStr || 'Não atribuída'}</b>
+                        </div>
+                      </div>
                     </div>
-                  </div>
-                </div>
-                <div>
-                  <span className="muted">Data de realização:</span>
-                  <div>
-                    <b>{formatDateTimePtBr(selectedItem.data_realizacao)}</b>
-                    {selectedItem.vistoria_id && (
-                      <div className="micro muted">Registro: {selectedItem.vistoria_id}</div>
-                    )}
-                  </div>
-                </div>
-                <div>
-                  <span className="muted">Equipe designada:</span>
-                  <div>
-                    <b>
-                      {Array.isArray(selectedItem.equipe) && selectedItem.equipe.length > 0
-                        ? selectedItem.equipe.map(m => m.nome).join(', ')
-                        : 'Não atribuída'}
-                    </b>
-                  </div>
-                </div>
-              </div>
 
-              <div style={{ marginBottom: '12px', fontSize: '12px', color: '#334155' }}>
-                <b>Relato:</b> {selectedItem.relato}
-              </div>
-
-              {selectedItem.observacao_campo && (
-                <div className="notice slate" style={{ marginBottom: '12px' }}>
-                  <b>Observação de campo:</b> {selectedItem.observacao_campo}
-                  {selectedItem.observacao_atualizada_em && (
-                    <div className="micro muted" style={{ marginTop: '4px' }}>
-                      Atualizada em {formatDateTimePtBr(selectedItem.observacao_atualizada_em)}
+                    <div style={{ marginBottom: '12px', fontSize: '12px', color: '#334155' }}>
+                      <b>Relato:</b> {toSafeString(selectedItem.relato, '—') || '—'}
                     </div>
-                  )}
-                </div>
-              )}
 
-              {selectedItem.dados_pre_preenchidos && (
-                <div
-                  style={{
-                    padding: '10px 12px',
-                    borderRadius: '8px',
-                    border: '1px solid #e2e8f0',
-                    marginBottom: '14px',
-                    fontSize: '11px'
-                  }}
-                >
-                  <b>Dados técnicos pré-preenchidos:</b>
-                  <div style={{ marginTop: '6px', display: 'flex', flexWrap: 'wrap', gap: '12px' }}>
-                    {selectedItem.dados_pre_preenchidos.nome_barragem && (
-                      <span>
-                        <b>Barragem:</b> {selectedItem.dados_pre_preenchidos.nome_barragem}
-                      </span>
+                    {selObs && (
+                      <div className="notice slate" style={{ marginBottom: '12px' }}>
+                        <b>Observação de campo:</b> {selObs}
+                        {toSafeString(selectedItem.observacao_atualizada_em).trim() && (
+                          <div className="micro muted" style={{ marginTop: '4px' }}>
+                            Atualizada em {formatDateTimePtBr(selectedItem.observacao_atualizada_em)}
+                          </div>
+                        )}
+                      </div>
                     )}
-                    {selectedItem.dados_pre_preenchidos.municipio && (
-                      <span>
-                        <b>Município:</b> {selectedItem.dados_pre_preenchidos.municipio}
-                      </span>
+
+                    {selPre && (
+                      <div
+                        style={{
+                          padding: '10px 12px',
+                          borderRadius: '8px',
+                          border: '1px solid #e2e8f0',
+                          marginBottom: '14px',
+                          fontSize: '11px'
+                        }}
+                      >
+                        <b>Dados técnicos pré-preenchidos:</b>
+                        <div
+                          style={{
+                            marginTop: '6px',
+                            display: 'flex',
+                            flexWrap: 'wrap',
+                            gap: '12px'
+                          }}
+                        >
+                          {toSafeString(selPre.nome_barragem).trim() && (
+                            <span>
+                              <b>Barragem:</b> {toSafeString(selPre.nome_barragem)}
+                            </span>
+                          )}
+                          {toSafeString(selPre.municipio).trim() && (
+                            <span>
+                              <b>Município:</b> {toSafeString(selPre.municipio)}
+                            </span>
+                          )}
+                          {toSafeString(selPre.curso_agua).trim() && (
+                            <span>
+                              <b>Curso d’água:</b> {toSafeString(selPre.curso_agua)}
+                            </span>
+                          )}
+                          {toSafeString(selPre.coordenadas).trim() && (
+                            <span>
+                              <b>Coordenadas:</b> {toSafeString(selPre.coordenadas)}
+                            </span>
+                          )}
+                          {toSafeString(selPre.uso).trim() && (
+                            <span>
+                              <b>Uso:</b> {toSafeString(selPre.uso)}
+                            </span>
+                          )}
+                          {toSafeString(selPre.classificacao).trim() && (
+                            <span>
+                              <b>Classificação:</b> {toSafeString(selPre.classificacao)}
+                            </span>
+                          )}
+                          {toSafeString(selPre.nome_empreendedor).trim() && (
+                            <span>
+                              <b>Empreendedor:</b> {toSafeString(selPre.nome_empreendedor)}
+                            </span>
+                          )}
+                        </div>
+                      </div>
                     )}
-                    {selectedItem.dados_pre_preenchidos.curso_agua && (
-                      <span>
-                        <b>Curso d’água:</b> {selectedItem.dados_pre_preenchidos.curso_agua}
-                      </span>
-                    )}
-                    {selectedItem.dados_pre_preenchidos.coordenadas && (
-                      <span>
-                        <b>Coordenadas:</b> {selectedItem.dados_pre_preenchidos.coordenadas}
-                      </span>
-                    )}
-                    {selectedItem.dados_pre_preenchidos.uso && (
-                      <span>
-                        <b>Uso:</b> {selectedItem.dados_pre_preenchidos.uso}
-                      </span>
-                    )}
-                    {selectedItem.dados_pre_preenchidos.classificacao && (
-                      <span>
-                        <b>Classificação:</b> {selectedItem.dados_pre_preenchidos.classificacao}
-                      </span>
-                    )}
-                    {selectedItem.dados_pre_preenchidos.nome_empreendedor && (
-                      <span>
-                        <b>Empreendedor:</b>{' '}
-                        {selectedItem.dados_pre_preenchidos.nome_empreendedor}
-                      </span>
-                    )}
-                  </div>
-                </div>
-              )}
+                  </>
+                );
+              })()}
 
               {!isReadOnly && (
                 <div style={{ display: 'flex', gap: '6px', flexWrap: 'wrap', marginBottom: '14px' }}>
@@ -1326,7 +1620,7 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
                       setActionError(null);
                     }}
                   >
-                    Histórico ({historico.length})
+                    Histórico ({safeHistorico.length})
                   </button>
                   {canEditOrCancel(selectedItem) && (
                     <>
@@ -1367,9 +1661,9 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
                 </div>
               )}
 
-              {actionError && (
+              {safeActionErrorMsg && (
                 <div className="notice amber" style={{ marginBottom: '12px' }}>
-                  {actionError}
+                  {safeActionErrorMsg}
                 </div>
               )}
 
@@ -1428,11 +1722,15 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
                         onChange={e => setEditBarragemId(e.target.value)}
                       >
                         <option value="">Sem vínculo direto</option>
-                        {(barragens || []).map(b => (
-                          <option key={b.id} value={b.id}>
-                            {b.nome || b.id}
-                          </option>
-                        ))}
+                        {safeBarragens.map((b, bIdx) => {
+                          const bId = toSafeString(b?.id).trim();
+                          if (!bId) return null;
+                          return (
+                            <option key={`${bId}-${bIdx}`} value={bId}>
+                              {toSafeString(b?.nome).trim() || bId}
+                            </option>
+                          );
+                        })}
                       </select>
                     </div>
                     <div className="form-field">
@@ -1443,11 +1741,17 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
                         onChange={e => setEditEmpreendedorId(e.target.value)}
                       >
                         <option value="">Sem vínculo direto</option>
-                        {(empreendedores || []).map(emp => (
-                          <option key={emp.id} value={emp.id}>
-                            {emp.nome || emp.nomeFantasia || emp.id}
-                          </option>
-                        ))}
+                        {safeEmpreendedores.map((emp, eIdx) => {
+                          const eId = toSafeString(emp?.id).trim();
+                          if (!eId) return null;
+                          return (
+                            <option key={`${eId}-${eIdx}`} value={eId}>
+                              {toSafeString(emp?.nome).trim() ||
+                                toSafeString(emp?.nomeFantasia).trim() ||
+                                eId}
+                            </option>
+                          );
+                        })}
                       </select>
                     </div>
                     <div className="form-field">
@@ -1570,7 +1874,7 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
                 Histórico de alterações (somente leitura)
               </div>
 
-              {!detailLoading && historico.length === 0 ? (
+              {!detailLoading && safeHistorico.length === 0 ? (
                 <div className="notice slate">
                   Nenhum registro encontrado no histórico desta solicitação.
                 </div>
@@ -1588,24 +1892,37 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
                       </tr>
                     </thead>
                     <tbody>
-                      {historico.map(h => (
-                        <tr key={h.id}>
-                          <td>{formatDateTimePtBr(h.created_at)}</td>
-                          <td>{resolveUserName(h.usuario_id)}</td>
-                          <td>
-                            <span className="badge gray">
-                              {SOLICITACAO_HISTORICO_ACAO_LABELS[h.acao] || h.acao}
-                            </span>
-                          </td>
-                          <td>{(h.campo && SOLICITACAO_CAMPO_LABELS[h.campo]) || h.campo || '—'}</td>
-                          <td>
-                            <span>{h.valor_anterior || '—'}</span>
-                            {' → '}
-                            <b>{h.valor_novo || '—'}</b>
-                          </td>
-                          <td>{h.motivo || '—'}</td>
-                        </tr>
-                      ))}
+                      {safeHistorico.map((h, hIdx) => {
+                        const hId = toSafeString(h?.id).trim() || `hist-${hIdx}`;
+                        const acaoRaw = toSafeString(h?.acao).trim();
+                        const acaoLabel = hasOwn(SOLICITACAO_HISTORICO_ACAO_LABELS, acaoRaw)
+                          ? SOLICITACAO_HISTORICO_ACAO_LABELS[acaoRaw]
+                          : acaoRaw || '—';
+                        const campoRaw = toSafeString(h?.campo).trim();
+                        const campoLabel =
+                          campoRaw && hasOwn(SOLICITACAO_CAMPO_LABELS, campoRaw)
+                            ? SOLICITACAO_CAMPO_LABELS[campoRaw]
+                            : campoRaw || '—';
+                        const valorAnterior = toSafeString(h?.valor_anterior).trim() || '—';
+                        const valorNovo = toSafeString(h?.valor_novo).trim() || '—';
+                        const motivoTexto = toSafeString(h?.motivo).trim() || '—';
+                        return (
+                          <tr key={hId}>
+                            <td>{formatDateTimePtBr(h?.created_at)}</td>
+                            <td>{resolveUserName(h?.usuario_id)}</td>
+                            <td>
+                              <span className="badge gray">{acaoLabel}</span>
+                            </td>
+                            <td>{campoLabel}</td>
+                            <td>
+                              <span>{valorAnterior}</span>
+                              {' → '}
+                              <b>{valorNovo}</b>
+                            </td>
+                            <td>{motivoTexto}</td>
+                          </tr>
+                        );
+                      })}
                     </tbody>
                   </table>
                 </div>
