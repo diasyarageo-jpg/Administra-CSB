@@ -3,6 +3,7 @@ import tailwindcss from '@tailwindcss/vite';
 import react from '@vitejs/plugin-react';
 import path from 'path';
 import { defineConfig, loadEnv, Plugin } from 'vite';
+import { createPrivatePathGuardMiddleware } from './src/server/privatePathGuard.ts';
 
 function cleanEnvString(raw: unknown): string {
   return String(raw || '')
@@ -101,13 +102,18 @@ function apiDevPlugin(): Plugin {
   return {
     name: 'api-dev-middleware',
     configureServer(server) {
+      server.middlewares.use(createPrivatePathGuardMiddleware({ isPreview: false }));
       registerApiMiddlewares(server.middlewares, file => server.ssrLoadModule(file));
     },
     async configurePreviewServer(server) {
+      server.middlewares.use(createPrivatePathGuardMiddleware({ isPreview: true }));
       const { createServer } = await import('vite');
       const loaderServer = await createServer({
-        server: { middlewareMode: true },
+        server: { middlewareMode: true, watch: null },
         appType: 'custom'
+      });
+      server.httpServer?.once('close', () => {
+        void loaderServer.close();
       });
       registerApiMiddlewares(server.middlewares, file => loaderServer.ssrLoadModule(file));
     }
