@@ -360,29 +360,55 @@ test('Cenário 3: identifica corretamente coordenada ausente, inválida e ambíg
 // ---------------------------------------------------------------------------
 // Cenário 4 & 5 + BBOX sem dados pessoais + SEMA sem Supabase + Audit fail + RBAC
 // ---------------------------------------------------------------------------
-test('Cenário 4 e 5: /api/car-lookup trata vazio, BBOX sem dados pessoais, sem Supabase e RBAC + auditoria', async () => {
+test('Cenário 4 e 5: /api/car-lookup bloqueia sem servidor configurado (503), trata vazio, BBOX sem dados pessoais e RBAC + auditoria', async () => {
   const originalFetch = globalThis.fetch;
+  const prevUrl = process.env.SUPABASE_URL;
+  const prevViteUrl = process.env.VITE_SUPABASE_URL;
+  const prevSrv = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  delete process.env.SUPABASE_URL;
+  delete process.env.VITE_SUPABASE_URL;
+  delete process.env.SUPABASE_SERVICE_ROLE_KEY;
   resetSemaGeoserverCachesForTest();
   setTestSupabaseAdminForSemaAudit(null);
 
-  // 4A. Nenhuma feição encontrada
-  globalThis.fetch = (async (input: RequestInfo | URL) => {
-    const url = String(input);
-    if (url.includes('request=GetCapabilities')) {
-      return new Response(CAPABILITIES_CAR_XML, { status: 200 });
-    }
-    if (url.includes('request=DescribeFeatureType')) {
-      return new Response(DESCRIBE_CAR_XML, { status: 200 });
-    }
-    return new Response(JSON.stringify({ type: 'FeatureCollection', features: [] }), {
-      status: 200
-    });
-  }) as typeof fetch;
-
   try {
+    // 4.0 Sem configuração no servidor -> 503 sem nenhuma chamada externa ao GeoServer
+    let unconfiguredFetchCalls = 0;
+    globalThis.fetch = (async () => {
+      unconfiguredFetchCalls += 1;
+      return new Response('{}', { status: 200 });
+    }) as typeof fetch;
+
+    const reqUnconf = createMockReq({
+      method: 'POST',
+      headers: { authorization: 'Bearer valid-jwt' },
+      body: { lat: -14.448, lng: -56.981 }
+    });
+    const resUnconf = createMockRes();
+    await carLookupHandler(reqUnconf, resUnconf);
+    assert.equal(resUnconf.statusCode, 503);
+    assert.ok(resUnconf._body.error);
+    assert.equal(unconfiguredFetchCalls, 0);
+
+    // 4A. Nenhuma feição encontrada (Visualizador configurado)
+    const viewerMock = createSupabaseMockForSemaTests({ role: 'Visualizador' });
+    setTestSupabaseAdminForSemaAudit(viewerMock);
+    globalThis.fetch = (async (input: RequestInfo | URL) => {
+      const url = String(input);
+      if (url.includes('request=GetCapabilities')) {
+        return new Response(CAPABILITIES_CAR_XML, { status: 200 });
+      }
+      if (url.includes('request=DescribeFeatureType')) {
+        return new Response(DESCRIBE_CAR_XML, { status: 200 });
+      }
+      return new Response(JSON.stringify({ type: 'FeatureCollection', features: [] }), {
+        status: 200
+      });
+    }) as typeof fetch;
+
     const reqEmpty = createMockReq({
       method: 'POST',
-      headers: { 'x-test-auth': '1' },
+      headers: { authorization: 'Bearer valid-jwt' },
       body: { lat: -14.448, lng: -56.981, incluirProximidade: true, raioMetros: 1500 }
     });
     const resEmpty = createMockRes();
@@ -445,7 +471,7 @@ test('Cenário 4 e 5: /api/car-lookup trata vazio, BBOX sem dados pessoais, sem 
 
     const reqProx = createMockReq({
       method: 'POST',
-      headers: { 'x-test-auth': '1' },
+      headers: { authorization: 'Bearer valid-jwt' },
       body: { lat: -14.448, lng: -56.981, incluirProximidade: true, raioMetros: 1500 }
     });
     const resProx = createMockRes();
@@ -551,15 +577,15 @@ test('Cenário 4 e 5: /api/car-lookup trata vazio, BBOX sem dados pessoais, sem 
     assert.equal(resAuditFail._body.feicoes[0]._schemaMeta.cpfCnpjCompletoDisponivel, false);
     assert.notEqual(resAuditFail._body.feicoes[0].properties.CPF_CNPJ, '123.456.789-01');
 
-    // 5. SEMA indisponível (HTTP 403)
-    setTestSupabaseAdminForSemaAudit(null);
+    // 5. SEMA indisponível (HTTP 403) com servidor autenticado e configurado
+    setTestSupabaseAdminForSemaAudit(analistaMock);
     resetSemaGeoserverCachesForTest();
     globalThis.fetch = (async () =>
       new Response('Forbidden', { status: 403 })) as typeof fetch;
 
     const reqDown = createMockReq({
       method: 'POST',
-      headers: { 'x-test-auth': '1' },
+      headers: { authorization: 'Bearer valid-jwt' },
       body: { lat: -14.448, lng: -56.981 }
     });
     const resDown = createMockRes();
@@ -570,12 +596,22 @@ test('Cenário 4 e 5: /api/car-lookup trata vazio, BBOX sem dados pessoais, sem 
     setTestSupabaseAdminForSemaAudit(null);
     globalThis.fetch = originalFetch;
     resetSemaGeoserverCachesForTest();
+    if (prevUrl !== undefined) process.env.SUPABASE_URL = prevUrl;
+    if (prevViteUrl !== undefined) process.env.VITE_SUPABASE_URL = prevViteUrl;
+    if (prevSrv !== undefined) process.env.SUPABASE_SERVICE_ROLE_KEY = prevSrv;
   }
 });
 
-test('/api/sema-documentos bloqueia dado pessoal completo quando auditoria falha ou sem Supabase e exige RBAC Administrador/Analista', async () => {
+test('/api/sema-documentos falha fechado (503) sem Supabase, bloqueia dado pessoal completo quando auditoria falha e exige RBAC Administrador/Analista', async () => {
   const originalFetch = globalThis.fetch;
+  const prevUrl = process.env.SUPABASE_URL;
+  const prevViteUrl = process.env.VITE_SUPABASE_URL;
+  const prevSrv = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  delete process.env.SUPABASE_URL;
+  delete process.env.VITE_SUPABASE_URL;
+  delete process.env.SUPABASE_SERVICE_ROLE_KEY;
   resetSemaGeoserverCachesForTest();
+  setTestSupabaseAdminForSemaAudit(null);
 
   const docsCapabilitiesXml = `<?xml version="1.0" encoding="UTF-8"?>
   <wfs:WFS_Capabilities version="2.0.0" xmlns:wfs="http://www.opengis.net/wfs/2.0">
@@ -584,7 +620,9 @@ test('/api/sema-documentos bloqueia dado pessoal completo quando auditoria falha
     </FeatureTypeList>
   </wfs:WFS_Capabilities>`;
 
+  let fetchCalls = 0;
   globalThis.fetch = (async (input: RequestInfo | URL) => {
+    fetchCalls += 1;
     const url = String(input);
     if (url.includes('request=GetCapabilities')) {
       return new Response(docsCapabilitiesXml, { status: 200 });
@@ -613,6 +651,20 @@ test('/api/sema-documentos bloqueia dado pessoal completo quando auditoria falha
   }) as typeof fetch;
 
   try {
+    // Sem Supabase configurado -> 503 antes de qualquer chamada externa ao GeoServer
+    const resUnconf = createMockRes();
+    await semaDocumentosHandler(
+      createMockReq({
+        method: 'POST',
+        headers: { authorization: 'Bearer valid-jwt' },
+        body: { car: 'MT-5100009' }
+      }),
+      resUnconf
+    );
+    assert.equal(resUnconf.statusCode, 503);
+    assert.ok(resUnconf._body.error);
+    assert.equal(fetchCalls, 0);
+
     // Auditoria falhando com Administrador -> mascara dado pessoal
     const failMock = createSupabaseMockForSemaTests({ role: 'Administrador', auditFail: true });
     setTestSupabaseAdminForSemaAudit(failMock);
@@ -653,6 +705,9 @@ test('/api/sema-documentos bloqueia dado pessoal completo quando auditoria falha
     setTestSupabaseAdminForSemaAudit(null);
     globalThis.fetch = originalFetch;
     resetSemaGeoserverCachesForTest();
+    if (prevUrl !== undefined) process.env.SUPABASE_URL = prevUrl;
+    if (prevViteUrl !== undefined) process.env.VITE_SUPABASE_URL = prevViteUrl;
+    if (prevSrv !== undefined) process.env.SUPABASE_SERVICE_ROLE_KEY = prevSrv;
   }
 });
 

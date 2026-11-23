@@ -433,6 +433,12 @@ export default async function handler(
   }
 
   const authCtx = await authorizeSemaLookupRequest(req as any);
+  if (authCtx.configured !== true) {
+    res.status(503)!.json!({
+      error: 'Serviço de autenticação indisponível no servidor para consultar o Geoportal SEMA-MT.'
+    });
+    return;
+  }
   if (!authCtx.authorized) {
     res.status(authCtx.httpStatus || 401)!.json!({
       error: authCtx.error || 'Autenticação obrigatória.'

@@ -10,11 +10,14 @@ import integracoesStatusHandler from '../api/integracoes-status';
 import pendenciasHandler from '../api/pendencias';
 import solicitacoesVistoriaHandler from '../api/solicitacoesVistoria';
 import conciliacaoGravarHandler from '../api/conciliacao-gravar';
+import carLookupHandler from '../api/car-lookup';
+import semaDocumentosHandler from '../api/sema-documentos';
 import { setTestSupabaseAdminForSemaAudit } from '../src/server/semaAudit';
 import {
   createAuthService,
   validateInstitutionalProfile
 } from '../src/services/authService';
+import { handleAdminManageUserRequest } from '../supabase/functions/admin-manage-user/handler.ts';
 
 const YARA_AUTH_UID = '52f8280d-cc4c-4aad-98f6-7446da912dd1';
 const YARA_USUARIO_ID = 'usr_yara_dias_01';
@@ -796,3 +799,416 @@ test('Auth Config (/api/auth-config) e fallback de schema: suporta aliases públ
   assert.equal(loginRes.profile?.papel, 'Administrador');
   assert.equal(loginRes.profile?.situacao, 'Ativo');
 });
+
+test('Contenção /api/car-lookup e /api/sema-documentos: exige authCtx.configured === true (503) antes de corpo, banco e fetch externo, mantendo S2S bloqueada', async () => {
+  const prevUrl = process.env.SUPABASE_URL;
+  const prevViteUrl = process.env.VITE_SUPABASE_URL;
+  const prevSrv = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  const prevS2sToken = process.env.SOLICITACOES_SERVICE_TOKEN;
+  const originalFetch = globalThis.fetch;
+
+  const trapReq = (opts: { method: string; url: string; headers?: Record<string, string> }) => {
+    let streamReadStarted = false;
+    const req: any = {
+      method: opts.method,
+      url: opts.url,
+      headers: opts.headers || {},
+      on() {
+        streamReadStarted = true;
+      }
+    };
+    Object.defineProperty(req, 'body', {
+      configurable: true,
+      get() {
+        throw new Error('req.body NÃO deve ser acessado antes da validação');
+      }
+    });
+    return { req, getStreamReadStarted: () => streamReadStarted };
+  };
+
+  let externalFetchCalls = 0;
+  globalThis.fetch = (async () => {
+    externalFetchCalls += 1;
+    return new Response('{}', { status: 200 });
+  }) as typeof fetch;
+
+  try {
+    // 1. Variáveis ausentes ou parciais (URL sem SERVICE_ROLE, SERVICE_ROLE sem URL, ou ambas ausentes) -> 503 sem ler body nem chamar fetch
+    const envCases: Array<Record<string, string | undefined>> = [
+      { SUPABASE_URL: undefined, VITE_SUPABASE_URL: undefined, SUPABASE_SERVICE_ROLE_KEY: undefined },
+      { SUPABASE_URL: 'https://example.invalid', VITE_SUPABASE_URL: undefined, SUPABASE_SERVICE_ROLE_KEY: undefined },
+      { SUPABASE_URL: undefined, VITE_SUPABASE_URL: undefined, SUPABASE_SERVICE_ROLE_KEY: 'synth-service-key' }
+    ];
+
+    for (const envCase of envCases) {
+      for (const [k, v] of Object.entries(envCase)) {
+        if (v === undefined) delete process.env[k];
+        else process.env[k] = v;
+      }
+      setTestSupabaseAdminForSemaAudit(null);
+
+      for (const [handlerFn, endpoint] of [
+        [carLookupHandler, '/api/car-lookup?lat=-15.6&lng=-56.1'],
+        [semaDocumentosHandler, '/api/sema-documentos?car=MT-00001']
+      ] as const) {
+        for (const method of ['GET', 'POST'] as const) {
+          const trapped = trapReq({
+            method,
+            url: endpoint,
+            headers: {
+              authorization: 'Bearer synthetic-jwt',
+              'content-length': '256'
+            }
+          });
+          const res = createMockRes();
+          await handlerFn(trapped.req, res);
+          assert.equal(res.getStatus(), 503);
+          assert.ok(res.getBody()?.error);
+          assert.equal(trapped.getStreamReadStarted(), false);
+        }
+      }
+    }
+    assert.equal(externalFetchCalls, 0);
+
+    // 2. Com servidor configurado: rejeita 401 sem token e preserva S2S bloqueada
+    const synthUid = '00000000-0000-4000-8000-000000000021';
+    const configuredMock: any = {
+      auth: {
+        async getUser(jwt: string) {
+          if (jwt !== 'synth-valid-jwt') {
+            return { data: { user: null }, error: { message: 'Invalid JWT' } };
+          }
+          return { data: { user: { id: synthUid } }, error: null };
+        }
+      },
+      from(table: string) {
+        return {
+          select() {
+            return {
+              eq() {
+                return {
+                  async maybeSingle() {
+                    if (table !== 'usuarios') return { data: null, error: null };
+                    return {
+                      data: {
+                        id: 'usr_synth_21',
+                        auth_user_id: synthUid,
+                        papel: 'Usuário',
+                        situacao: 'Ativo',
+                        status: 'Ativo',
+                        login: 'usuario.contencao'
+                      },
+                      error: null
+                    };
+                  }
+                };
+              }
+            };
+          }
+        };
+      }
+    };
+    setTestSupabaseAdminForSemaAudit(configuredMock);
+
+    for (const [handlerFn, endpoint] of [
+      [carLookupHandler, '/api/car-lookup?lat=-15.6&lng=-56.1'],
+      [semaDocumentosHandler, '/api/sema-documentos?car=MT-00001']
+    ] as const) {
+      const trapped = trapReq({ method: 'POST', url: endpoint });
+      const res401 = createMockRes();
+      await handlerFn(trapped.req, res401);
+      assert.equal(res401.getStatus(), 401);
+      assert.equal(trapped.getStreamReadStarted(), false);
+    }
+    assert.equal(externalFetchCalls, 0);
+
+    // Rota S2S permanece bloqueada sem segredo válido mesmo com JWT autenticado
+    delete process.env.SOLICITACOES_SERVICE_TOKEN;
+    const resS2sToken = createMockRes();
+    await solicitacoesVistoriaHandler(
+      createMockReq({
+        method: 'GET',
+        url: '/api/solicitacoesVistoria',
+        headers: {
+          authorization: 'Bearer synth-valid-jwt',
+          'x-solicitacoes-service-token': 'invalid-service-token',
+          'x-sistema-origem': 'classifica'
+        }
+      }) as any,
+      resS2sToken as any
+    );
+    assert.equal(resS2sToken.getStatus(), 401);
+
+    process.env.SOLICITACOES_SERVICE_TOKEN = 'synth-configured-s2s-secret';
+    const resS2sMissingHeader = createMockRes();
+    await solicitacoesVistoriaHandler(
+      createMockReq({
+        method: 'GET',
+        url: '/api/solicitacoesVistoria',
+        headers: {
+          authorization: 'Bearer synth-valid-jwt',
+          'x-sistema-origem': 'classifica'
+        }
+      }) as any,
+      resS2sMissingHeader as any
+    );
+    assert.equal(resS2sMissingHeader.getStatus(), 403);
+  } finally {
+    setTestSupabaseAdminForSemaAudit(null);
+    globalThis.fetch = originalFetch;
+    if (prevUrl !== undefined) process.env.SUPABASE_URL = prevUrl;
+    else delete process.env.SUPABASE_URL;
+    if (prevViteUrl !== undefined) process.env.VITE_SUPABASE_URL = prevViteUrl;
+    else delete process.env.VITE_SUPABASE_URL;
+    if (prevSrv !== undefined) process.env.SUPABASE_SERVICE_ROLE_KEY = prevSrv;
+    else delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    if (prevS2sToken !== undefined) process.env.SOLICITACOES_SERVICE_TOKEN = prevS2sToken;
+    else delete process.env.SOLICITACOES_SERVICE_TOKEN;
+  }
+});
+
+test('Contenção Edge Function admin-manage-user: bloqueia request-access com 409 uniforme sem ler/gravar public.usuarios e preserva ações administrativas', async () => {
+  const synthAdminUid = '00000000-0000-4000-8000-000000000031';
+  const synthViewerUid = '00000000-0000-4000-8000-000000000032';
+  const synthApprovedAuthUid = '00000000-0000-4000-8000-000000000033';
+
+  let envGetCalls = 0;
+  let createClientCalls = 0;
+  let dbCalls = 0;
+
+  const createTrackingDeps = (envPresent: boolean) => ({
+    envGet(name: string) {
+      envGetCalls += 1;
+      if (!envPresent) return undefined;
+      if (name === 'SUPABASE_URL') return 'https://example.invalid';
+      if (name === 'SUPABASE_SERVICE_ROLE_KEY') return 'synth-service-role';
+      return undefined;
+    },
+    createSupabaseClient() {
+      createClientCalls += 1;
+      return {
+        auth: {
+          async getUser(jwt: string) {
+            if (jwt === 'synth-admin-jwt') {
+              return { data: { user: { id: synthAdminUid } }, error: null };
+            }
+            if (jwt === 'synth-viewer-jwt') {
+              return { data: { user: { id: synthViewerUid } }, error: null };
+            }
+            return { data: { user: null }, error: { message: 'Invalid JWT' } };
+          },
+          admin: {
+            async listUsers() {
+              return {
+                data: { users: [{ id: synthApprovedAuthUid, email: 'alvo.synth@example.invalid', user_metadata: {} }] },
+                error: null
+              };
+            },
+            async updateUserById(id: string) {
+              assert.equal(id, synthApprovedAuthUid);
+              return { error: null };
+            },
+            async inviteUserByEmail() {
+              return { data: { user: { id: synthApprovedAuthUid } }, error: null };
+            },
+            async createUser() {
+              return { data: { user: { id: synthApprovedAuthUid } }, error: null };
+            }
+          }
+        },
+        from(table: string) {
+          dbCalls += 1;
+          assert.equal(table, 'usuarios');
+          return {
+            select() {
+              const chain: any = {
+                eq(col: string, val: string) {
+                  chain._filters = { ...(chain._filters || {}), [col]: val };
+                  return chain;
+                },
+                async maybeSingle() {
+                  const uid = chain._filters?.auth_user_id;
+                  if (uid === synthAdminUid) {
+                    return { data: { id: 'usr_admin_synth', papel: 'Administrador', situacao: 'Ativo' }, error: null };
+                  }
+                  if (uid === synthViewerUid) {
+                    return { data: { id: 'usr_viewer_synth', papel: 'Visualizador', situacao: 'Ativo' }, error: null };
+                  }
+                  return { data: null, error: null };
+                },
+                async single() {
+                  return {
+                    data: {
+                      id: chain._filters?.id || 'usr_target_synth',
+                      nome: 'Pessoa Sintética',
+                      matricula: '00001',
+                      email: 'alvo.synth@example.invalid',
+                      observacoes: ''
+                    },
+                    error: null
+                  };
+                }
+              };
+              return chain;
+            },
+            update(updPayload: any) {
+              return {
+                eq(col: string, val: string) {
+                  return {
+                    select() {
+                      return {
+                        async single() {
+                          return { data: { id: val, [col]: val, ...updPayload }, error: null };
+                        }
+                      };
+                    }
+                  };
+                }
+              };
+            },
+            insert(insPayload: any) {
+              return {
+                select() {
+                  return {
+                    async single() {
+                      return { data: insPayload, error: null };
+                    }
+                  };
+                }
+              };
+            }
+          };
+        }
+      };
+    }
+  });
+
+  // 1. OPTIONS preservado
+  const optRes = await handleAdminManageUserRequest(
+    new Request('https://example.invalid/admin-manage-user', { method: 'OPTIONS' }),
+    createTrackingDeps(false)
+  );
+  assert.equal(optRes.status, 200);
+
+  // 2. request-access bloqueado uniformemente com 409 (com e sem env vars, com/sem payload, ação omitida ou variantes)
+  const expectedBodies: string[] = [];
+  for (const envPresent of [false, true]) {
+    for (const bodyPayload of [
+      JSON.stringify({
+        action: 'request-access',
+        nome: 'Pessoa Sintética',
+        matricula: '00001',
+        email: 'synth@example.invalid'
+      }),
+      JSON.stringify({ action: ' REQUEST-ACCESS ' }),
+      JSON.stringify({ action: '' }),
+      JSON.stringify({}),
+      'corrupted-json'
+    ]) {
+      const res = await handleAdminManageUserRequest(
+        new Request('https://example.invalid/admin-manage-user', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: bodyPayload
+        }),
+        createTrackingDeps(envPresent)
+      );
+      assert.equal(res.status, 409);
+      const parsed = await res.json();
+      assert.equal(parsed.success, false);
+      assert.ok(parsed.error);
+      expectedBodies.push(JSON.stringify(parsed));
+    }
+  }
+  assert.equal(new Set(expectedBodies).size, 1);
+  assert.equal(envGetCalls, 0);
+  assert.equal(createClientCalls, 0);
+  assert.equal(dbCalls, 0);
+
+  // 3. Ações administrativas continuam exigindo env (500), JWT (401), papel Administrador ativo (403) e funcionando (200)
+  const missingEnvRes = await handleAdminManageUserRequest(
+    new Request('https://example.invalid/admin-manage-user', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'approve-user', usuarioId: 'usr_target_synth', papel: 'Usuário' })
+    }),
+    createTrackingDeps(false)
+  );
+  assert.equal(missingEnvRes.status, 500);
+  assert.equal(dbCalls, 0);
+
+  const noAuthRes = await handleAdminManageUserRequest(
+    new Request('https://example.invalid/admin-manage-user', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'approve-user', usuarioId: 'usr_target_synth', papel: 'Usuário' })
+    }),
+    createTrackingDeps(true)
+  );
+  assert.equal(noAuthRes.status, 401);
+  assert.equal(dbCalls, 0);
+
+  const nonAdminRes = await handleAdminManageUserRequest(
+    new Request('https://example.invalid/admin-manage-user', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer synth-viewer-jwt'
+      },
+      body: JSON.stringify({ action: 'approve-user', usuarioId: 'usr_target_synth', papel: 'Usuário' })
+    }),
+    createTrackingDeps(true)
+  );
+  assert.equal(nonAdminRes.status, 403);
+
+  const approveOkRes = await handleAdminManageUserRequest(
+    new Request('https://example.invalid/admin-manage-user', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer synth-admin-jwt'
+      },
+      body: JSON.stringify({ action: 'approve-user', usuarioId: 'usr_target_synth', papel: 'Usuário' })
+    }),
+    createTrackingDeps(true)
+  );
+  assert.equal(approveOkRes.status, 200);
+  const approveJson = await approveOkRes.json();
+  assert.equal(approveJson.success, true);
+
+  const rejectOkRes = await handleAdminManageUserRequest(
+    new Request('https://example.invalid/admin-manage-user', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer synth-admin-jwt'
+      },
+      body: JSON.stringify({ action: 'reject-user', usuarioId: 'usr_target_synth', motivo: 'Teste sintético' })
+    }),
+    createTrackingDeps(true)
+  );
+  assert.equal(rejectOkRes.status, 200);
+  const rejectJson = await rejectOkRes.json();
+  assert.equal(rejectJson.success, true);
+
+  const createOkRes = await handleAdminManageUserRequest(
+    new Request('https://example.invalid/admin-manage-user', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer synth-admin-jwt'
+      },
+      body: JSON.stringify({
+        action: 'create-user',
+        nome: 'Novo Usuário Sintético',
+        email: 'novo.synth@example.invalid',
+        papel: 'Usuário'
+      })
+    }),
+    createTrackingDeps(true)
+  );
+  assert.equal(createOkRes.status, 200);
+  const createJson = await createOkRes.json();
+  assert.equal(createJson.success, true);
+});
+

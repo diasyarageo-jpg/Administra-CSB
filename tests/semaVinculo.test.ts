@@ -83,6 +83,48 @@ function createMockRes() {
   return res;
 }
 
+function createConfiguredSemaAuthMock(role: 'Usuário' | 'Analista' | 'Administrador' = 'Usuário'): any {
+  const synthUid = '00000000-0000-4000-8000-000000000010';
+  return {
+    auth: {
+      async getUser(token: string) {
+        if (token !== 'synthetic-jwt-token') {
+          return { data: { user: null }, error: { message: 'Invalid JWT' } };
+        }
+        return { data: { user: { id: synthUid } }, error: null };
+      }
+    },
+    from(table: string) {
+      return {
+        select() {
+          return {
+            eq() {
+              return {
+                async maybeSingle() {
+                  if (table !== 'usuarios') return { data: null, error: null };
+                  return {
+                    data: {
+                      id: 'usr_synth_10',
+                      papel: role,
+                      situacao: 'Ativo',
+                      status: 'Ativo',
+                      auth_user_id: synthUid
+                    },
+                    error: null
+                  };
+                }
+              };
+            }
+          };
+        }
+      };
+    },
+    async rpc() {
+      return { data: '00000000-0000-4000-8000-000000000099', error: null };
+    }
+  };
+}
+
 test('Cenário 1 e 12: Deduplicação de CAR e barragens correspondentes (destaca sem repetir)', () => {
   const barragens = [
     { id: 'barr_1', nome: 'Barragem Sem Dono', car: 'MT47798/2017', municipio: 'Sorriso' },
@@ -382,19 +424,22 @@ test('Cenário 10: Sanitização de storage e payload de auditoria sem exposiç�
 });
 
 test('Cenário 10 e 11: API /api/sema-documentos bloqueia CPF/CNPJ em GET e valida atributos por DescribeFeatureType', async () => {
-  // 1. GET com cpfCnpj na URL deve retornar 400
-  const reqGet = createMockReq({
-    method: 'GET',
-    url: '/api/sema-documentos?cpfCnpj=12345678901',
-    query: { cpfCnpj: '12345678901' }
-  });
-  const resGet = createMockRes();
-  await semaDocumentosHandler(reqGet, resGet);
-  assert.equal(resGet.getStatus(), 400);
-
-  // 2. Mock de fetch para testar validação por DescribeFeatureType e camada indisponível
+  setTestSupabaseAdminForSemaAudit(createConfiguredSemaAuthMock('Usuário'));
   const originalFetch = globalThis.fetch;
+
   try {
+    // 1. GET com cpfCnpj na URL deve retornar 400
+    const reqGet = createMockReq({
+      method: 'GET',
+      url: '/api/sema-documentos?cpfCnpj=12345678901',
+      query: { cpfCnpj: '12345678901' },
+      headers: { authorization: 'Bearer synthetic-jwt-token' }
+    });
+    const resGet = createMockRes();
+    await semaDocumentosHandler(reqGet, resGet);
+    assert.equal(resGet.getStatus(), 400);
+
+    // 2. Mock de fetch para testar validação por DescribeFeatureType e camada indisponível
     globalThis.fetch = (async (input: any) => {
       const urlStr = String(input);
       if (urlStr.includes('request=GetCapabilities') && urlStr.includes('service=WFS')) {
@@ -445,7 +490,8 @@ test('Cenário 10 e 11: API /api/sema-documentos bloqueia CPF/CNPJ em GET e vali
     const reqCoord = createMockReq({
       method: 'GET',
       url: '/api/car-lookup?lat=-15.6&lng=-56.1',
-      query: { lat: '-15.6', lng: '-56.1' }
+      query: { lat: '-15.6', lng: '-56.1' },
+      headers: { authorization: 'Bearer synthetic-jwt-token' }
     });
     const resCoord = createMockRes();
     await carLookupHandler(reqCoord, resCoord);
@@ -470,6 +516,7 @@ test('Cenário 10 e 11: API /api/sema-documentos bloqueia CPF/CNPJ em GET e vali
     const reqDocs = createMockReq({
       method: 'POST',
       url: '/api/sema-documentos',
+      headers: { authorization: 'Bearer synthetic-jwt-token' },
       body: { car: 'MT47798/2017' }
     });
     const resDocs = createMockRes();
@@ -486,6 +533,7 @@ test('Cenário 10 e 11: API /api/sema-documentos bloqueia CPF/CNPJ em GET e vali
       true
     );
   } finally {
+    setTestSupabaseAdminForSemaAudit(null);
     globalThis.fetch = originalFetch;
   }
 });
@@ -520,6 +568,7 @@ test('Cenário 10 e 12: Preservação de processo/protocolo de 11 dígitos na sa
   assert.deepEqual(emptyGrouped.otherDocs, []);
 
   // Consulta API sem resultados retorna sucesso=true com listas vazias
+  setTestSupabaseAdminForSemaAudit(createConfiguredSemaAuthMock('Usuário'));
   const originalFetch = globalThis.fetch;
   try {
     globalThis.fetch = (async (input: any) => {
@@ -548,7 +597,8 @@ test('Cenário 10 e 12: Preservação de processo/protocolo de 11 dígitos na sa
     const reqCoordEmpty = createMockReq({
       method: 'GET',
       url: '/api/car-lookup?lat=-15.6&lng=-56.1',
-      query: { lat: '-15.6', lng: '-56.1' }
+      query: { lat: '-15.6', lng: '-56.1' },
+      headers: { authorization: 'Bearer synthetic-jwt-token' }
     });
     const resCoordEmpty = createMockRes();
     await carLookupHandler(reqCoordEmpty, resCoordEmpty);
@@ -559,6 +609,7 @@ test('Cenário 10 e 12: Preservação de processo/protocolo de 11 dígitos na sa
     const reqDocsEmpty = createMockReq({
       method: 'POST',
       url: '/api/sema-documentos',
+      headers: { authorization: 'Bearer synthetic-jwt-token' },
       body: { car: 'MT00000/2099' }
     });
     const resDocsEmpty = createMockRes();
@@ -567,6 +618,7 @@ test('Cenário 10 e 12: Preservação de processo/protocolo de 11 dígitos na sa
     assert.equal(resDocsEmpty.getBody().sucesso, true);
     assert.deepEqual(resDocsEmpty.getBody().carImoveis, []);
   } finally {
+    setTestSupabaseAdminForSemaAudit(null);
     globalThis.fetch = originalFetch;
   }
 });
@@ -807,7 +859,7 @@ test('Cenário 14: Bloqueia aceite sem auditoriaId UUID válido e rejeita cpf_cn
 test('Cenário 15: Resiliência contra HTTP 403 no GetCapabilities, GET cql_filter (POST XML fallback) e proxy POST->GET', async () => {
   const originalFetch = globalThis.fetch;
   resetSemaGeoserverCachesForTest();
-  setTestSupabaseAdminForSemaAudit(null);
+  setTestSupabaseAdminForSemaAudit(createConfiguredSemaAuthMock('Usuário'));
 
   try {
     // 1. GeoServer bloqueando GetCapabilities (403) e GET GetFeature com cql_filter (403),
@@ -863,6 +915,7 @@ test('Cenário 15: Resiliência contra HTTP 403 no GetCapabilities, GET cql_filt
     const reqResilient = createMockReq({
       method: 'POST',
       url: '/api/sema-documentos',
+      headers: { authorization: 'Bearer synthetic-jwt-token' },
       body: { car: 'MT55555/2024' }
     });
     const resResilient = createMockRes();
@@ -927,6 +980,7 @@ test('Cenário 15: Resiliência contra HTTP 403 no GetCapabilities, GET cql_filt
     assert.equal(seenUrls.some(u => u.startsWith('POST /api/sema-documentos')), true);
     assert.equal(seenUrls.some(u => u.startsWith('GET /api/sema-documentos')), true);
   } finally {
+    setTestSupabaseAdminForSemaAudit(null);
     resetSemaGeoserverCachesForTest();
     globalThis.fetch = originalFetch;
   }

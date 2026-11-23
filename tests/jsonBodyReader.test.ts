@@ -276,19 +276,45 @@ test('readJsonObjectBody aplica timeout com finish idempotente e rejeita mock se
   );
 });
 
-test('/api/car-lookup mantém autenticação antes da leitura do corpo, usa 16 KiB, { error }, corpo vazio {} e não acessa req.body', async () => {
+test('/api/car-lookup mantém autenticação antes da leitura do corpo, falha fechado (503) sem servidor configurado, usa 16 KiB, { error }, corpo vazio {} e não acessa req.body', async () => {
+  const prevUrl = process.env.SUPABASE_URL;
+  const prevViteUrl = process.env.VITE_SUPABASE_URL;
+  const prevSrv = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  delete process.env.SUPABASE_URL;
+  delete process.env.VITE_SUPABASE_URL;
+  delete process.env.SUPABASE_SERVICE_ROLE_KEY;
   setTestSupabaseAdminForSemaAudit(null);
 
-  // 1. Sem auth configurada no modo teste (authCtx.authorized=true sem Supabase) vs com Supabase configurado (401 antes de ler body)
-  const mockAuthSupabase: any = {
-    auth: {
-      async getUser() {
-        return { data: { user: null }, error: { message: 'Invalid JWT' } };
-      }
-    }
-  };
-  setTestSupabaseAdminForSemaAudit(mockAuthSupabase);
   try {
+    // 0. Sem configuração no servidor -> 503 antes de ler stream ou req.body
+    let streamReadStartedUnconfigured = false;
+    const unconfReq = createBodyTrapReq({
+      method: 'POST',
+      url: '/api/car-lookup',
+      headers: {
+        authorization: 'Bearer any-jwt',
+        'content-length': '999999'
+      },
+      on() {
+        streamReadStartedUnconfigured = true;
+      }
+    });
+    const unconfRes = createMockRes();
+    await carLookupHandler(unconfReq, unconfRes);
+    assert.equal(unconfRes.getStatus(), 503);
+    assert.equal(streamReadStartedUnconfigured, false);
+    assert.ok(unconfRes.getBody().error);
+
+    // 1. Com Supabase configurado e JWT ausente/inválido -> 401 antes de ler body
+    const mockAuthSupabase: any = {
+      auth: {
+        async getUser() {
+          return { data: { user: null }, error: { message: 'Invalid JWT' } };
+        }
+      }
+    };
+    setTestSupabaseAdminForSemaAudit(mockAuthSupabase);
+
     let streamReadStarted = false;
     const unauthReq = createBodyTrapReq({
       method: 'POST',
@@ -303,59 +329,106 @@ test('/api/car-lookup mantém autenticação antes da leitura do corpo, usa 16 K
     assert.equal(unauthRes.getStatus(), 401);
     assert.equal(streamReadStarted, false);
     assert.ok(unauthRes.getBody().error);
+
+    // Cliente configurado com usuário ativo para testar regras de corpo
+    const syntheticUid = '00000000-0000-4000-8000-000000000001';
+    const mockValidSupabase: any = {
+      auth: {
+        async getUser(jwt: string) {
+          if (jwt !== 'synthetic-valid-jwt') {
+            return { data: { user: null }, error: { message: 'Invalid JWT' } };
+          }
+          return { data: { user: { id: syntheticUid } }, error: null };
+        }
+      },
+      from(table: string) {
+        return {
+          select() {
+            return {
+              eq() {
+                return {
+                  async maybeSingle() {
+                    if (table !== 'usuarios') return { data: null, error: null };
+                    return {
+                      data: {
+                        id: 'usr_synth_01',
+                        auth_user_id: syntheticUid,
+                        papel: 'Usuário',
+                        situacao: 'Ativo',
+                        status: 'Ativo',
+                        login: 'usuario.teste',
+                        nome: 'Usuario Teste'
+                      },
+                      error: null
+                    };
+                  }
+                };
+              }
+            };
+          }
+        };
+      }
+    };
+    setTestSupabaseAdminForSemaAudit(mockValidSupabase);
+
+    // 2. Content-Length acima de 16 KiB -> 413 { error }
+    const resOverCl = createMockRes();
+    await carLookupHandler(
+      createBodyTrapReq({
+        method: 'POST',
+        url: '/api/car-lookup',
+        headers: {
+          authorization: 'Bearer synthetic-valid-jwt',
+          'content-length': String(16 * 1024 + 1)
+        },
+        on() {}
+      }),
+      resOverCl
+    );
+    assert.equal(resOverCl.getStatus(), 413);
+    assert.equal(resOverCl.getBody().error, 'Requisição excede o tamanho máximo permitido.');
+
+    // 3. Array JSON -> 400 { error }
+    const arrReq = createBodyTrapReq(new PassThrough());
+    arrReq.method = 'POST';
+    arrReq.url = '/api/car-lookup';
+    arrReq.headers = { authorization: 'Bearer synthetic-valid-jwt' };
+    arrReq.end(Buffer.from('[{"lat":-15.6,"lng":-56.1}]', 'utf8'));
+    const resArr = createMockRes();
+    await carLookupHandler(arrReq, resArr);
+    assert.equal(resArr.getStatus(), 400);
+    assert.equal(resArr.getBody().error, 'Dados de consulta inválidos.');
+
+    // 4. Corpo vazio vira {} e cai na validação padrão de coordenadas (400 { error })
+    const emptyReq = createBodyTrapReq(new PassThrough());
+    emptyReq.method = 'POST';
+    emptyReq.url = '/api/car-lookup';
+    emptyReq.headers = { authorization: 'Bearer synthetic-valid-jwt' };
+    emptyReq.end(Buffer.alloc(0));
+    const resEmpty = createMockRes();
+    await carLookupHandler(emptyReq, resEmpty);
+    assert.equal(resEmpty.getStatus(), 400);
+    assert.match(String(resEmpty.getBody().error), /Parâmetros "lat" e "lng" são obrigatórios/i);
+
+    // 5. Mock sem .on -> 400 { error } sem TypeError e sem tocar req.body
+    const resNoOn = createMockRes();
+    await carLookupHandler(
+      createBodyTrapReq({
+        method: 'POST',
+        url: '/api/car-lookup',
+        headers: { authorization: 'Bearer synthetic-valid-jwt' }
+      }),
+      resNoOn
+    );
+    assert.equal(resNoOn.getStatus(), 400);
+    assert.ok(resNoOn.getBody().error);
+    assert.doesNotMatch(String(resNoOn.getBody().error), /req\.on is not a function/i);
   } finally {
     setTestSupabaseAdminForSemaAudit(null);
+    if (prevUrl !== undefined) process.env.SUPABASE_URL = prevUrl;
+    if (prevViteUrl !== undefined) process.env.VITE_SUPABASE_URL = prevViteUrl;
+    if (prevSrv !== undefined) process.env.SUPABASE_SERVICE_ROLE_KEY = prevSrv;
   }
-
-  // 2. Content-Length acima de 16 KiB -> 413 { error }
-  const resOverCl = createMockRes();
-  await carLookupHandler(
-    createBodyTrapReq({
-      method: 'POST',
-      url: '/api/car-lookup',
-      headers: { 'content-length': String(16 * 1024 + 1) },
-      on() {}
-    }),
-    resOverCl
-  );
-  assert.equal(resOverCl.getStatus(), 413);
-  assert.equal(resOverCl.getBody().error, 'Requisição excede o tamanho máximo permitido.');
-
-  // 3. Array JSON -> 400 { error }
-  const arrReq = createBodyTrapReq(new PassThrough());
-  arrReq.method = 'POST';
-  arrReq.url = '/api/car-lookup';
-  arrReq.headers = {};
-  arrReq.end(Buffer.from('[{"lat":-15.6,"lng":-56.1}]', 'utf8'));
-  const resArr = createMockRes();
-  await carLookupHandler(arrReq, resArr);
-  assert.equal(resArr.getStatus(), 400);
-  assert.equal(resArr.getBody().error, 'Dados de consulta inválidos.');
-
-  // 4. Corpo vazio vira {} e cai na validação padrão de coordenadas (400 { error })
-  const emptyReq = createBodyTrapReq(new PassThrough());
-  emptyReq.method = 'POST';
-  emptyReq.url = '/api/car-lookup';
-  emptyReq.headers = {};
-  emptyReq.end(Buffer.alloc(0));
-  const resEmpty = createMockRes();
-  await carLookupHandler(emptyReq, resEmpty);
-  assert.equal(resEmpty.getStatus(), 400);
-  assert.match(String(resEmpty.getBody().error), /Parâmetros "lat" e "lng" são obrigatórios/i);
-
-  // 5. Mock sem .on -> 400 { error } sem TypeError e sem tocar req.body
-  const resNoOn = createMockRes();
-  await carLookupHandler(
-    createBodyTrapReq({
-      method: 'POST',
-      url: '/api/car-lookup',
-      headers: {}
-    }),
-    resNoOn
-  );
-  assert.equal(resNoOn.getStatus(), 400);
-  assert.ok(resNoOn.getBody().error);
-  assert.doesNotMatch(String(resNoOn.getBody().error), /req\.on is not a function/i);
 });
 
 test('readJsonObjectBody não lança exceção não capturada se stream emitir error após rejeição 413', async () => {
