@@ -975,6 +975,8 @@ test('Contenção Edge Function admin-manage-user: bloqueia request-access com 4
   let envGetCalls = 0;
   let createClientCalls = 0;
   let dbCalls = 0;
+  const updatePayloads: Record<string, any>[] = [];
+  const insertPayloads: Record<string, any>[] = [];
 
   const createTrackingDeps = (envPresent: boolean) => ({
     envGet(name: string) {
@@ -1052,6 +1054,7 @@ test('Contenção Edge Function admin-manage-user: bloqueia request-access com 4
               return chain;
             },
             update(updPayload: any) {
+              updatePayloads.push(updPayload);
               return {
                 eq(col: string, val: string) {
                   return {
@@ -1067,6 +1070,7 @@ test('Contenção Edge Function admin-manage-user: bloqueia request-access com 4
               };
             },
             insert(insPayload: any) {
+              insertPayloads.push(insPayload);
               return {
                 select() {
                   return {
@@ -1176,6 +1180,35 @@ test('Contenção Edge Function admin-manage-user: bloqueia request-access com 4
   const approveJson = await approveOkRes.json();
   assert.equal(approveJson.success, true);
 
+  const approveAnalistaRes = await handleAdminManageUserRequest(
+    new Request('https://example.invalid/admin-manage-user', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer synth-admin-jwt'
+      },
+      body: JSON.stringify({ action: 'approve-user', usuarioId: 'usr_target_synth', papel: 'Analista' })
+    }),
+    createTrackingDeps(true)
+  );
+  assert.equal(approveAnalistaRes.status, 200);
+  const approveAnalistaJson = await approveAnalistaRes.json();
+  assert.equal(approveAnalistaJson.success, true);
+  assert.equal(approveAnalistaJson.usuarioRecord?.papel, 'Analista');
+
+  const approveInvalidRoleRes = await handleAdminManageUserRequest(
+    new Request('https://example.invalid/admin-manage-user', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer synth-admin-jwt'
+      },
+      body: JSON.stringify({ action: 'approve-user', usuarioId: 'usr_target_synth', papel: 'PapelInexistente' })
+    }),
+    createTrackingDeps(true)
+  );
+  assert.equal(approveInvalidRoleRes.status, 400);
+
   const rejectOkRes = await handleAdminManageUserRequest(
     new Request('https://example.invalid/admin-manage-user', {
       method: 'POST',
@@ -1190,6 +1223,11 @@ test('Contenção Edge Function admin-manage-user: bloqueia request-access com 4
   assert.equal(rejectOkRes.status, 200);
   const rejectJson = await rejectOkRes.json();
   assert.equal(rejectJson.success, true);
+
+  assert.equal(updatePayloads.length, 3);
+  for (const updPayload of updatePayloads) {
+    assert.equal(Object.prototype.hasOwnProperty.call(updPayload, 'senha_provisoria_enc'), false);
+  }
 
   const createOkRes = await handleAdminManageUserRequest(
     new Request('https://example.invalid/admin-manage-user', {
@@ -1210,5 +1248,27 @@ test('Contenção Edge Function admin-manage-user: bloqueia request-access com 4
   assert.equal(createOkRes.status, 200);
   const createJson = await createOkRes.json();
   assert.equal(createJson.success, true);
+
+  const createAnalistaRes = await handleAdminManageUserRequest(
+    new Request('https://example.invalid/admin-manage-user', {
+      method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        Authorization: 'Bearer synth-admin-jwt'
+      },
+      body: JSON.stringify({
+        action: 'create-user',
+        nome: 'Analista Sintético',
+        email: 'analista.synth@example.invalid',
+        papel: 'Analista'
+      })
+    }),
+    createTrackingDeps(true)
+  );
+  assert.equal(createAnalistaRes.status, 200);
+  const createAnalistaJson = await createAnalistaRes.json();
+  assert.equal(createAnalistaJson.success, true);
+  assert.equal(createAnalistaJson.usuarioRecord?.papel, 'Analista');
+  assert.equal(insertPayloads.at(-1)?.papel, 'Analista');
 });
 

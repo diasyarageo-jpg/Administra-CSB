@@ -22,6 +22,8 @@ export interface AdminManageUserDeps {
   ) => any;
 }
 
+export const ALLOWED_ROLES = ['Administrador', 'Analista', 'Usuário', 'Visualizador'];
+
 function jsonResponse(data: any, status = 200): Response {
   return new Response(JSON.stringify(data), {
     status,
@@ -125,7 +127,7 @@ export async function handleAdminManageUserRequest(
       }
 
       // Validação estrita da função permitida (RBAC)
-      const allowedRoles = ['Administrador', 'Usuário', 'Visualizador'];
+      const allowedRoles = ALLOWED_ROLES;
       if (!allowedRoles.includes(papel)) {
         return jsonResponse(
           {
@@ -234,7 +236,6 @@ export async function handleAdminManageUserRequest(
           situacao: 'Ativo',
           status: 'Ativo',
           auth_user_id: authUserId,
-          senha_provisoria_enc: null,
           updated_by: callerUser.id,
           updated_at: now
         })
@@ -285,7 +286,6 @@ export async function handleAdminManageUserRequest(
         .update({
           situacao: 'Recusado',
           status: 'Inativo',
-          senha_provisoria_enc: null,
           observacoes: newObs || null,
           updated_by: callerUser.id,
           updated_at: now
@@ -326,7 +326,7 @@ export async function handleAdminManageUserRequest(
       }
 
       const emailClean = String(email).trim().toLowerCase();
-      const selectedPapel = ['Administrador', 'Usuário', 'Visualizador'].includes(papel) ? papel : 'Usuário';
+      const selectedPapel = ALLOWED_ROLES.includes(papel) ? papel : 'Usuário';
 
       // Cria convite por e-mail no Supabase Auth
       let authUserId: string | null = null;
