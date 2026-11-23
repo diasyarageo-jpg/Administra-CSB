@@ -91,7 +91,12 @@ import {
   RtsAdvancedPanel,
   UsuariosAdvancedPanel
 } from './components/AdvancedFilterPanel';
-import { getViewFromPathname, syncBrowserUrlForView } from './utils/appRoutes';
+import {
+  bindPopStateNavigation,
+  getViewFromPathname,
+  resolveAuthorizedAppView,
+  syncBrowserUrlForView
+} from './utils/appRoutes';
 
 // ============================================================================
 // NOTIFICA CSB — AVISO DE TRANSIÇÃO E ARQUITETURA DE DADOS
@@ -404,25 +409,6 @@ export default function App() {
   const [searchTerms, setSearchTerms] = useState<Record<string, string>>({});
   const [toastMessage, setToastMessage] = useState<string | null>(null);
 
-  const navigateToView = (nextView: string, options: { replace?: boolean } = {}) => {
-    const resolvedView = Object.prototype.hasOwnProperty.call(viewNames, nextView)
-      ? nextView
-      : 'home';
-    setActiveView(resolvedView);
-    setMenuOpen(false);
-    syncBrowserUrlForView(resolvedView, options);
-  };
-
-  useEffect(() => {
-    const handlePopState = () => {
-      const nextView = getViewFromPathname(window.location.pathname);
-      setActiveView(nextView);
-      setMenuOpen(false);
-    };
-    window.addEventListener('popstate', handlePopState);
-    return () => window.removeEventListener('popstate', handlePopState);
-  }, []);
-
   // Estado de Autenticação e RBAC (inicia fechado com menor privilégio)
   const [currentAuthUser, setCurrentAuthUser] = useState<any | null>(null);
   const [currentUserProfile, setCurrentUserProfile] = useState<AuthUserProfile | null>(null);
@@ -431,6 +417,42 @@ export default function App() {
   const [isAuthChecking, setIsAuthChecking] = useState(true);
   const [authConfigured, setAuthConfigured] = useState<boolean>(() => isSupabaseConfigured());
   const [authErrorNotice, setAuthErrorNotice] = useState<string | null>(null);
+
+  // Proteção fail-closed de toda a aplicação:
+  // Só renderiza telas internas quando Supabase Auth estiver configurado E houver sessão ativa
+  // com cadastro institucional Ativo e papel válido em public.usuarios (via auth_user_id).
+  const hasValidAuthenticatedAccess =
+    authConfigured &&
+    isSupabaseConfigured() &&
+    Boolean(currentAuthUser) &&
+    Boolean(currentUserProfile) &&
+    currentUserProfile?.situacao === 'Ativo' &&
+    Boolean(
+      currentUserProfile?.papel &&
+        (ALLOWED_USER_ROLES as readonly string[]).includes(currentUserProfile.papel)
+    );
+
+  const navigateToView = (nextView: string, options: { replace?: boolean } = {}) => {
+    const resolved = resolveAuthorizedAppView(nextView, {
+      userRole,
+      enforceAdminGuard: !isAuthChecking && hasValidAuthenticatedAccess
+    });
+    if (!resolved.allowed) {
+      setToastMessage('Acesso restrito: este módulo é exclusivo de Administradores.');
+      setTimeout(() => setToastMessage(null), 2800);
+      return;
+    }
+    setActiveView(resolved.view);
+    setMenuOpen(false);
+    syncBrowserUrlForView(resolved.view, options);
+  };
+
+  useEffect(() => {
+    return bindPopStateNavigation(nextView => {
+      setActiveView(nextView);
+      setMenuOpen(false);
+    });
+  }, []);
 
   // Estados para aprovação e recusa de solicitações de usuários por Administradores
   const [userToApprove, setUserToApprove] = useState<any | null>(null);
@@ -693,18 +715,22 @@ export default function App() {
 
   // Proteção de rotas administrativas (Usuários e Estrutura de Integração)
   useEffect(() => {
-    if (isAuthChecking || !currentAuthUser || currentUserProfile?.situacao !== 'Ativo') {
+    if (isAuthChecking || !hasValidAuthenticatedAccess) {
       return;
     }
-    if ((activeView === 'usuarios' || activeView === 'integracao') && userRole !== 'Administrador') {
+    const resolved = resolveAuthorizedAppView(activeView, {
+      userRole,
+      enforceAdminGuard: true
+    });
+    if (!resolved.allowed) {
       navigateToView('home', { replace: true });
       showToast('Acesso restrito: este módulo é exclusivo de Administradores.');
     }
-  }, [isAuthChecking, currentAuthUser, currentUserProfile, activeView, userRole]);
+  }, [isAuthChecking, hasValidAuthenticatedAccess, activeView, userRole]);
 
   // Normaliza URL canônica e título da página quando autenticado
   useEffect(() => {
-    if (isAuthChecking || !currentAuthUser || currentUserProfile?.situacao !== 'Ativo') {
+    if (isAuthChecking || !hasValidAuthenticatedAccess) {
       return;
     }
     if (!window.location.search && !window.location.hash) {
@@ -715,7 +741,7 @@ export default function App() {
       activeView === 'home' || !label
         ? 'Administra Barragens — CSB / SEMA-MT'
         : `${label} — Administra Barragens`;
-  }, [isAuthChecking, currentAuthUser, currentUserProfile, activeView]);
+  }, [isAuthChecking, hasValidAuthenticatedAccess, activeView]);
 
   // Consulta e sincronização de dados com Supabase:
   // EXCLUSIVAMENTE executada após autenticação válida com perfil Ativo e papel válido.
@@ -1464,20 +1490,6 @@ export default function App() {
     db.revisoes.filter((item: any) => item.situacao === 'Pendente').length +
     conciliacaoPendencias.empreendedoresSemBarragens.length +
     conciliacaoPendencias.barragensSemEmpreendedor.length;
-
-  // Proteção fail-closed de toda a aplicação:
-  // Só renderiza telas internas quando Supabase Auth estiver configurado E houver sessão ativa
-  // com cadastro institucional Ativo e papel válido em public.usuarios (via auth_user_id).
-  const hasValidAuthenticatedAccess =
-    authConfigured &&
-    isSupabaseConfigured() &&
-    Boolean(currentAuthUser) &&
-    Boolean(currentUserProfile) &&
-    currentUserProfile?.situacao === 'Ativo' &&
-    Boolean(
-      currentUserProfile?.papel &&
-        (ALLOWED_USER_ROLES as readonly string[]).includes(currentUserProfile.papel)
-    );
 
   if (!hasValidAuthenticatedAccess) {
     if (isAuthChecking) {
