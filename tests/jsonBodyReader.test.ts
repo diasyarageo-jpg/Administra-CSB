@@ -115,7 +115,7 @@ test('readJsonObjectBody decodifica UTF-8 partido entre chunks sem corromper car
   });
   assert.equal(stream.listenerCount('data'), 0);
   assert.equal(stream.listenerCount('end'), 0);
-  assert.equal(stream.listenerCount('error'), 0);
+  assert.equal(stream.listenerCount('error'), 1);
   assert.equal(stream.listenerCount('close'), 0);
 });
 
@@ -147,7 +147,7 @@ test('readJsonObjectBody aplica limite exato em bytes (16 KiB) e rejeita limite 
   );
   assert.equal(overStream.listenerCount('data'), 0);
   assert.equal(overStream.listenerCount('end'), 0);
-  assert.equal(overStream.listenerCount('error'), 0);
+  assert.equal(overStream.listenerCount('error'), 1);
   assert.equal(overStream.listenerCount('close'), 0);
 });
 
@@ -228,7 +228,7 @@ test('readJsonObjectBody trata close apenas quando req.complete === false e supo
   );
   assert.equal(abortedReq.listenerCount('data'), 0);
   assert.equal(abortedReq.listenerCount('end'), 0);
-  assert.equal(abortedReq.listenerCount('error'), 0);
+  assert.equal(abortedReq.listenerCount('error'), 1);
   assert.equal(abortedReq.listenerCount('close'), 0);
 
   // 2. close com req.complete === true não interrompe stream já completo (ex.: restoreBody da Vercel)
@@ -262,7 +262,7 @@ test('readJsonObjectBody aplica timeout com finish idempotente e rejeita mock se
   });
   assert.equal(stalledReq.listenerCount('data'), 0);
   assert.equal(stalledReq.listenerCount('end'), 0);
-  assert.equal(stalledReq.listenerCount('error'), 0);
+  assert.equal(stalledReq.listenerCount('error'), 1);
   assert.equal(stalledReq.listenerCount('close'), 0);
 
   // 2. Mock sem .on falha de forma controlada (400) e nunca lê req.body
@@ -356,4 +356,20 @@ test('/api/car-lookup mantém autenticação antes da leitura do corpo, usa 16 K
   assert.equal(resNoOn.getStatus(), 400);
   assert.ok(resNoOn.getBody().error);
   assert.doesNotMatch(String(resNoOn.getBody().error), /req\.on is not a function/i);
+});
+
+test('readJsonObjectBody não lança exceção não capturada se stream emitir error após rejeição 413', async () => {
+  const req = createBodyTrapReq(new EventEmitter());
+  const promise = readJsonObjectBody(req, { maxBytes: 16 * 1024 });
+
+  req.emit('data', Buffer.alloc(16 * 1024 + 1, 'a'));
+
+  await assert.rejects(
+    promise,
+    (err: any) => err instanceof JsonBodyReaderError && err.statusCode === 413
+  );
+
+  assert.doesNotThrow(() => {
+    req.emit('error', new Error('erro tardio após 413'));
+  });
 });

@@ -46,6 +46,8 @@ export interface ReadJsonObjectBodyOptions {
 export const DEFAULT_JSON_BODY_MAX_BYTES = 16 * 1024;
 export const DEFAULT_JSON_BODY_TIMEOUT_MS = 10_000;
 
+const noopErrorListener = () => {};
+
 function getHeaderCaseInsensitive(
   headers: Record<string, string | string[] | undefined> | undefined,
   targetName: string
@@ -175,6 +177,13 @@ export async function readJsonObjectBody(
       removeListenerSafe('end', onEnd);
       removeListenerSafe('error', onError);
       removeListenerSafe('close', onClose);
+      if (typeof req.on === 'function') {
+        try {
+          req.on('error', noopErrorListener);
+        } catch {
+          // Ignora falhas ao anexar no-op em mocks customizados
+        }
+      }
     };
 
     const finish = (err?: Error, value?: Record<string, any>) => {
