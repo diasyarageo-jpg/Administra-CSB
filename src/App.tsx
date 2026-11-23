@@ -91,6 +91,7 @@ import {
   RtsAdvancedPanel,
   UsuariosAdvancedPanel
 } from './components/AdvancedFilterPanel';
+import { getViewFromPathname, syncBrowserUrlForView } from './utils/appRoutes';
 
 // ============================================================================
 // NOTIFICA CSB — AVISO DE TRANSIÇÃO E ARQUITETURA DE DADOS
@@ -396,10 +397,31 @@ const modules: Record<string, ModuleConfig> = {
 export default function App() {
   const [db, setDb] = useState<NotificaDatabase>(() => loadNotificaDatabase());
 
-  const [activeView, setActiveView] = useState('home');
+  const [activeView, setActiveView] = useState<string>(() =>
+    typeof window !== 'undefined' ? getViewFromPathname(window.location.pathname) : 'home'
+  );
   const [menuOpen, setMenuOpen] = useState(false);
   const [searchTerms, setSearchTerms] = useState<Record<string, string>>({});
   const [toastMessage, setToastMessage] = useState<string | null>(null);
+
+  const navigateToView = (nextView: string, options: { replace?: boolean } = {}) => {
+    const resolvedView = Object.prototype.hasOwnProperty.call(viewNames, nextView)
+      ? nextView
+      : 'home';
+    setActiveView(resolvedView);
+    setMenuOpen(false);
+    syncBrowserUrlForView(resolvedView, options);
+  };
+
+  useEffect(() => {
+    const handlePopState = () => {
+      const nextView = getViewFromPathname(window.location.pathname);
+      setActiveView(nextView);
+      setMenuOpen(false);
+    };
+    window.addEventListener('popstate', handlePopState);
+    return () => window.removeEventListener('popstate', handlePopState);
+  }, []);
 
   // Estado de Autenticação e RBAC (inicia fechado com menor privilégio)
   const [currentAuthUser, setCurrentAuthUser] = useState<any | null>(null);
@@ -572,7 +594,6 @@ export default function App() {
       setCurrentAuthUser(null);
       setCurrentUserProfile(null);
       setUserRole('Visualizador');
-      setActiveView('home');
       setShowLoginModal(false);
       setModalConfig(null);
       setViewingRecord(null);
@@ -672,11 +693,29 @@ export default function App() {
 
   // Proteção de rotas administrativas (Usuários e Estrutura de Integração)
   useEffect(() => {
+    if (isAuthChecking || !currentAuthUser || currentUserProfile?.situacao !== 'Ativo') {
+      return;
+    }
     if ((activeView === 'usuarios' || activeView === 'integracao') && userRole !== 'Administrador') {
-      setActiveView('home');
+      navigateToView('home', { replace: true });
       showToast('Acesso restrito: este módulo é exclusivo de Administradores.');
     }
-  }, [activeView, userRole]);
+  }, [isAuthChecking, currentAuthUser, currentUserProfile, activeView, userRole]);
+
+  // Normaliza URL canônica e título da página quando autenticado
+  useEffect(() => {
+    if (isAuthChecking || !currentAuthUser || currentUserProfile?.situacao !== 'Ativo') {
+      return;
+    }
+    if (!window.location.search && !window.location.hash) {
+      syncBrowserUrlForView(activeView, { replace: true });
+    }
+    const label = viewNames[activeView];
+    document.title =
+      activeView === 'home' || !label
+        ? 'Administra Barragens — CSB / SEMA-MT'
+        : `${label} — Administra Barragens`;
+  }, [isAuthChecking, currentAuthUser, currentUserProfile, activeView]);
 
   // Consulta e sincronização de dados com Supabase:
   // EXCLUSIVAMENTE executada após autenticação válida com perfil Ativo e papel válido.
@@ -1550,10 +1589,7 @@ export default function App() {
           <div className="nav-label">Visão geral</div>
           <button
             className={`navbtn ${activeView === 'home' ? 'active' : ''}`}
-            onClick={() => {
-              setActiveView('home');
-              setMenuOpen(false);
-            }}
+            onClick={() => navigateToView('home')}
           >
             <span className="nav-ico">◫</span>Painel de Controle
           </button>
@@ -1561,37 +1597,25 @@ export default function App() {
           <div className="nav-label">Cadastros centrais</div>
           <button
             className={`navbtn ${activeView === 'empreendedores' ? 'active' : ''}`}
-            onClick={() => {
-              setActiveView('empreendedores');
-              setMenuOpen(false);
-            }}
+            onClick={() => navigateToView('empreendedores')}
           >
             <span className="nav-ico">◉</span>Empreendedores
           </button>
           <button
             className={`navbtn ${activeView === 'barragens' ? 'active' : ''}`}
-            onClick={() => {
-              setActiveView('barragens');
-              setMenuOpen(false);
-            }}
+            onClick={() => navigateToView('barragens')}
           >
             <span className="nav-ico">▤</span>Barragens cadastradas
           </button>
           <button
             className={`navbtn ${activeView === 'rts' ? 'active' : ''}`}
-            onClick={() => {
-              setActiveView('rts');
-              setMenuOpen(false);
-            }}
+            onClick={() => navigateToView('rts')}
           >
             <span className="nav-ico">⌘</span>Responsáveis Técnicos
           </button>
           <button
             className={`navbtn ${activeView === 'revisoes' ? 'active' : ''}`}
-            onClick={() => {
-              setActiveView('revisoes');
-              setMenuOpen(false);
-            }}
+            onClick={() => navigateToView('revisoes')}
           >
             <span className="nav-ico">⇄</span>Conciliação de cadastros{' '}
             <span className="badge amber" style={{ marginLeft: 'auto' }}>
@@ -1602,46 +1626,31 @@ export default function App() {
           <div className="nav-label">Gestão de trabalho</div>
           <button
             className={`navbtn ${activeView === 'produtividade' ? 'active' : ''}`}
-            onClick={() => {
-              setActiveView('produtividade');
-              setMenuOpen(false);
-            }}
+            onClick={() => navigateToView('produtividade')}
           >
             <span className="nav-ico">▥</span>Produtividade
           </button>
           <button
             className={`navbtn ${activeView === 'portarias' ? 'active' : ''}`}
-            onClick={() => {
-              setActiveView('portarias');
-              setMenuOpen(false);
-            }}
+            onClick={() => navigateToView('portarias')}
           >
             <span className="nav-ico">▣</span>Portarias
           </button>
           <button
             className={`navbtn ${activeView === 'pendencias' ? 'active' : ''}`}
-            onClick={() => {
-              setActiveView('pendencias');
-              setMenuOpen(false);
-            }}
+            onClick={() => navigateToView('pendencias')}
           >
             <span className="nav-ico">⚑</span>Pendências
           </button>
           <button
             className={`navbtn ${activeView === 'solicitacoes_vistoria' ? 'active' : ''}`}
-            onClick={() => {
-              setActiveView('solicitacoes_vistoria');
-              setMenuOpen(false);
-            }}
+            onClick={() => navigateToView('solicitacoes_vistoria')}
           >
             <span className="nav-ico">◈</span>Solicitações de Vistoria
           </button>
           <button
             className={`navbtn ${activeView === 'documentos' ? 'active' : ''}`}
-            onClick={() => {
-              setActiveView('documentos');
-              setMenuOpen(false);
-            }}
+            onClick={() => navigateToView('documentos')}
           >
             <span className="nav-ico">▤</span>Documentos
           </button>
@@ -1651,19 +1660,13 @@ export default function App() {
             <>
               <button
                 className={`navbtn ${activeView === 'usuarios' ? 'active' : ''}`}
-                onClick={() => {
-                  setActiveView('usuarios');
-                  setMenuOpen(false);
-                }}
+                onClick={() => navigateToView('usuarios')}
               >
                 <span className="nav-ico">♙</span>Usuários
               </button>
               <button
                 className={`navbtn ${activeView === 'integracao' ? 'active' : ''}`}
-                onClick={() => {
-                  setActiveView('integracao');
-                  setMenuOpen(false);
-                }}
+                onClick={() => navigateToView('integracao')}
               >
                 <span className="nav-ico">⛓</span>Estrutura de integração
               </button>
@@ -1671,10 +1674,7 @@ export default function App() {
           )}
           <button
             className={`navbtn ${activeView === 'referencias' ? 'active' : ''}`}
-            onClick={() => {
-              setActiveView('referencias');
-              setMenuOpen(false);
-            }}
+            onClick={() => navigateToView('referencias')}
           >
             <span className="nav-ico">⌖</span>Referências centrais
           </button>
@@ -1710,7 +1710,7 @@ export default function App() {
               <span
                 className="local-pill"
                 style={{ background: '#ecfdf5', color: '#047857', borderColor: '#a7f3d0', cursor: 'pointer' }}
-                onClick={() => setActiveView('integracao')}
+                onClick={() => navigateToView('integracao')}
                 title={supabaseStatus.message}
               >
                 <i style={{ background: '#10b981' }} /> BASE CENTRAL<span className="pill-detail"> CONECTADA ({supabaseStatus.latencyMs}ms)</span>
@@ -1719,7 +1719,7 @@ export default function App() {
               <span
                 className="local-pill"
                 style={{ background: '#fffbeb', color: '#b45309', borderColor: '#fde68a', cursor: 'pointer' }}
-                onClick={() => setActiveView('integracao')}
+                onClick={() => navigateToView('integracao')}
                 title={supabaseStatus.message}
               >
                 <i style={{ background: '#f59e0b' }} /> BASE CENTRAL<span className="pill-detail"> LOCAL / OFFLINE</span>
@@ -1727,7 +1727,7 @@ export default function App() {
             ) : (
               <span
                 className="local-pill"
-                onClick={() => setActiveView('integracao')}
+                onClick={() => navigateToView('integracao')}
                 style={{ cursor: 'pointer' }}
                 title="Armazenamento local no navegador. Clique para ver detalhes da base central."
               >
@@ -1771,7 +1771,8 @@ export default function App() {
                   setCurrentAuthUser(null);
                   setCurrentUserProfile(null);
                   setUserRole('Visualizador');
-                  setActiveView('home');
+                  navigateToView('home', { replace: true });
+                  document.title = 'Administra Barragens — CSB / SEMA-MT';
                   setAuthErrorNotice(null);
                   setShowLoginModal(false);
                 }}
@@ -1798,7 +1799,7 @@ export default function App() {
                 </div>
                 {userRole === 'Administrador' && (
                   <div className="actions">
-                    <button className="btn light" onClick={() => setActiveView('integracao')}>
+                    <button className="btn light" onClick={() => navigateToView('integracao')}>
                       Estrutura de integração
                     </button>
                   </div>
@@ -1857,7 +1858,7 @@ export default function App() {
                     <button
                       className="rowcard"
                       style={{ width: '100%', textAlign: 'left' }}
-                      onClick={() => setActiveView('empreendedores')}
+                      onClick={() => navigateToView('empreendedores')}
                     >
                       <span>
                         <b style={{ display: 'block', color: '#172338', fontSize: '11px' }}>
@@ -1873,7 +1874,7 @@ export default function App() {
                     <button
                       className="rowcard"
                       style={{ width: '100%', textAlign: 'left' }}
-                      onClick={() => setActiveView('barragens')}
+                      onClick={() => navigateToView('barragens')}
                     >
                       <span>
                         <b style={{ display: 'block', color: '#172338', fontSize: '11px' }}>
@@ -1889,7 +1890,7 @@ export default function App() {
                     <button
                       className="rowcard"
                       style={{ width: '100%', textAlign: 'left' }}
-                      onClick={() => setActiveView('rts')}
+                      onClick={() => navigateToView('rts')}
                     >
                       <span>
                         <b style={{ display: 'block', color: '#172338', fontSize: '11px' }}>
@@ -1930,7 +1931,7 @@ export default function App() {
                     <button
                       className="rowcard"
                       style={{ width: '100%', textAlign: 'left' }}
-                      onClick={() => setActiveView('produtividade')}
+                      onClick={() => navigateToView('produtividade')}
                     >
                       <span>
                         <b style={{ display: 'block', color: '#172338', fontSize: '11px' }}>
@@ -1945,7 +1946,7 @@ export default function App() {
                     <button
                       className="rowcard"
                       style={{ width: '100%', textAlign: 'left' }}
-                      onClick={() => setActiveView('portarias')}
+                      onClick={() => navigateToView('portarias')}
                     >
                       <span>
                         <b style={{ display: 'block', color: '#172338', fontSize: '11px' }}>
@@ -1972,7 +1973,7 @@ export default function App() {
                     </p>
                     <button
                       className="btn soft small"
-                      onClick={() => setActiveView('referencias')}
+                      onClick={() => navigateToView('referencias')}
                     >
                       Ver estrutura das referências
                     </button>
@@ -2664,8 +2665,7 @@ export default function App() {
                                               const draft = buildBarragemSolicitacaoDraft(record, db.empreendedores);
                                               setViewingRecord(null);
                                               setPendingVistoriaDraft(draft);
-                                              setActiveView('solicitacoes_vistoria');
-                                              setMenuOpen(false);
+                                              navigateToView('solicitacoes_vistoria');
                                             }}
                                           >
                                             Solicitar vistoria
@@ -3777,8 +3777,7 @@ export default function App() {
             const draft = buildBarragemSolicitacaoDraft(dam, db.empreendedores);
             setViewingRecord(null);
             setPendingVistoriaDraft(draft);
-            setActiveView('solicitacoes_vistoria');
-            setMenuOpen(false);
+            navigateToView('solicitacoes_vistoria');
           }}
         />
       )}

@@ -17,6 +17,7 @@ import {
   MT_OUTER_MASK_GEOJSON,
   MT_STATE_GEOJSON
 } from '../src/data/mtGeoFallback';
+import { SPA_FALLBACK_ROUTE_PATHS } from '../src/utils/appRoutes';
 import { LoginPage } from '../src/components/LoginPage';
 
 const ROOT_DIR = process.cwd();
@@ -87,11 +88,19 @@ test('index.html e vercel.json preservam noindex/X-Robots-Tag sem regra SPA que 
   assert.equal(robotsHeader?.value, 'noindex, nofollow');
 
   const rewrites: Array<{ source?: string; destination?: string }> = vercelConfig.rewrites || [];
+  const spaFallbackSources: string[] = [];
   for (const rw of rewrites) {
-    assert.notEqual(rw.destination, '/index.html');
     assert.notEqual(rw.source, '/(.*)');
-    assert.ok(String(rw.source || '').startsWith('/api/'));
+    if (rw.destination === '/index.html') {
+      const source = String(rw.source || '');
+      assert.equal(source.includes('*') || source.includes(':'), false, `Regra SPA genérica proibida: ${source}`);
+      assert.ok(SPA_FALLBACK_ROUTE_PATHS.includes(source), `Rota SPA inesperada no vercel.json: ${source}`);
+      spaFallbackSources.push(source);
+    } else {
+      assert.ok(String(rw.source || '').startsWith('/api/'));
+    }
   }
+  assert.deepEqual([...spaFallbackSources].sort(), [...SPA_FALLBACK_ROUTE_PATHS].sort());
 });
 
 test('isBlockedPrivateRequestPath e middleware bloqueiam arquivos privados/exportações e liberam assets públicos', () => {
@@ -215,6 +224,16 @@ test('build de produção (dist/), preview server e telas principais/mapa carreg
     assert.equal(rootRes.status, 200);
     const rootHtml = await rootRes.text();
     assert.match(rootHtml, /noindex,\s*nofollow/i);
+
+    for (const spaRoute of ['/barragens', '/solicitacoes-vistoria', '/conciliacao']) {
+      const spaRes = await fetch(`${baseUrl}${spaRoute}`, {
+        headers: { Accept: 'text/html,application/xhtml+xml,*/*' }
+      });
+      assert.equal(spaRes.status, 200, `Rota SPA ${spaRoute} deveria retornar 200`);
+      const spaHtml = await spaRes.text();
+      assert.ok(spaHtml.includes('<div id="root">'), `Rota SPA ${spaRoute} deve servir o shell da aplicação`);
+      assert.match(spaHtml, /noindex,\s*nofollow/i);
+    }
 
     const scriptMatch = rootHtml.match(/src="(\/assets\/[^"]+\.js)"/);
     assert.ok(scriptMatch, 'index.html compilado deve referenciar bundle JS');

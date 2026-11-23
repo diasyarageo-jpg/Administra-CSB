@@ -41,6 +41,58 @@
     {
       "source": "/api/solicitacoesVistoria/:id/:action",
       "destination": "/api/solicitacoesVistoria?id=:id&action=:action"
+    },
+    {
+      "source": "/empreendedores",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/barragens",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/rts",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/conciliacao",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/revisoes",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/produtividade",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/portarias",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/pendencias",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/solicitacoes-vistoria",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/documentos",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/usuarios",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/integracao",
+      "destination": "/index.html"
+    },
+    {
+      "source": "/referencias",
+      "destination": "/index.html"
     }
   ]
 }
