@@ -1272,3 +1272,745 @@ test('Contenção Edge Function admin-manage-user: bloqueia request-access com 4
   assert.equal(insertPayloads.at(-1)?.papel, 'Analista');
 });
 
+test('Edge Function admin-manage-user: revisão e aprovação segura de public.admin_solicitacoes_acesso com idempotência e proteção contra falhas parciais', async () => {
+  const synthAdminUid = '00000000-0000-4000-8000-000000000041';
+  const synthUserRoleUid = '00000000-0000-4000-8000-000000000042';
+  const synthInactiveAdminUid = '00000000-0000-4000-8000-000000000043';
+
+  const createScenarioState = () => {
+    const authUsers: Array<{ id: string; email: string; user_metadata: Record<string, any> }> = [];
+    const usuarios: Array<Record<string, any>> = [
+      {
+        id: 'usr_admin_41',
+        auth_user_id: synthAdminUid,
+        nome: 'Admin Sintético',
+        matricula: 'ADM-001',
+        email: 'admin.synth@example.invalid',
+        papel: 'Administrador',
+        situacao: 'Ativo',
+        status: 'Ativo'
+      },
+      {
+        id: 'usr_operacional_42',
+        auth_user_id: synthUserRoleUid,
+        nome: 'Operacional Sintético',
+        matricula: 'USR-002',
+        email: 'operacional.synth@example.invalid',
+        papel: 'Usuário',
+        situacao: 'Ativo',
+        status: 'Ativo'
+      },
+      {
+        id: 'usr_admin_inativo_43',
+        auth_user_id: synthInactiveAdminUid,
+        nome: 'Admin Inativo Sintético',
+        matricula: 'ADM-003',
+        email: 'admin.inativo.synth@example.invalid',
+        papel: 'Administrador',
+        situacao: 'Inativo',
+        status: 'Inativo'
+      },
+      {
+        id: 'usr_canonico_01',
+        auth_user_id: null,
+        nome: 'Servidor Canônico Um',
+        matricula: 'MAT-1001',
+        email: 'servidor.um@example.invalid',
+        papel: 'Visualizador',
+        situacao: 'Pendente',
+        status: 'Inativo'
+      },
+      {
+        id: 'usr_canonico_02',
+        auth_user_id: null,
+        nome: 'Servidor Canônico Dois',
+        matricula: 'MAT-2002',
+        email: 'servidor.dois@example.invalid',
+        papel: 'Visualizador',
+        situacao: 'Pendente',
+        status: 'Inativo'
+      }
+    ];
+
+    const solicitacoes: Array<Record<string, any>> = [
+      {
+        id: 'sol_pend_01',
+        nome: 'Nome Informado Na Solicitacao',
+        matricula: 'mat-1001',
+        email: 'SERVIDOR.UM@example.invalid',
+        status: 'pendente',
+        observacoes_admin: null,
+        revisado_por: null,
+        revisado_em: null,
+        criado_em: '2026-11-23T10:00:00.000Z',
+        atualizado_em: '2026-11-23T10:00:00.000Z',
+        ip_origem: '198.51.100.10',
+        user_agent: 'Agente-Interno-Secreto',
+        token_hash: 'hash-interno-nao-expor'
+      },
+      {
+        id: 'sol_div_02',
+        nome: 'Servidor Divergente',
+        matricula: 'MAT-9999',
+        email: 'servidor.dois@example.invalid',
+        status: 'pendente',
+        observacoes_admin: null,
+        revisado_por: null,
+        revisado_em: null,
+        criado_em: '2026-11-23T09:00:00.000Z',
+        atualizado_em: '2026-11-23T09:00:00.000Z'
+      },
+      {
+        id: 'sol_fin_03',
+        nome: 'Solicitação Já Aprovada',
+        matricula: 'MAT-3003',
+        email: 'finalizada@example.invalid',
+        status: 'aprovada',
+        observacoes_admin: 'Concluída',
+        revisado_por: synthAdminUid,
+        revisado_em: '2026-11-22T12:00:00.000Z',
+        criado_em: '2026-11-22T10:00:00.000Z',
+        atualizado_em: '2026-11-22T12:00:00.000Z'
+      }
+    ];
+
+    const stats = {
+      envGetCalls: 0,
+      createClientCalls: 0,
+      dbCalls: 0,
+      usuariosInsertCalls: 0,
+      authInviteCalls: 0,
+      authCreateCalls: 0,
+      authUpdateCalls: 0,
+      lastSolicitacaoLimit: null as number | null,
+      failAuthInvite: false,
+      failAuthCreate: false,
+      failUsuarioUpdateOnce: false,
+      failSolicitacaoUpdateOnce: false
+    };
+
+    const deps = (envPresent = true) => ({
+      envGet(name: string) {
+        stats.envGetCalls += 1;
+        if (!envPresent) return undefined;
+        if (name === 'SUPABASE_URL') return 'https://example.invalid';
+        if (name === 'SUPABASE_SERVICE_ROLE_KEY') return 'synth-super-secret-service-role-key';
+        return undefined;
+      },
+      createSupabaseClient() {
+        stats.createClientCalls += 1;
+        return {
+          auth: {
+            async getUser(jwt: string) {
+              if (jwt === 'synth-admin-jwt') return { data: { user: { id: synthAdminUid } }, error: null };
+              if (jwt === 'synth-user-jwt') return { data: { user: { id: synthUserRoleUid } }, error: null };
+              if (jwt === 'synth-inactive-admin-jwt') {
+                return { data: { user: { id: synthInactiveAdminUid } }, error: null };
+              }
+              return { data: { user: null }, error: { message: 'Invalid JWT' } };
+            },
+            admin: {
+              async listUsers() {
+                return { data: { users: authUsers.map(u => ({ ...u })) }, error: null };
+              },
+              async updateUserById(id: string, patch: any) {
+                stats.authUpdateCalls += 1;
+                const found = authUsers.find(u => u.id === id);
+                if (!found) return { error: { message: 'Auth user not found' } };
+                found.user_metadata = { ...found.user_metadata, ...(patch.user_metadata || {}) };
+                return { error: null };
+              },
+              async inviteUserByEmail(email: string, opts: any) {
+                stats.authInviteCalls += 1;
+                if (stats.failAuthInvite) {
+                  return { data: null, error: { message: 'SMTP unavailable' } };
+                }
+                const created = {
+                  id: `auth_${authUsers.length + 1}`,
+                  email,
+                  user_metadata: opts?.data || {}
+                };
+                authUsers.push(created);
+                return { data: { user: created }, error: null };
+              },
+              async createUser(opts: any) {
+                stats.authCreateCalls += 1;
+                if (stats.failAuthCreate) {
+                  return { data: { user: null }, error: { message: 'Auth create failure' } };
+                }
+                const created = {
+                  id: `auth_${authUsers.length + 1}`,
+                  email: opts.email,
+                  user_metadata: opts.user_metadata || {}
+                };
+                authUsers.push(created);
+                return { data: { user: created }, error: null };
+              }
+            }
+          },
+          from(table: string) {
+            stats.dbCalls += 1;
+            const tableRows = table === 'usuarios' ? usuarios : solicitacoes;
+            const matchRows = (filters: Record<string, any>, inFilters: Record<string, any[]>) =>
+              tableRows.filter(row => {
+                for (const [k, v] of Object.entries(filters)) {
+                  if (row[k] !== v) return false;
+                }
+                for (const [k, allowed] of Object.entries(inFilters)) {
+                  if (!allowed.includes(row[k])) return false;
+                }
+                return true;
+              });
+
+            return {
+              select() {
+                const filters: Record<string, any> = {};
+                const inFilters: Record<string, any[]> = {};
+                let limitVal: number | null = null;
+                let orderCol: string | null = null;
+                let orderAsc = true;
+
+                const runQuery = () => {
+                  let res = matchRows(filters, inFilters).map(r => ({ ...r }));
+                  if (orderCol) {
+                    res.sort((a, b) => {
+                      const va = String(a[orderCol!] || '');
+                      const vb = String(b[orderCol!] || '');
+                      return orderAsc ? va.localeCompare(vb) : vb.localeCompare(va);
+                    });
+                  }
+                  if (limitVal !== null) {
+                    if (table === 'admin_solicitacoes_acesso') {
+                      stats.lastSolicitacaoLimit = limitVal;
+                    }
+                    res = res.slice(0, limitVal);
+                  }
+                  return res;
+                };
+
+                const chain: any = {
+                  eq(col: string, val: any) {
+                    filters[col] = val;
+                    return chain;
+                  },
+                  in(col: string, vals: any[]) {
+                    inFilters[col] = vals;
+                    return chain;
+                  },
+                  order(col: string, opts?: { ascending?: boolean }) {
+                    orderCol = col;
+                    orderAsc = opts?.ascending !== false;
+                    return chain;
+                  },
+                  limit(n: number) {
+                    limitVal = n;
+                    return chain;
+                  },
+                  then(resolve: (val: any) => void) {
+                    resolve({ data: runQuery(), error: null });
+                  },
+                  async maybeSingle() {
+                    const rows = runQuery();
+                    return { data: rows[0] ?? null, error: null };
+                  },
+                  async single() {
+                    const rows = runQuery();
+                    if (!rows[0]) return { data: null, error: { message: 'Not found' } };
+                    return { data: rows[0], error: null };
+                  }
+                };
+                return chain;
+              },
+              update(updPayload: Record<string, any>) {
+                const filters: Record<string, any> = {};
+                const inFilters: Record<string, any[]> = {};
+                const chain: any = {
+                  eq(col: string, val: any) {
+                    filters[col] = val;
+                    return chain;
+                  },
+                  in(col: string, vals: any[]) {
+                    inFilters[col] = vals;
+                    return chain;
+                  },
+                  select() {
+                    return {
+                      async maybeSingle() {
+                        if (table === 'usuarios' && stats.failUsuarioUpdateOnce) {
+                          stats.failUsuarioUpdateOnce = false;
+                          return { data: null, error: { message: 'Simulated DB error updating usuarios' } };
+                        }
+                        if (table === 'admin_solicitacoes_acesso' && stats.failSolicitacaoUpdateOnce) {
+                          stats.failSolicitacaoUpdateOnce = false;
+                          return { data: null, error: { message: 'Simulated DB error updating solicitacao' } };
+                        }
+                        const matched = matchRows(filters, inFilters);
+                        if (!matched[0]) return { data: null, error: null };
+                        Object.assign(matched[0], updPayload);
+                        return { data: { ...matched[0] }, error: null };
+                      },
+                      async single() {
+                        if (table === 'usuarios' && stats.failUsuarioUpdateOnce) {
+                          stats.failUsuarioUpdateOnce = false;
+                          return { data: null, error: { message: 'Simulated DB error updating usuarios' } };
+                        }
+                        if (table === 'admin_solicitacoes_acesso' && stats.failSolicitacaoUpdateOnce) {
+                          stats.failSolicitacaoUpdateOnce = false;
+                          return { data: null, error: { message: 'Simulated DB error updating solicitacao' } };
+                        }
+                        const matched = matchRows(filters, inFilters);
+                        if (!matched[0]) return { data: null, error: { message: 'Not found' } };
+                        Object.assign(matched[0], updPayload);
+                        return { data: { ...matched[0] }, error: null };
+                      }
+                    };
+                  }
+                };
+                return chain;
+              },
+              insert() {
+                if (table === 'usuarios') stats.usuariosInsertCalls += 1;
+                return {
+                  select() {
+                    return {
+                      async single() {
+                        return { data: null, error: { message: 'Unexpected insert' } };
+                      }
+                    };
+                  }
+                };
+              }
+            };
+          }
+        };
+      }
+    });
+
+    return { authUsers, usuarios, solicitacoes, stats, deps };
+  };
+
+  // 1. request-access continua retornando 409 sem consultar env, client ou banco
+  {
+    const s = createScenarioState();
+    const res409 = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({
+          action: 'request-access',
+          nome: 'Solicitante Sintético',
+          matricula: 'MAT-1001',
+          email: 'servidor.um@example.invalid'
+        })
+      }),
+      s.deps(false)
+    );
+    assert.equal(res409.status, 409);
+    assert.equal(s.stats.envGetCalls, 0);
+    assert.equal(s.stats.createClientCalls, 0);
+    assert.equal(s.stats.dbCalls, 0);
+  }
+
+  // 2. Novas ações negam falta de sessão (401), usuário não-administrador (403) e administrador inativo (403)
+  {
+    const s = createScenarioState();
+    for (const actionBody of [
+      { action: 'list-access-requests' },
+      { action: 'review-access-request', solicitacaoId: 'sol_pend_01', status: 'recusada', observacoesAdmin: 'Teste' },
+      { action: 'approve-access-request', solicitacaoId: 'sol_pend_01', usuarioId: 'usr_canonico_01' }
+    ]) {
+      const resNoAuth = await handleAdminManageUserRequest(
+        new Request('https://example.invalid/admin-manage-user', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(actionBody)
+        }),
+        s.deps(true)
+      );
+      assert.equal(resNoAuth.status, 401);
+
+      for (const nonAdminJwt of ['synth-user-jwt', 'synth-inactive-admin-jwt']) {
+        const resForbidden = await handleAdminManageUserRequest(
+          new Request('https://example.invalid/admin-manage-user', {
+            method: 'POST',
+            headers: {
+              'Content-Type': 'application/json',
+              Authorization: `Bearer ${nonAdminJwt}`
+            },
+            body: JSON.stringify(actionBody)
+          }),
+          s.deps(true)
+        );
+        assert.equal(resForbidden.status, 403);
+      }
+    }
+    assert.equal(s.solicitacoes[0].status, 'pendente');
+    assert.equal(s.usuarios.find(u => u.id === 'usr_canonico_01')?.situacao, 'Pendente');
+  }
+
+  // 3. list-access-requests: filtro por status, limite seguro e projeção sem vazar campos internos
+  {
+    const s = createScenarioState();
+    const badStatusRes = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer synth-admin-jwt'
+        },
+        body: JSON.stringify({ action: 'list-access-requests', status: 'status_inexistente' })
+      }),
+      s.deps(true)
+    );
+    assert.equal(badStatusRes.status, 400);
+
+    const listRes = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer synth-admin-jwt'
+        },
+        body: JSON.stringify({ action: 'list-access-requests', status: 'pendente', limit: 9999 })
+      }),
+      s.deps(true)
+    );
+    assert.equal(listRes.status, 200);
+    const listJson = await listRes.json();
+    assert.equal(listJson.success, true);
+    assert.equal(listJson.limit, 100);
+    assert.equal(s.stats.lastSolicitacaoLimit, 100);
+    assert.equal(listJson.solicitacoes.length, 2);
+    assert.equal('ip_origem' in listJson.solicitacoes[0], false);
+    assert.equal('user_agent' in listJson.solicitacoes[0], false);
+    assert.equal('token_hash' in listJson.solicitacoes[0], false);
+    assert.deepEqual(Object.keys(listJson.solicitacoes[0]).sort(), [
+      'atualizado_em',
+      'criado_em',
+      'email',
+      'id',
+      'matricula',
+      'nome',
+      'observacoes_admin',
+      'revisado_em',
+      'revisado_por',
+      'status'
+    ]);
+  }
+
+  // 4. review-access-request: validações e bloqueio de solicitação já finalizada
+  {
+    const s = createScenarioState();
+    const invalidIdRes = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer synth-admin-jwt'
+        },
+        body: JSON.stringify({ action: 'review-access-request', solicitacaoId: 'bad id!@#', status: 'recusada' })
+      }),
+      s.deps(true)
+    );
+    assert.equal(invalidIdRes.status, 400);
+
+    const invalidStatusRes = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer synth-admin-jwt'
+        },
+        body: JSON.stringify({ action: 'review-access-request', solicitacaoId: 'sol_pend_01', status: 'aprovada' })
+      }),
+      s.deps(true)
+    );
+    assert.equal(invalidStatusRes.status, 400);
+
+    const oversizedObsRes = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer synth-admin-jwt'
+        },
+        body: JSON.stringify({
+          action: 'review-access-request',
+          solicitacaoId: 'sol_pend_01',
+          status: 'aguardando_correcao',
+          observacoesAdmin: 'A'.repeat(1001)
+        })
+      }),
+      s.deps(true)
+    );
+    assert.equal(oversizedObsRes.status, 400);
+
+    const finalizedRes = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer synth-admin-jwt'
+        },
+        body: JSON.stringify({
+          action: 'review-access-request',
+          solicitacaoId: 'sol_fin_03',
+          status: 'recusada',
+          observacoesAdmin: 'Tentativa tardia'
+        })
+      }),
+      s.deps(true)
+    );
+    assert.equal(finalizedRes.status, 409);
+
+    const correcaoRes = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer synth-admin-jwt'
+        },
+        body: JSON.stringify({
+          action: 'review-access-request',
+          solicitacaoId: 'sol_pend_01',
+          status: 'aguardando_correcao',
+          observacoesAdmin: 'Confirmar matrícula funcional'
+        })
+      }),
+      s.deps(true)
+    );
+    assert.equal(correcaoRes.status, 200);
+    const correcaoJson = await correcaoRes.json();
+    assert.equal(correcaoJson.solicitacao.status, 'aguardando_correcao');
+    assert.equal(correcaoJson.solicitacao.revisado_por, synthAdminUid);
+    assert.ok(correcaoJson.solicitacao.revisado_em);
+    assert.equal(correcaoJson.solicitacao.observacoes_admin, 'Confirmar matrícula funcional');
+    assert.ok(correcaoJson.solicitacao.atualizado_em);
+
+    const recusarRes = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer synth-admin-jwt'
+        },
+        body: JSON.stringify({
+          action: 'review-access-request',
+          solicitacaoId: 'sol_pend_01',
+          status: 'recusada',
+          observacoesAdmin: 'Vínculo não confirmado'
+        })
+      }),
+      s.deps(true)
+    );
+    assert.equal(recusarRes.status, 200);
+
+    // Após recusada (finalizada), nova revisão é bloqueada
+    const afterRecusaRes = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer synth-admin-jwt'
+        },
+        body: JSON.stringify({
+          action: 'review-access-request',
+          solicitacaoId: 'sol_pend_01',
+          status: 'aguardando_correcao',
+          observacoesAdmin: 'Reabrir'
+        })
+      }),
+      s.deps(true)
+    );
+    assert.equal(afterRecusaRes.status, 409);
+  }
+
+  // 5. approve-access-request: exige cadastro existente, valida e-mail/matrícula, atribui somente papel Usuário e trata falhas parciais de forma idempotente
+  {
+    const s = createScenarioState();
+
+    // Sem usuarioId -> 400
+    const missingUserRes = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer synth-admin-jwt'
+        },
+        body: JSON.stringify({ action: 'approve-access-request', solicitacaoId: 'sol_pend_01' })
+      }),
+      s.deps(true)
+    );
+    assert.equal(missingUserRes.status, 400);
+
+    // usuarioId inexistente -> 404 e nunca cria cadastro novo em public.usuarios
+    const nonExistentUserRes = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer synth-admin-jwt'
+        },
+        body: JSON.stringify({
+          action: 'approve-access-request',
+          solicitacaoId: 'sol_pend_01',
+          usuarioId: 'usr_inexistente'
+        })
+      }),
+      s.deps(true)
+    );
+    assert.equal(nonExistentUserRes.status, 404);
+    assert.equal(s.stats.usuariosInsertCalls, 0);
+
+    // Divergência de matrícula -> 409 orientando aguardando_correcao, sem tocar Auth ou usuarios
+    const mismatchRes = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer synth-admin-jwt'
+        },
+        body: JSON.stringify({
+          action: 'approve-access-request',
+          solicitacaoId: 'sol_div_02',
+          usuarioId: 'usr_canonico_02'
+        })
+      }),
+      s.deps(true)
+    );
+    assert.equal(mismatchRes.status, 409);
+    const mismatchJson = await mismatchRes.json();
+    assert.match(mismatchJson.error, /aguardando_correcao/);
+    assert.equal(s.stats.authInviteCalls, 0);
+    assert.equal(s.usuarios.find(u => u.id === 'usr_canonico_02')?.situacao, 'Pendente');
+    assert.equal(s.solicitacoes.find(r => r.id === 'sol_div_02')?.status, 'pendente');
+
+    // Falha parcial 1: Auth falha -> 500, cadastro permanece Pendente e solicitação permanece pendente
+    s.stats.failAuthInvite = true;
+    s.stats.failAuthCreate = true;
+    const authFailRes = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer synth-admin-jwt'
+        },
+        body: JSON.stringify({
+          action: 'approve-access-request',
+          solicitacaoId: 'sol_pend_01',
+          usuarioId: 'usr_canonico_01',
+          papel: 'Administrador'
+        })
+      }),
+      s.deps(true)
+    );
+    assert.equal(authFailRes.status, 500);
+    const authFailBody = await authFailRes.text();
+    assert.equal(authFailBody.includes('synth-super-secret-service-role-key'), false);
+    assert.equal(s.usuarios.find(u => u.id === 'usr_canonico_01')?.situacao, 'Pendente');
+    assert.equal(s.solicitacoes.find(r => r.id === 'sol_pend_01')?.status, 'pendente');
+
+    // Falha parcial 2: Auth cria conta, mas update em public.usuarios falha -> solicitação NÃO é aprovada
+    s.stats.failAuthInvite = false;
+    s.stats.failAuthCreate = false;
+    s.stats.failUsuarioUpdateOnce = true;
+    const userUpdFailRes = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer synth-admin-jwt'
+        },
+        body: JSON.stringify({
+          action: 'approve-access-request',
+          solicitacaoId: 'sol_pend_01',
+          usuarioId: 'usr_canonico_01'
+        })
+      }),
+      s.deps(true)
+    );
+    assert.equal(userUpdFailRes.status, 500);
+    assert.equal(s.authUsers.length, 1);
+    assert.equal(s.usuarios.find(u => u.id === 'usr_canonico_01')?.situacao, 'Pendente');
+    assert.equal(s.solicitacoes.find(r => r.id === 'sol_pend_01')?.status, 'pendente');
+
+    // Falha parcial 3: Retry ativa public.usuarios, mas update em admin_solicitacoes_acesso falha -> NÃO cria 2ª conta Auth e solicitação ainda não fica aprovada
+    s.stats.failSolicitacaoUpdateOnce = true;
+    const solicUpdFailRes = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer synth-admin-jwt'
+        },
+        body: JSON.stringify({
+          action: 'approve-access-request',
+          solicitacaoId: 'sol_pend_01',
+          usuarioId: 'usr_canonico_01',
+          papel: 'Administrador'
+        })
+      }),
+      s.deps(true)
+    );
+    assert.equal(solicUpdFailRes.status, 500);
+    assert.equal(s.authUsers.length, 1);
+    assert.equal(s.usuarios.find(u => u.id === 'usr_canonico_01')?.situacao, 'Ativo');
+    assert.equal(s.usuarios.find(u => u.id === 'usr_canonico_01')?.papel, 'Usuário');
+    assert.equal(s.solicitacoes.find(r => r.id === 'sol_pend_01')?.status, 'pendente');
+
+    // Retry final após falha parcial conclui com sucesso, usando dados canônicos e papel Usuário (nunca Administrador)
+    const approveOkRes = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer synth-admin-jwt'
+        },
+        body: JSON.stringify({
+          action: 'approve-access-request',
+          solicitacaoId: 'sol_pend_01',
+          usuarioId: 'usr_canonico_01',
+          papel: 'Administrador',
+          observacoesAdmin: 'Aprovado após conferência cadastral'
+        })
+      }),
+      s.deps(true)
+    );
+    assert.equal(approveOkRes.status, 200);
+    const approveJson = await approveOkRes.json();
+    assert.equal(approveJson.success, true);
+    assert.equal(s.authUsers.length, 1);
+    assert.equal(s.authUsers[0].email, 'servidor.um@example.invalid');
+    assert.equal(s.authUsers[0].user_metadata.nome, 'Servidor Canônico Um');
+    assert.equal(s.authUsers[0].user_metadata.matricula, 'MAT-1001');
+    assert.equal(s.authUsers[0].user_metadata.papel, 'Usuário');
+    assert.equal(approveJson.usuarioRecord.papel, 'Usuário');
+    assert.equal(approveJson.usuarioRecord.situacao, 'Ativo');
+    assert.equal(approveJson.solicitacao.status, 'aprovada');
+    assert.equal(approveJson.solicitacao.revisado_por, synthAdminUid);
+    assert.equal(approveJson.solicitacao.observacoes_admin, 'Aprovado após conferência cadastral');
+    assert.equal(s.stats.usuariosInsertCalls, 0);
+
+    // Repetição após aprovação (mesmo tentando apontar outro cadastro) é bloqueada com 409 sem criar conta ou ativar outro cadastro
+    const replayRes = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer synth-admin-jwt'
+        },
+        body: JSON.stringify({
+          action: 'approve-access-request',
+          solicitacaoId: 'sol_pend_01',
+          usuarioId: 'usr_canonico_02'
+        })
+      }),
+      s.deps(true)
+    );
+    assert.equal(replayRes.status, 409);
+    assert.equal(s.authUsers.length, 1);
+    assert.equal(s.usuarios.find(u => u.id === 'usr_canonico_02')?.situacao, 'Pendente');
+    assert.equal(s.stats.usuariosInsertCalls, 0);
+  }
+});
+
