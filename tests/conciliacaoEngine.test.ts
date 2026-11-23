@@ -1,7 +1,7 @@
 // tests/conciliacaoEngine.test.ts
 import test from 'node:test';
 import assert from 'node:assert/strict';
-import { EventEmitter } from 'node:events';
+import { PassThrough } from 'node:stream';
 
 import carLookupHandler, { estimateGeometryDistanceMeters } from '../api/car-lookup';
 import semaDocumentosHandler from '../api/sema-documentos';
@@ -34,12 +34,18 @@ function createMockReq(opts: {
   query?: Record<string, string>;
   headers?: Record<string, string>;
 }) {
-  const req = new EventEmitter() as any;
+  const req = new PassThrough() as any;
   req.method = opts.method || 'GET';
   req.url = opts.url || '/';
   req.query = opts.query || {};
   req.headers = opts.headers || {};
-  if (opts.body !== undefined) req.body = opts.body;
+  if (opts.body !== undefined) {
+    req.body = opts.body;
+    const raw = typeof opts.body === 'string' ? opts.body : JSON.stringify(opts.body);
+    req.end(Buffer.from(raw, 'utf8'));
+  } else {
+    req.end();
+  }
   return req;
 }
 

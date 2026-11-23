@@ -23,10 +23,13 @@ import {
   getCachedLayerSchema,
   getSemaCapabilities
 } from '../src/server/semaGeoserver.js';
+import {
+  JsonBodyReaderError,
+  readJsonObjectBody
+} from '../src/server/jsonBodyReader.js';
 
 interface VercelLikeRequest extends IncomingMessage {
   query?: Record<string, string | string[]>;
-  body?: any;
   method?: string;
   url?: string;
 }
@@ -57,39 +60,15 @@ interface CamadaStatus {
 
 const CAR_LAYER = 'Geoportal:CAR_ATP';
 const CAR_REQUERIDO_LAYER = 'Geoportal:MVW_REQUERIMENTO_ATP';
+const CAR_LOOKUP_MAX_BODY_BYTES = 16 * 1024;
 
 async function readJsonBody(req: VercelLikeRequest): Promise<Record<string, any>> {
-  if (req.body && typeof req.body === 'object') {
-    return req.body;
-  }
-  if (typeof req.body === 'string' && req.body.trim()) {
-    return JSON.parse(req.body);
-  }
-  return await new Promise<Record<string, any>>((resolve, reject) => {
-    const chunks: Buffer[] = [];
-    let totalBytes = 0;
-    const MAX_BYTES = 16 * 1024;
-    req.on('data', (chunk: Buffer) => {
-      totalBytes += chunk.length;
-      if (totalBytes > MAX_BYTES) {
-        reject(new Error('Requisição excede o tamanho máximo permitido.'));
-        return;
-      }
-      chunks.push(chunk);
-    });
-    req.on('end', () => {
-      const raw = Buffer.concat(chunks).toString('utf8').trim();
-      if (!raw) {
-        resolve({});
-        return;
-      }
-      try {
-        resolve(JSON.parse(raw));
-      } catch {
-        reject(new Error('Dados de consulta inválidos.'));
-      }
-    });
-    req.on('error', err => reject(err));
+  return await readJsonObjectBody(req, {
+    maxBytes: CAR_LOOKUP_MAX_BODY_BYTES,
+    allowEmpty: true,
+    payloadTooLargeMessage: 'Requisição excede o tamanho máximo permitido.',
+    invalidJsonMessage: 'Dados de consulta inválidos.',
+    invalidObjectMessage: 'Dados de consulta inválidos.'
   });
 }
 
@@ -478,8 +457,17 @@ export default async function handler(
       if (body.incluirProximidade !== undefined) rawIncluirProximidade = body.incluirProximidade;
       if (body.raioMetros !== undefined) rawRaioMetros = body.raioMetros;
     } catch (err: any) {
-      res.status(400)!.json!({
-        error: err?.message || 'Dados inválidos na requisição.'
+      const status =
+        err instanceof JsonBodyReaderError
+          ? err.statusCode
+          : Number.isInteger(err?.statusCode) && err.statusCode >= 400 && err.statusCode < 600
+          ? err.statusCode
+          : 400;
+      res.status(status)!.json!({
+        error:
+          err instanceof JsonBodyReaderError
+            ? err.message
+            : 'Dados inválidos na requisição.'
       });
       return;
     }
