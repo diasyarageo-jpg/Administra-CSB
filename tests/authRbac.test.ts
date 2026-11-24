@@ -3781,10 +3781,13 @@ test('Edge Function reset-own-password: JWT obrigatório, alvo estrito auth.uid(
   assert.equal(clientResetRes.message, 'Senha redefinida. Entre com a senha padrão e crie uma nova.');
 });
 
-test('Edge Function reset-own-password: rate limit persistente em public.password_reset_rate_limits (3/hora, 429, falha fechada se consulta falhar)', async () => {
+test('Edge Function reset-own-password: reserva atômica via RPC reserve_password_reset_rate_limit (concorrência, 3/hora, 429, falha fechada sem alterar senha e janela expirada)', async () => {
   const synthUid = '00000000-0000-4000-8000-000000000097';
+  const spoofUid = '00000000-0000-4000-8000-000000000098';
   let currentNow = Date.UTC(2026, 10, 24, 18, 0, 0);
-  let failRateQuery = true;
+  let failRpc = true;
+  const callSequence: string[] = [];
+  const rpcCalls: Array<Record<string, any>> = [];
   const rateLimitRows: Array<{
     id: string;
     auth_user_id: string;
@@ -3806,6 +3809,22 @@ test('Edge Function reset-own-password: rate limit persistente em public.passwor
     force_password_change: false
   };
 
+  // Simula lock transacional por auth_user_id (pg_advisory_xact_lock) no mock da RPC
+  let rpcLockQueue: Promise<void> = Promise.resolve();
+  const withSerializedRpc = async <T>(fn: () => Promise<T>): Promise<T> => {
+    const prev = rpcLockQueue;
+    let release!: () => void;
+    rpcLockQueue = new Promise<void>(resolve => {
+      release = resolve;
+    });
+    await prev;
+    try {
+      return await fn();
+    } finally {
+      release();
+    }
+  };
+
   const deps = {
     envGet(name: string) {
       if (name === 'SUPABASE_URL') return 'https://example.invalid';
@@ -3822,55 +3841,60 @@ test('Edge Function reset-own-password: rate limit persistente em public.passwor
           },
           admin: {
             async updateUserById(id: string, patch: any) {
+              callSequence.push('auth:updateUserById');
+              await new Promise(resolve => setTimeout(resolve, 10));
               authUpdates.push({ id, password: patch?.password });
               return { error: null };
             }
           }
         },
+        async rpc(fnName: string, params: Record<string, any>) {
+          assert.equal(fnName, 'reserve_password_reset_rate_limit');
+          rpcCalls.push({ ...params });
+          callSequence.push('rpc:reserve_password_reset_rate_limit');
+
+          return withSerializedRpc(async () => {
+            await new Promise(resolve => setTimeout(resolve, 10));
+            if (failRpc) {
+              return { data: null, error: { message: 'rpc unavailable' } };
+            }
+
+            const nowMs = Date.parse(params.p_now);
+            const windowMs = Number(params.p_window_minutes || 60) * 60 * 1000;
+            const windowStartMs = nowMs - windowMs;
+            const maxAttempts = Number(params.p_max_attempts || 3);
+            const recentCount = rateLimitRows.filter(
+              row =>
+                row.auth_user_id === params.p_auth_user_id &&
+                row.action === params.p_action &&
+                Date.parse(row.created_at) > windowStartMs
+            ).length;
+
+            if (recentCount >= maxAttempts) {
+              return {
+                data: [{ allowed: false, current_count: recentCount, reservation_id: null }],
+                error: null
+              };
+            }
+
+            const reservationId = `rl_${rateLimitRows.length + 1}`;
+            rateLimitRows.push({
+              id: reservationId,
+              auth_user_id: params.p_auth_user_id,
+              usuario_id: params.p_usuario_id,
+              action: params.p_action,
+              created_at: params.p_now
+            });
+
+            return {
+              data: [{ allowed: true, current_count: recentCount + 1, reservation_id: reservationId }],
+              error: null
+            };
+          });
+        },
         from(table: string) {
           if (table === 'historico_alteracoes_dados') {
             return { async insert() { return { error: null }; } };
-          }
-          if (table === 'password_reset_rate_limits') {
-            return {
-              select() {
-                const eqFilters: Record<string, any> = {};
-                let gteCreatedAt = '';
-                const chain: any = {
-                  eq(col: string, val: any) {
-                    eqFilters[col] = val;
-                    return chain;
-                  },
-                  gte(col: string, val: string) {
-                    if (col === 'created_at') gteCreatedAt = val;
-                    return chain;
-                  },
-                  then(resolve: any) {
-                    if (failRateQuery) {
-                      resolve({ count: null, error: { message: 'relation error' } });
-                      return;
-                    }
-                    const matched = rateLimitRows.filter(
-                      row =>
-                        Object.entries(eqFilters).every(([k, v]) => (row as any)[k] === v) &&
-                        (!gteCreatedAt || row.created_at >= gteCreatedAt)
-                    );
-                    resolve({ count: matched.length, error: null });
-                  }
-                };
-                return chain;
-              },
-              async insert(row: any) {
-                rateLimitRows.push({
-                  id: `rl_${rateLimitRows.length + 1}`,
-                  auth_user_id: row.auth_user_id,
-                  usuario_id: row.usuario_id,
-                  action: row.action,
-                  created_at: row.created_at
-                });
-                return { error: null };
-              }
-            };
           }
           assert.equal(table, 'usuarios');
           return {
@@ -3900,6 +3924,7 @@ test('Edge Function reset-own-password: rate limit persistente em public.passwor
                     async maybeSingle() {
                       const ok = Object.entries(filters).every(([k, v]) => (userRow as any)[k] === v);
                       if (!ok) return { data: null, error: null };
+                      callSequence.push('db:usuarios.update');
                       Object.assign(userRow, payload);
                       return { data: { ...userRow }, error: null };
                     }
@@ -3914,8 +3939,8 @@ test('Edge Function reset-own-password: rate limit persistente em public.passwor
     }
   };
 
-  // 1. Falha fechada: erro ao consultar password_reset_rate_limits bloqueia o reset sem chamar updateUserById
-  const dbFailRes = await handleAdminManageUserRequest(
+  // 1. Falha fechada da RPC: erro em reserve_password_reset_rate_limit não altera senha nem grava reserva
+  const rpcFailRes = await handleAdminManageUserRequest(
     new Request('https://example.invalid/admin-manage-user', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json', Authorization: 'Bearer jwt-persist' },
@@ -3923,33 +3948,80 @@ test('Edge Function reset-own-password: rate limit persistente em public.passwor
     }),
     deps
   );
-  assert.equal(dbFailRes.status, 500);
-  const dbFailJson = await dbFailRes.json();
-  assert.equal(dbFailJson.success, false);
+  assert.equal(rpcFailRes.status, 500);
+  const rpcFailJson = await rpcFailRes.json();
+  assert.equal(rpcFailJson.success, false);
   assert.equal(authUpdates.length, 0);
   assert.equal(rateLimitRows.length, 0);
 
-  // 2. Primeiros 3 resets bem-sucedidos gravam registros em password_reset_rate_limits
-  failRateQuery = false;
-  for (let i = 0; i < 3; i += 1) {
-    currentNow += 5 * 60 * 1000;
-    const res = await handleAdminManageUserRequest(
+  // 2. Duas solicitações concorrentes simultâneas (inclusive com spoof de auth_user_id/usuario_id no body):
+  //    RPC serializa, usa exclusivamente callerUser.id/callerProfile.id e reserva antes de updateUserById
+  failRpc = false;
+  currentNow += 5 * 60 * 1000;
+  const [conc1, conc2] = await Promise.all([
+    handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer jwt-persist' },
+        body: JSON.stringify({
+          action: 'reset-own-password',
+          auth_user_id: spoofUid,
+          usuario_id: 'usr_spoof_98'
+        })
+      }),
+      deps
+    ),
+    handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer jwt-persist' },
+        body: JSON.stringify({
+          action: 'reset-own-password',
+          authUserId: spoofUid,
+          usuarioId: 'usr_spoof_98'
+        })
+      }),
+      deps
+    )
+  ]);
+  assert.equal(conc1.status, 200);
+  assert.equal(conc2.status, 200);
+  assert.equal(authUpdates.length, 2);
+  assert.equal(rateLimitRows.length, 2);
+  assert.equal(rpcCalls[1].p_auth_user_id, synthUid);
+  assert.equal(rpcCalls[1].p_usuario_id, 'usr_persist_97');
+  assert.equal(rpcCalls[2].p_auth_user_id, synthUid);
+  assert.equal(rpcCalls[2].p_usuario_id, 'usr_persist_97');
+  assert.ok(
+    callSequence.indexOf('rpc:reserve_password_reset_rate_limit') <
+      callSequence.indexOf('auth:updateUserById')
+  );
+
+  // 3. Mais duas solicitações concorrentes disputando a 3ª e última vaga: apenas 1 passa (200) e a outra é bloqueada (429)
+  currentNow += 5 * 60 * 1000;
+  const [race3, race4] = await Promise.all([
+    handleAdminManageUserRequest(
       new Request('https://example.invalid/admin-manage-user', {
         method: 'POST',
         headers: { 'Content-Type': 'application/json', Authorization: 'Bearer jwt-persist' },
         body: JSON.stringify({ action: 'reset-own-password' })
       }),
       deps
-    );
-    assert.equal(res.status, 200);
-  }
+    ),
+    handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer jwt-persist' },
+        body: JSON.stringify({ action: 'reset-own-password' })
+      }),
+      deps
+    )
+  ]);
+  assert.deepEqual([race3.status, race4.status].sort(), [200, 429]);
   assert.equal(authUpdates.length, 3);
   assert.equal(rateLimitRows.length, 3);
-  assert.equal(rateLimitRows[0].auth_user_id, synthUid);
-  assert.equal(rateLimitRows[0].usuario_id, 'usr_persist_97');
-  assert.equal(rateLimitRows[0].action, 'reset-own-password');
 
-  // 3. 4ª tentativa dentro de 60 minutos retorna 429 genérico sem redefinir
+  // 4. Quarta tentativa sequencial dentro de 60 minutos também é bloqueada com 429 genérico sem alterar senha
   currentNow += 60 * 1000;
   const blockedRes = await handleAdminManageUserRequest(
     new Request('https://example.invalid/admin-manage-user', {
@@ -3963,7 +4035,7 @@ test('Edge Function reset-own-password: rate limit persistente em public.passwor
   assert.equal(authUpdates.length, 3);
   assert.equal(rateLimitRows.length, 3);
 
-  // 4. Após expirar a janela de 60 minutos desde os registros anteriores, volta a permitir
+  // 5. Após expirar a janela de 60 minutos desde os registros anteriores, volta a permitir
   currentNow += 61 * 60 * 1000;
   const afterWindowRes = await handleAdminManageUserRequest(
     new Request('https://example.invalid/admin-manage-user', {
@@ -3976,6 +4048,143 @@ test('Edge Function reset-own-password: rate limit persistente em public.passwor
   assert.equal(afterWindowRes.status, 200);
   assert.equal(authUpdates.length, 4);
   assert.equal(rateLimitRows.length, 4);
+});
+
+test('Edge Function index.ts (produção): monta dependências sem rateLimitStore, força RPC reserve_password_reset_rate_limit e falha fechado se a RPC der erro', async () => {
+  const indexSrc = fs.readFileSync(
+    path.join(process.cwd(), 'supabase/functions/admin-manage-user/index.ts'),
+    'utf8'
+  );
+  assert.equal(indexSrc.includes('new Map'), false);
+  assert.match(indexSrc, /rateLimitStore\?:\s*never/);
+  assert.match(indexSrc, /handleAdminManageUserRequest\(req,\s*productionDeps\)/);
+
+  const synthUid = '00000000-0000-4000-8000-000000000099';
+  let rpcFail = true;
+  const rpcCalls: Array<{ fnName: string; params: Record<string, any> }> = [];
+  const authUpdates: Array<{ id: string; password?: string }> = [];
+  const userRow = {
+    id: 'usr_prod_99',
+    auth_user_id: synthUid,
+    nome: 'Carlos Silva',
+    matricula: '88888',
+    login: 'carlos.silva',
+    email: 'carlos@example.invalid',
+    papel: 'Analista',
+    situacao: 'Ativo',
+    status: 'Ativo',
+    force_password_change: false
+  };
+
+  // Mesmo formato de dependências usado em index.ts (+ DENO_DEPLOYMENT_ID simulando Edge Runtime real).
+  // Mesmo se alguém tentasse injetar um Map em ambiente com DENO_DEPLOYMENT_ID, handler.ts ignora o Map e usa a RPC.
+  const prodLikeDeps: any = {
+    envGet(name: string) {
+      if (name === 'SUPABASE_URL') return 'https://example.invalid';
+      if (name === 'SUPABASE_SERVICE_ROLE_KEY') return 'synth-service-role-prod';
+      if (name === 'DENO_DEPLOYMENT_ID') return 'dep-prod-01';
+      return undefined;
+    },
+    rateLimitStore: new Map<string, number[]>(),
+    createSupabaseClient() {
+      return {
+        auth: {
+          async getUser(jwt: string) {
+            if (jwt === 'jwt-prod') return { data: { user: { id: synthUid } }, error: null };
+            return { data: { user: null }, error: { message: 'Invalid JWT' } };
+          },
+          admin: {
+            async updateUserById(id: string, patch: any) {
+              authUpdates.push({ id, password: patch?.password });
+              return { error: null };
+            }
+          }
+        },
+        async rpc(fnName: string, params: Record<string, any>) {
+          rpcCalls.push({ fnName, params });
+          if (rpcFail) {
+            return { data: null, error: { message: 'database connection refused' } };
+          }
+          return {
+            data: [{ allowed: true, current_count: 1, reservation_id: 'rl_prod_1' }],
+            error: null
+          };
+        },
+        from(table: string) {
+          if (table === 'historico_alteracoes_dados') {
+            return { async insert() { return { error: null }; } };
+          }
+          assert.equal(table, 'usuarios');
+          return {
+            select() {
+              return {
+                eq() {
+                  return {
+                    async maybeSingle() {
+                      return { data: { ...userRow }, error: null };
+                    }
+                  };
+                }
+              };
+            },
+            update(payload: Record<string, any>) {
+              return {
+                eq() {
+                  return {
+                    eq() {
+                      return {
+                        select() {
+                          return {
+                            async maybeSingle() {
+                              Object.assign(userRow, payload);
+                              return { data: { ...userRow }, error: null };
+                            }
+                          };
+                        }
+                      };
+                    }
+                  };
+                }
+              };
+            }
+          };
+        }
+      };
+    }
+  };
+
+  // 1. Falha na RPC -> falha fechado (500) e nunca altera a senha no Auth
+  const failRes = await handleAdminManageUserRequest(
+    new Request('https://example.invalid/admin-manage-user', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer jwt-prod' },
+      body: JSON.stringify({ action: 'reset-own-password' })
+    }),
+    prodLikeDeps
+  );
+  assert.equal(failRes.status, 500);
+  assert.equal(rpcCalls.length, 1);
+  assert.equal(rpcCalls[0].fnName, 'reserve_password_reset_rate_limit');
+  assert.equal('p_now' in rpcCalls[0].params, false);
+  assert.equal(authUpdates.length, 0);
+
+  // 2. Com RPC operacional e sem deps.rateLimitStore (formato exato de index.ts), usa a RPC e conclui reset
+  delete prodLikeDeps.rateLimitStore;
+  rpcFail = false;
+  const okRes = await handleAdminManageUserRequest(
+    new Request('https://example.invalid/admin-manage-user', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer jwt-prod' },
+      body: JSON.stringify({ action: 'reset-own-password' })
+    }),
+    prodLikeDeps
+  );
+  assert.equal(okRes.status, 200);
+  assert.equal(rpcCalls.length, 2);
+  assert.equal(rpcCalls[1].fnName, 'reserve_password_reset_rate_limit');
+  assert.equal(rpcCalls[1].params.p_auth_user_id, synthUid);
+  assert.equal(rpcCalls[1].params.p_usuario_id, 'usr_prod_99');
+  assert.equal(authUpdates.length, 1);
 });
 
 test('Recuperação de senha por e-mail: redirectTo com origin dinâmico, detecção/limpeza do hash recovery e completeRecoveryPasswordChange', async () => {

@@ -10,15 +10,21 @@
 // 4. create-user: criação direta por Administrador ativo usando DEFAULT_TEMP_PASSWORD e force_password_change = true (com rollback em falha)
 // 5. reset-password: redefinição administrativa por auth_user_id usando DEFAULT_TEMP_PASSWORD e force_password_change = true
 // 6. complete-password-change: confirmação pelo próprio usuário autenticado ativo (via auth.uid()) após troca de senha no Auth
-// 7. list-access-requests / review-access-request / approve-access-request: revisão administrativa segura de solicitações
+// 7. reset-own-password: autoatendimento com reserva atômica via RPC reserve_password_reset_rate_limit (sem rateLimitStore em produção)
+// 8. list-access-requests / review-access-request / approve-access-request: revisão administrativa segura de solicitações
 
 import { serve } from 'https://deno.land/std@0.177.0/http/server.ts';
 import { createClient } from 'https://esm.sh/@supabase/supabase-js@2.39.0';
-import { handleAdminManageUserRequest } from './handler.ts';
+import { type AdminManageUserDeps, handleAdminManageUserRequest } from './handler.ts';
 
-serve((req: Request) =>
-  handleAdminManageUserRequest(req, {
-    envGet: (name: string) => Deno.env.get(name),
-    createSupabaseClient: createClient
-  })
-);
+type ProductionAdminManageUserDeps = Omit<AdminManageUserDeps, 'rateLimitStore' | 'now'> & {
+  rateLimitStore?: never;
+  now?: never;
+};
+
+const productionDeps: ProductionAdminManageUserDeps = {
+  envGet: (name: string) => Deno.env.get(name),
+  createSupabaseClient: createClient
+};
+
+serve((req: Request) => handleAdminManageUserRequest(req, productionDeps));

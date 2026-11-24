@@ -405,12 +405,11 @@ export async function handleAdminManageUserRequest(
 
       const nowMs = typeof deps.now === 'function' ? deps.now() : Date.now();
       const nowIso = new Date(nowMs).toISOString();
-      const windowStartIso = new Date(nowMs - RESET_OWN_WINDOW_MS).toISOString();
       const rateKey = String(callerUser.id);
-      let recentStoreCalls: number[] | null = null;
+      const allowTestRateLimitStore = Boolean(deps.rateLimitStore) && !deps.envGet('DENO_DEPLOYMENT_ID');
 
-      if (deps.rateLimitStore) {
-        recentStoreCalls = (deps.rateLimitStore.get(rateKey) || []).filter(
+      if (allowTestRateLimitStore && deps.rateLimitStore) {
+        const recentStoreCalls = (deps.rateLimitStore.get(rateKey) || []).filter(
           (ts: number) => ts > nowMs - RESET_OWN_WINDOW_MS
         );
         if (recentStoreCalls.length >= RESET_OWN_MAX_PER_HOUR) {
@@ -423,15 +422,27 @@ export async function handleAdminManageUserRequest(
             429
           );
         }
+        recentStoreCalls.push(nowMs);
+        deps.rateLimitStore.set(rateKey, recentStoreCalls);
       } else {
-        const { count: rateCount, error: rateQueryErr } = await supabaseAdmin
-          .from('password_reset_rate_limits')
-          .select('id', { count: 'exact', head: true })
-          .eq('auth_user_id', rateKey)
-          .eq('action', 'reset-own-password')
-          .gte('created_at', windowStartIso);
+        const rpcParams: Record<string, any> = {
+          p_auth_user_id: rateKey,
+          p_usuario_id: String(callerProfile.id),
+          p_action: 'reset-own-password',
+          p_window_minutes: 60,
+          p_max_attempts: RESET_OWN_MAX_PER_HOUR
+        };
+        if (typeof deps.now === 'function') {
+          rpcParams.p_now = nowIso;
+        }
 
-        if (rateQueryErr || typeof rateCount !== 'number') {
+        const { data: rpcData, error: rateRpcErr } = await supabaseAdmin.rpc(
+          'reserve_password_reset_rate_limit',
+          rpcParams
+        );
+
+        const reservation = Array.isArray(rpcData) ? rpcData[0] : rpcData;
+        if (rateRpcErr || !reservation || typeof reservation.allowed !== 'boolean') {
           return jsonResponse(
             {
               success: false,
@@ -441,7 +452,7 @@ export async function handleAdminManageUserRequest(
           );
         }
 
-        if (rateCount >= RESET_OWN_MAX_PER_HOUR) {
+        if (!reservation.allowed) {
           return jsonResponse(
             {
               success: false,
@@ -486,30 +497,6 @@ export async function handleAdminManageUserRequest(
           },
           500
         );
-      }
-
-      if (deps.rateLimitStore && recentStoreCalls) {
-        recentStoreCalls.push(nowMs);
-        deps.rateLimitStore.set(rateKey, recentStoreCalls);
-      } else {
-        const { error: rateInsErr } = await supabaseAdmin
-          .from('password_reset_rate_limits')
-          .insert({
-            auth_user_id: rateKey,
-            usuario_id: String(callerProfile.id),
-            action: 'reset-own-password',
-            created_at: nowIso
-          });
-
-        if (rateInsErr) {
-          return jsonResponse(
-            {
-              success: false,
-              error: 'Não foi possível concluir a redefinição de senha.'
-            },
-            500
-          );
-        }
       }
 
       await recordResetOwnPasswordAuditSafe(supabaseAdmin, deps, {
