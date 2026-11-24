@@ -72,6 +72,7 @@ export interface CompletePasswordChangeResult {
   error?: string;
   profile?: AuthUserProfile | null;
   passwordUpdatedInAuth?: boolean;
+  requiresForcedPasswordChange?: boolean;
 }
 
 export interface ChangeOwnPasswordResult {
@@ -893,19 +894,32 @@ export function createAuthService(getDeps?: () => AuthServiceDeps) {
           };
         }
 
-        const { data: sessionData } = await client.auth.getSession();
+        const { data: sessionData, error: sessionErr } = await client.auth.getSession();
         const currentUid = String(sessionData?.session?.user?.id || '').trim();
         const accessToken = sessionData?.session?.access_token;
 
-        if (currentUid) {
-          const finalProf = await this.resolveVerifiedProfile(currentUid, accessToken);
+        if (sessionErr || !currentUid) {
           return {
-            success: true,
-            profile: finalProf.profile
+            success: false,
+            error: 'Sessão inválida ou expirada. Faça login novamente.'
           };
         }
 
-        return { success: true, profile: null };
+        const finalProf = await this.resolveVerifiedProfile(currentUid, accessToken);
+        if (!finalProf.profile) {
+          return {
+            success: false,
+            error:
+              finalProf.error ||
+              'Não foi possível validar o perfil institucional após a redefinição de senha.'
+          };
+        }
+
+        return {
+          success: true,
+          requiresForcedPasswordChange: Boolean(finalProf.profile.forcePasswordChange),
+          profile: finalProf.profile
+        };
       } catch {
         return {
           success: false,

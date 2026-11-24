@@ -1616,7 +1616,22 @@ export default function App() {
         <ForcePasswordChangePage
           profile={currentUserProfile}
           mode={isPasswordRecoveryMode ? 'recovery' : 'forced'}
+          onRecoveryRequiresForcedChange={(updatedProfile) => {
+            setCurrentUserProfile(updatedProfile);
+            setUserRole(updatedProfile.papel);
+            setIsPasswordRecoveryMode(false);
+            setAuthErrorNotice(null);
+            clearAuthHashFromUrl();
+          }}
           onPasswordChanged={(updatedProfile) => {
+            if (updatedProfile.forcePasswordChange) {
+              setCurrentUserProfile(updatedProfile);
+              setUserRole(updatedProfile.papel);
+              setIsPasswordRecoveryMode(false);
+              setAuthErrorNotice(null);
+              clearAuthHashFromUrl();
+              return;
+            }
             setCurrentUserProfile(updatedProfile);
             setUserRole(updatedProfile.papel);
             setIsPasswordRecoveryMode(false);

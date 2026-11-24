@@ -30,15 +30,89 @@ export function validateForcePasswordChangeInput(
   return null;
 }
 
+export interface ForcePasswordSubmitOutcome {
+  ok: boolean;
+  transitionToForced: boolean;
+  nextMode: 'forced' | 'recovery';
+  nextCurrentPassword: string;
+  nextNewPassword: string;
+  nextConfirmPassword: string;
+  notice: string | null;
+  error: string | null;
+  unlockedProfile: AuthUserProfile | null;
+}
+
+export function resolveForcePasswordSubmitOutcome(
+  effectiveMode: 'forced' | 'recovery',
+  attemptedNewPassword: string,
+  res: CompletePasswordChangeResult
+): ForcePasswordSubmitOutcome {
+  if (!res.success || !res.profile) {
+    return {
+      ok: false,
+      transitionToForced: false,
+      nextMode: effectiveMode,
+      nextCurrentPassword: '',
+      nextNewPassword: attemptedNewPassword,
+      nextConfirmPassword: attemptedNewPassword,
+      notice: null,
+      error: res.error || 'Não foi possível concluir a alteração obrigatória de senha.',
+      unlockedProfile: null
+    };
+  }
+
+  if (res.requiresForcedPasswordChange || res.profile.forcePasswordChange) {
+    if (effectiveMode === 'recovery') {
+      return {
+        ok: true,
+        transitionToForced: true,
+        nextMode: 'forced',
+        nextCurrentPassword: attemptedNewPassword,
+        nextNewPassword: '',
+        nextConfirmPassword: '',
+        notice: `Sua senha de recuperação foi registrada, mas há uma troca obrigatória pendente. Defina outra senha pessoal com no mínimo ${MIN_PASSWORD_LENGTH} caracteres para liberar o acesso.`,
+        error: null,
+        unlockedProfile: null
+      };
+    }
+
+    return {
+      ok: false,
+      transitionToForced: false,
+      nextMode: 'forced',
+      nextCurrentPassword: '',
+      nextNewPassword: '',
+      nextConfirmPassword: '',
+      notice: null,
+      error: res.error || 'Não foi possível concluir a alteração obrigatória de senha.',
+      unlockedProfile: null
+    };
+  }
+
+  return {
+    ok: true,
+    transitionToForced: false,
+    nextMode: effectiveMode,
+    nextCurrentPassword: '',
+    nextNewPassword: '',
+    nextConfirmPassword: '',
+    notice: null,
+    error: null,
+    unlockedProfile: res.profile
+  };
+}
+
 interface ForcePasswordChangePageProps {
   profile: AuthUserProfile;
   mode?: 'forced' | 'recovery';
   onPasswordChanged: (updatedProfile: AuthUserProfile) => void;
+  onRecoveryRequiresForcedChange?: (updatedProfile: AuthUserProfile) => void;
   onLogout: () => Promise<void> | void;
   submitPasswordChange?: (
     newPassword: string,
     confirmPassword: string,
-    currentPassword?: string
+    currentPassword?: string,
+    effectiveMode?: 'forced' | 'recovery'
   ) => Promise<CompletePasswordChangeResult>;
 }
 
@@ -46,9 +120,11 @@ export function ForcePasswordChangePage({
   profile,
   mode = 'forced',
   onPasswordChanged,
+  onRecoveryRequiresForcedChange,
   onLogout,
   submitPasswordChange
 }: ForcePasswordChangePageProps) {
+  const [localForcedMode, setLocalForcedMode] = useState(false);
   const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
@@ -57,6 +133,20 @@ export function ForcePasswordChangePage({
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [loading, setLoading] = useState(false);
   const [errorMsg, setErrorMsg] = useState<string | null>(null);
+  const [transitionNotice, setTransitionNotice] = useState<string | null>(null);
+
+  const effectiveMode: 'forced' | 'recovery' =
+    localForcedMode || mode === 'forced' ? 'forced' : 'recovery';
+
+  const handleLogoutClick = async () => {
+    setCurrentPassword('');
+    setNewPassword('');
+    setConfirmPassword('');
+    setTransitionNotice(null);
+    setLocalForcedMode(false);
+    setErrorMsg(null);
+    await onLogout();
+  };
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -66,7 +156,7 @@ export function ForcePasswordChangePage({
       newPassword,
       confirmPassword,
       currentPassword,
-      mode
+      effectiveMode
     );
     if (validationError) {
       setErrorMsg(validationError);
@@ -77,22 +167,39 @@ export function ForcePasswordChangePage({
     try {
       const executor =
         submitPasswordChange ||
-        ((pwd: string, confirmPwd: string, curPwd?: string) =>
-          mode === 'recovery'
+        ((pwd: string, confirmPwd: string, curPwd?: string, activeMode?: 'forced' | 'recovery') =>
+          (activeMode || effectiveMode) === 'recovery'
             ? authService.completeRecoveryPasswordChange(pwd, confirmPwd)
             : authService.completeFirstAccessPasswordChange(String(curPwd || ''), pwd, confirmPwd));
-      const res = await executor(newPassword, confirmPassword, currentPassword);
-      if (!res.success || !res.profile || res.profile.forcePasswordChange) {
-        setErrorMsg(
-          res.error || 'Não foi possível concluir a alteração obrigatória de senha.'
-        );
+      const res = await executor(newPassword, confirmPassword, currentPassword, effectiveMode);
+      const outcome = resolveForcePasswordSubmitOutcome(effectiveMode, newPassword, res);
+
+      if (!outcome.ok) {
+        setErrorMsg(outcome.error);
         return;
       }
 
-      setCurrentPassword('');
-      setNewPassword('');
-      setConfirmPassword('');
-      onPasswordChanged(res.profile);
+      if (outcome.transitionToForced && res.profile) {
+        setCurrentPassword(outcome.nextCurrentPassword);
+        setNewPassword(outcome.nextNewPassword);
+        setConfirmPassword(outcome.nextConfirmPassword);
+        setShowCurrentPassword(false);
+        setShowNewPassword(false);
+        setShowConfirmPassword(false);
+        setLocalForcedMode(true);
+        setTransitionNotice(outcome.notice);
+        onRecoveryRequiresForcedChange?.(res.profile);
+        return;
+      }
+
+      if (outcome.unlockedProfile) {
+        setCurrentPassword('');
+        setNewPassword('');
+        setConfirmPassword('');
+        setTransitionNotice(null);
+        setLocalForcedMode(false);
+        onPasswordChanged(outcome.unlockedProfile);
+      }
     } catch (err: any) {
       setErrorMsg(err?.message || 'Falha ao atualizar a senha.');
     } finally {
@@ -142,7 +249,7 @@ export function ForcePasswordChangePage({
             ADMINISTRA-CSB
           </span>
           <span style={{ fontSize: '10px', letterSpacing: '0.04em' }}>
-            {mode === 'recovery'
+            {effectiveMode === 'recovery'
               ? 'SEMA-MT · SURH · REDEFINIÇÃO DE SENHA'
               : 'SEMA-MT · SURH · TROCA OBRIGATÓRIA DE SENHA'}
           </span>
@@ -192,7 +299,7 @@ export function ForcePasswordChangePage({
                 lineHeight: '1.5'
               }}
             >
-              {mode === 'recovery' ? (
+              {effectiveMode === 'recovery' ? (
                 <>
                   Olá, <strong>{profile.nome || 'servidor'}</strong>. Defina uma nova senha pessoal para concluir a recuperação da sua conta.
                 </>
@@ -216,9 +323,11 @@ export function ForcePasswordChangePage({
               lineHeight: '1.45'
             }}
           >
-            {mode === 'recovery'
-              ? `Informe uma nova senha com no mínimo ${MIN_PASSWORD_LENGTH} caracteres e demais requisitos de segurança configurados para acessar o sistema.`
-              : `O acesso aos módulos do sistema permanece bloqueado até a confirmação da nova senha com no mínimo ${MIN_PASSWORD_LENGTH} caracteres e demais requisitos de segurança configurados.`}
+            {transitionNotice
+              ? transitionNotice
+              : effectiveMode === 'recovery'
+                ? `Informe uma nova senha com no mínimo ${MIN_PASSWORD_LENGTH} caracteres e demais requisitos de segurança configurados para acessar o sistema.`
+                : `O acesso aos módulos do sistema permanece bloqueado até a confirmação da nova senha com no mínimo ${MIN_PASSWORD_LENGTH} caracteres e demais requisitos de segurança configurados.`}
           </div>
 
           {errorMsg && (
@@ -241,7 +350,7 @@ export function ForcePasswordChangePage({
           )}
 
           <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
-            {mode === 'forced' && (
+            {effectiveMode === 'forced' && (
               <div>
                 <label
                   htmlFor="force-current-password-input"
@@ -415,7 +524,7 @@ export function ForcePasswordChangePage({
             <div style={{ display: 'flex', gap: '10px', marginTop: '6px' }}>
               <button
                 type="button"
-                onClick={onLogout}
+                onClick={handleLogoutClick}
                 disabled={loading}
                 style={{
                   padding: '12px 16px',

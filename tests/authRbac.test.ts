@@ -24,6 +24,7 @@ import {
 } from '../src/services/authService';
 import {
   ForcePasswordChangePage,
+  resolveForcePasswordSubmitOutcome,
   validateForcePasswordChangeInput
 } from '../src/components/ForcePasswordChangePage';
 import {
@@ -2683,7 +2684,7 @@ test('Edge Function admin-manage-user: reset-password por auth_user_id (sem e-ma
   const synthInactiveAdminUid = '00000000-0000-4000-8000-000000000064';
   const synthTempSecret = 'Synth#ResetSecret2026!';
 
-  const makeResetScenario = (opts?: { defaultTempPassword?: string }) => {
+  const makeResetScenario = (opts?: { defaultTempPassword?: string; anonKey?: string | null }) => {
     const authUsers: Array<{
       id: string;
       email: string;
@@ -2770,6 +2771,7 @@ test('Edge Function admin-manage-user: reset-password por auth_user_id (sem e-ma
     ];
     const stats = {
       authUpdateCalls: [] as Array<{ id: string; password?: string }>,
+      signInCalls: [] as Array<{ clientKey: string; email: string }>,
       failNextAuthUpdate: false,
       failNextUsuarioUpdate: false,
       usuarioUpdates: [] as Array<Record<string, any>>,
@@ -2781,13 +2783,18 @@ test('Edge Function admin-manage-user: reset-password por auth_user_id (sem e-ma
       envGet(name: string) {
         if (name === 'SUPABASE_URL') return 'https://example.invalid';
         if (name === 'SUPABASE_SERVICE_ROLE_KEY') return 'synth-service-role-secret-61';
+        if (name === 'SUPABASE_ANON_KEY') {
+          return opts && 'anonKey' in opts
+            ? (opts.anonKey ?? undefined)
+            : 'synth-anon-key-61';
+        }
         if (name === 'DEFAULT_TEMP_PASSWORD') return opts?.defaultTempPassword;
         return undefined;
       },
       onAuditEvent(evt: Record<string, any>) {
         stats.auditEvents.push(evt);
       },
-      createSupabaseClient() {
+      createSupabaseClient(_url: string, clientKey: string) {
         return {
           auth: {
             async getUser(jwt: string) {
@@ -2813,6 +2820,7 @@ test('Edge Function admin-manage-user: reset-password por auth_user_id (sem e-ma
               };
             },
             async signInWithPassword({ email, password }: { email: string; password: string }) {
+              stats.signInCalls.push({ clientKey, email });
               const found = authUsers.find(
                 u => u.email.trim().toLowerCase() === String(email || '').trim().toLowerCase()
               );
@@ -3214,6 +3222,46 @@ test('Edge Function admin-manage-user: reset-password por auth_user_id (sem e-ma
       assert.equal(s.usuarios.find(u => u.id === 'usr_viewer_63')?.papel, 'Visualizador');
       assert.equal(s.authUsers.find(u => u.id === synthAdminUid)?.password, 'old');
       assert.equal(s.usuarios.find(u => u.id === 'usr_admin_61')?.papel, 'Administrador');
+
+      // Sem SUPABASE_ANON_KEY -> falha fechado (500), não cai em fallback para serviceRoleKey,
+      // não chama signInWithPassword, não altera senha e mantém force_password_change=true
+      const missingAnonScenario = makeResetScenario({
+        defaultTempPassword: synthTempSecret,
+        anonKey: null
+      });
+      const missingAnonRes = await handleAdminManageUserRequest(
+        new Request('https://example.invalid/admin-manage-user', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: 'Bearer synth-viewer-jwt' },
+          body: JSON.stringify({
+            action: 'complete-password-change',
+            currentPassword: 'OldTempPassword@63',
+            newPassword: 'ViewerNewPassword@8'
+          })
+        }),
+        missingAnonScenario.deps
+      );
+      assert.equal(missingAnonRes.status, 500);
+      const missingAnonBody = await missingAnonRes.text();
+      assert.equal(missingAnonBody.includes('SUPABASE_ANON_KEY'), false);
+      assert.equal(missingAnonBody.includes('serviceRole'), false);
+      assert.equal(missingAnonScenario.stats.signInCalls.length, 0);
+      assert.equal(missingAnonScenario.stats.authUpdateCalls.length, 0);
+      assert.equal(missingAnonScenario.stats.usuarioUpdates.length, 0);
+      assert.equal(
+        missingAnonScenario.authUsers.find(u => u.id === synthViewerUid)?.password,
+        'OldTempPassword@63'
+      );
+      assert.equal(
+        missingAnonScenario.usuarios.find(u => u.id === 'usr_viewer_63')?.force_password_change,
+        true
+      );
+
+      // Todas as verificações signInWithPassword no caminho válido usaram SUPABASE_ANON_KEY (nunca service_role)
+      assert.ok(s.stats.signInCalls.length >= 1);
+      assert.ok(
+        s.stats.signInCalls.every(call => call.clientKey === 'synth-anon-key-61')
+      );
 
       // Nenhuma senha aparece na resposta, auditoria ou logs
       const allSerialized = [
@@ -4436,12 +4484,14 @@ test('Edge Function index.ts (produção): monta dependências sem rateLimitStor
   assert.equal(authUpdates.length, 1);
 });
 
-test('Recuperação de senha por e-mail: redirectTo com origin dinâmico, detecção/limpeza do hash recovery e completeRecoveryPasswordChange', async () => {
+test('Recuperação de senha por e-mail: redirectTo com origin dinâmico, detecção/limpeza do hash recovery e fluxo completo para force_password_change false e true', async () => {
   const synthUid = '00000000-0000-4000-8000-000000000099';
   const originalWindow = (globalThis as any).window;
   let capturedRedirectTo = '';
   let capturedHash = '#access_token=synth-tok&refresh_token=synth-ref&type=recovery';
   let replaceStateCalls = 0;
+  const localStorageWrites: string[] = [];
+  const sessionStorageWrites: string[] = [];
 
   (globalThis as any).window = {
     location: {
@@ -4461,6 +4511,16 @@ test('Recuperação de senha por e-mail: redirectTo com origin dinâmico, detec�
         replaceStateCalls += 1;
         if (!url.includes('#')) capturedHash = '';
       }
+    },
+    localStorage: {
+      setItem(k: string, v: string) {
+        localStorageWrites.push(`${k}=${v}`);
+      }
+    },
+    sessionStorage: {
+      setItem(k: string, v: string) {
+        sessionStorageWrites.push(`${k}=${v}`);
+      }
     }
   };
 
@@ -4474,9 +4534,10 @@ test('Recuperação de senha por e-mail: redirectTo com origin dinâmico, detec�
     assert.equal(capturedHash, '');
     assert.equal(replaceStateCalls, 1);
 
-    const forceFlag = false;
+    let forceFlag = false;
+    let returnMissingSession = false;
     const updatedPasswords: string[] = [];
-    let completeInvokedInRecovery = 0;
+    const completeCalls: Array<{ currentPassword: string; newPassword: string }> = [];
     const mockClient: any = {
       auth: {
         async resetPasswordForEmail(_email: string, opts: { redirectTo?: string }) {
@@ -4484,6 +4545,9 @@ test('Recuperação de senha por e-mail: redirectTo com origin dinâmico, detec�
           return { error: null };
         },
         async getSession() {
+          if (returnMissingSession) {
+            return { data: { session: null }, error: null };
+          }
           return {
             data: { session: { access_token: 'tok-rec', user: { id: synthUid } } },
             error: null
@@ -4497,7 +4561,12 @@ test('Recuperação de senha por e-mail: redirectTo com origin dinâmico, detec�
       functions: {
         async invoke(_fn: string, opts: any) {
           if (opts?.body?.action === 'complete-password-change') {
-            completeInvokedInRecovery += 1;
+            completeCalls.push({
+              currentPassword: opts.body.currentPassword,
+              newPassword: opts.body.newPassword
+            });
+            forceFlag = false;
+            return { data: { success: true, forcePasswordChange: false }, error: null };
           }
           return { data: null, error: null };
         }
@@ -4538,16 +4607,112 @@ test('Recuperação de senha por e-mail: redirectTo com origin dinâmico, detec�
     assert.equal(capturedRedirectTo, 'https://administra.sema.example.invalid');
     assert.equal(capturedRedirectTo.includes('localhost'), false);
 
+    // 1. Senha < 8 caracteres é recusada
     const shortRecovery = await svc.completeRecoveryPasswordChange('1234567', '1234567');
     assert.equal(shortRecovery.success, false);
     assert.match(String(shortRecovery.error), /8 caracteres/);
     assert.equal(updatedPasswords.length, 0);
 
+    // 2. Sem sessão válida após updateUser -> falha fechado
+    returnMissingSession = true;
+    const noSessRecovery = await svc.completeRecoveryPasswordChange('NovaRec@8', 'NovaRec@8');
+    assert.equal(noSessRecovery.success, false);
+    returnMissingSession = false;
+
+    // 3. Conta com force_password_change=false -> conclui recuperação normalmente e libera acesso
+    forceFlag = false;
     const okRecovery = await svc.completeRecoveryPasswordChange('NovaRec@8', 'NovaRec@8');
     assert.equal(okRecovery.success, true);
-    assert.deepEqual(updatedPasswords, ['NovaRec@8']);
+    assert.equal(okRecovery.requiresForcedPasswordChange, false);
     assert.equal(okRecovery.profile?.forcePasswordChange, false);
-    assert.equal(completeInvokedInRecovery, 0);
+    assert.equal(completeCalls.length, 0);
+    const normalOutcome = resolveForcePasswordSubmitOutcome('recovery', 'NovaRec@8', okRecovery);
+    assert.equal(normalOutcome.ok, true);
+    assert.equal(normalOutcome.transitionToForced, false);
+    assert.equal(normalOutcome.unlockedProfile?.forcePasswordChange, false);
+
+    // 4. Conta com force_password_change=true -> NÃO limpa flag nem libera sistema;
+    //    encaminha para troca obrigatória usando a senha recém-definida como currentPassword em memória
+    forceFlag = true;
+    const forcedRecovery = await svc.completeRecoveryPasswordChange('RecTemp@8', 'RecTemp@8');
+    assert.equal(forcedRecovery.success, true);
+    assert.equal(forcedRecovery.requiresForcedPasswordChange, true);
+    assert.equal(forcedRecovery.profile?.forcePasswordChange, true);
+    assert.equal(forceFlag, true);
+    assert.equal(completeCalls.length, 0);
+
+    const transitionOutcome = resolveForcePasswordSubmitOutcome(
+      'recovery',
+      'RecTemp@8',
+      forcedRecovery
+    );
+    assert.equal(transitionOutcome.ok, true);
+    assert.equal(transitionOutcome.transitionToForced, true);
+    assert.equal(transitionOutcome.nextMode, 'forced');
+    assert.equal(transitionOutcome.nextCurrentPassword, 'RecTemp@8');
+    assert.equal(transitionOutcome.nextNewPassword, '');
+    assert.equal(transitionOutcome.nextConfirmPassword, '');
+    assert.equal(transitionOutcome.unlockedProfile, null);
+    assert.match(String(transitionOutcome.notice), /troca obrigatória/i);
+
+    // Reutilizar a mesma senha da recuperação na 2ª etapa é bloqueado; senha < 8 também é bloqueada
+    assert.match(
+      String(
+        validateForcePasswordChangeInput(
+          'RecTemp@8',
+          'RecTemp@8',
+          transitionOutcome.nextCurrentPassword,
+          transitionOutcome.nextMode
+        )
+      ),
+      /diferente/
+    );
+    assert.match(
+      String(
+        validateForcePasswordChangeInput(
+          'Ab1!xyz',
+          'Ab1!xyz',
+          transitionOutcome.nextCurrentPassword,
+          transitionOutcome.nextMode
+        )
+      ),
+      /8 caracteres/
+    );
+
+    // Escolha da segunda senha distinta (>= 8) executa complete-password-change, limpa flag e libera acesso
+    const step2Res = await svc.completeFirstAccessPasswordChange(
+      transitionOutcome.nextCurrentPassword,
+      'FinalPes@8',
+      'FinalPes@8'
+    );
+    assert.equal(step2Res.success, true);
+    assert.equal(step2Res.profile?.forcePasswordChange, false);
+    assert.equal(forceFlag, false);
+    assert.equal(completeCalls.length, 1);
+    assert.deepEqual(completeCalls[0], {
+      currentPassword: 'RecTemp@8',
+      newPassword: 'FinalPes@8'
+    });
+
+    const finalOutcome = resolveForcePasswordSubmitOutcome(
+      transitionOutcome.nextMode,
+      'FinalPes@8',
+      step2Res
+    );
+    assert.equal(finalOutcome.ok, true);
+    assert.equal(finalOutcome.transitionToForced, false);
+    assert.equal(finalOutcome.nextCurrentPassword, '');
+    assert.equal(finalOutcome.unlockedProfile?.forcePasswordChange, false);
+
+    // Nenhuma senha vazada em storage ou URL
+    const persisted = [
+      localStorageWrites.join('\n'),
+      sessionStorageWrites.join('\n'),
+      capturedHash
+    ].join('\n');
+    assert.equal(persisted.includes('RecTemp@8'), false);
+    assert.equal(persisted.includes('FinalPes@8'), false);
+    assert.equal(persisted.includes('NovaRec@8'), false);
 
     const recPageHtml = renderToStaticMarkup(
       React.createElement(ForcePasswordChangePage, {
@@ -4577,6 +4742,7 @@ test('Recuperação de senha por e-mail: redirectTo com origin dinâmico, detec�
     assert.equal(appSrc.includes('hasRecoveryTokenInHash'), true);
     assert.equal(appSrc.includes('clearAuthHashFromUrl'), true);
     assert.equal(appSrc.includes('isPasswordRecoveryMode'), true);
+    assert.equal(appSrc.includes('onRecoveryRequiresForcedChange'), true);
   } finally {
     if (originalWindow === undefined) {
       delete (globalThis as any).window;

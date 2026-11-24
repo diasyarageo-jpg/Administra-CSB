@@ -398,7 +398,17 @@ export async function handleAdminManageUserRequest(
         );
       }
 
-      const authVerifyKey = deps.envGet('SUPABASE_ANON_KEY') || serviceRoleKey;
+      const authVerifyKey = String(deps.envGet('SUPABASE_ANON_KEY') || '').trim();
+      if (!authVerifyKey) {
+        return jsonResponse(
+          {
+            success: false,
+            error: 'Não foi possível confirmar a alteração de senha.'
+          },
+          500
+        );
+      }
+
       const authVerifyClient = deps.createSupabaseClient(supabaseUrl, authVerifyKey, {
         auth: {
           autoRefreshToken: false,
