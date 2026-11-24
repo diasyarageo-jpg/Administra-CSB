@@ -99,9 +99,10 @@ export function buildDefaultOwnResetPassword(matriculaRaw: unknown, nomeRaw: unk
   return generated;
 }
 
-async function recordResetOwnPasswordAuditSafe(
+async function recordSelfPasswordEventAuditSafe(
   supabaseAdmin: any,
   deps: AdminManageUserDeps,
+  event: 'reset-own-password' | 'complete-password-change',
   payload: {
     usuarioId: string;
     authUserId: string;
@@ -113,7 +114,7 @@ async function recordResetOwnPasswordAuditSafe(
   try {
     if (typeof deps.onAuditEvent === 'function') {
       await deps.onAuditEvent({
-        event: 'reset-own-password',
+        event,
         usuarioId: payload.usuarioId,
         authUserId: payload.authUserId,
         timestamp: payload.timestamp
@@ -137,7 +138,7 @@ async function recordResetOwnPasswordAuditSafe(
         sistema_origem: 'Administra-CSB',
         alterado_em: payload.timestamp,
         campos_alterados: ['force_password_change'],
-        motivo: 'reset-own-password',
+        motivo: event,
         dados_anteriores: null,
         dados_novos: null
       });
@@ -145,6 +146,20 @@ async function recordResetOwnPasswordAuditSafe(
   } catch {
     // Registro de auditoria em tabela auxiliar é best-effort e nunca grava senha
   }
+}
+
+async function recordResetOwnPasswordAuditSafe(
+  supabaseAdmin: any,
+  deps: AdminManageUserDeps,
+  payload: {
+    usuarioId: string;
+    authUserId: string;
+    usuarioLogin: string | null;
+    usuarioNome: string | null;
+    timestamp: string;
+  }
+): Promise<void> {
+  return recordSelfPasswordEventAuditSafe(supabaseAdmin, deps, 'reset-own-password', payload);
 }
 
 async function deleteAuthUserSafe(supabaseAdmin: any, authUserId: string): Promise<void> {
@@ -299,8 +314,10 @@ export async function handleAdminManageUserRequest(
         String(callerProfile.auth_user_id || '').trim() === String(callerUser.id).trim());
 
     // =========================================================================
-    // AÇÃO SELF-SERVICE: complete-password-change (Conclusão de troca obrigatória)
-    // Restrita exclusivamente ao próprio usuário autenticado ativo via auth.uid()
+    // AÇÃO SELF-SERVICE: complete-password-change (Troca e liberação no servidor)
+    // Restrita exclusivamente ao próprio usuário autenticado ativo via auth.uid().
+    // Confirma currentPassword no Supabase Auth, atualiza newPassword para auth.uid()
+    // e só então limpa force_password_change = false.
     // =========================================================================
     if (action === 'complete-password-change') {
       const callerSituacao = String(callerProfile?.situacao || callerProfile?.status || '').trim();
@@ -322,7 +339,129 @@ export async function handleAdminManageUserRequest(
         );
       }
 
+      const currentPassword =
+        typeof safePayload.currentPassword === 'string' ? safePayload.currentPassword : '';
+      const newPassword =
+        typeof safePayload.newPassword === 'string' ? safePayload.newPassword : '';
+
+      if (!currentPassword || !newPassword) {
+        return jsonResponse(
+          {
+            success: false,
+            error: 'Informe a senha atual e a nova senha.'
+          },
+          400
+        );
+      }
+
+      if (newPassword.length < MIN_PASSWORD_LENGTH) {
+        return jsonResponse(
+          {
+            success: false,
+            error: `A nova senha deve ter no mínimo ${MIN_PASSWORD_LENGTH} caracteres.`
+          },
+          400
+        );
+      }
+
+      if (newPassword === currentPassword) {
+        return jsonResponse(
+          {
+            success: false,
+            error: 'A nova senha deve ser diferente da senha atual.'
+          },
+          400
+        );
+      }
+
+      let authoritativeAuthUser: any = callerUser;
+      if (
+        (!normalizeEmail(authoritativeAuthUser?.email) || !authoritativeAuthUser?.app_metadata) &&
+        typeof supabaseAdmin?.auth?.admin?.getUserById === 'function'
+      ) {
+        const { data: authLookup, error: authLookupErr } = await supabaseAdmin.auth.admin.getUserById(
+          callerUser.id
+        );
+        if (!authLookupErr && authLookup?.user && String(authLookup.user.id || '').trim() === String(callerUser.id).trim()) {
+          authoritativeAuthUser = authLookup.user;
+        }
+      }
+
+      const callerEmail = normalizeEmail(authoritativeAuthUser?.email);
+      if (!callerEmail) {
+        return jsonResponse(
+          {
+            success: false,
+            error: 'Não foi possível validar a conta autenticada.'
+          },
+          403
+        );
+      }
+
+      const authVerifyKey = deps.envGet('SUPABASE_ANON_KEY') || serviceRoleKey;
+      const authVerifyClient = deps.createSupabaseClient(supabaseUrl, authVerifyKey, {
+        auth: {
+          autoRefreshToken: false,
+          persistSession: false
+        }
+      });
+
+      const { data: verifyData, error: verifyErr } = await authVerifyClient.auth.signInWithPassword({
+        email: callerEmail,
+        password: currentPassword
+      });
+      const verifiedUid = String(verifyData?.user?.id || '').trim();
+      const currentPasswordVerified =
+        !verifyErr && verifiedUid !== '' && verifiedUid === String(callerUser.id).trim();
+
+      const callerAppMeta =
+        authoritativeAuthUser?.app_metadata && typeof authoritativeAuthUser.app_metadata === 'object'
+          ? authoritativeAuthUser.app_metadata
+          : {};
+      const hasPendingFlagClear = Boolean(callerAppMeta.pending_force_password_clear_at);
+
+      let retryAlreadyUpdatedInAuth = false;
+      if (!currentPasswordVerified && Boolean(callerProfile.force_password_change) && hasPendingFlagClear) {
+        const { data: retryData, error: retryErr } = await authVerifyClient.auth.signInWithPassword({
+          email: callerEmail,
+          password: newPassword
+        });
+        const retryUid = String(retryData?.user?.id || '').trim();
+        retryAlreadyUpdatedInAuth =
+          !retryErr && retryUid !== '' && retryUid === String(callerUser.id).trim();
+      }
+
+      if (!currentPasswordVerified && !retryAlreadyUpdatedInAuth) {
+        return jsonResponse(
+          {
+            success: false,
+            error: 'Senha atual incorreta.'
+          },
+          403
+        );
+      }
+
       const now = new Date().toISOString();
+      if (currentPasswordVerified) {
+        const { error: updAuthErr } = await supabaseAdmin.auth.admin.updateUserById(callerUser.id, {
+          password: newPassword,
+          app_metadata: {
+            ...callerAppMeta,
+            pending_force_password_clear_at: now
+          }
+        });
+
+        if (updAuthErr) {
+          return jsonResponse(
+            {
+              success: false,
+              error: 'Não foi possível atualizar a senha. Verifique os requisitos de segurança e tente novamente.'
+            },
+            400
+          );
+        }
+      }
+
       const { data: updatedOwn, error: updOwnErr } = await supabaseAdmin
         .from('usuarios')
         .update({
@@ -335,7 +474,7 @@ export async function handleAdminManageUserRequest(
         .select('id, force_password_change')
         .maybeSingle();
 
-      if (updOwnErr || !updatedOwn) {
+      if (updOwnErr || !updatedOwn || updatedOwn.force_password_change !== false) {
         return jsonResponse(
           {
             success: false,
@@ -344,6 +483,25 @@ export async function handleAdminManageUserRequest(
           500
         );
       }
+
+      try {
+        await supabaseAdmin.auth.admin.updateUserById(callerUser.id, {
+          app_metadata: {
+            ...callerAppMeta,
+            pending_force_password_clear_at: null
+          }
+        });
+      } catch {
+        // Limpeza do marcador transitório de app_metadata é best-effort
+      }
+
+      await recordSelfPasswordEventAuditSafe(supabaseAdmin, deps, 'complete-password-change', {
+        usuarioId: String(callerProfile.id),
+        authUserId: String(callerUser.id),
+        usuarioLogin: callerProfile.login ? String(callerProfile.login) : null,
+        usuarioNome: callerProfile.nome ? String(callerProfile.nome) : null,
+        timestamp: now
+      });
 
       return jsonResponse({
         success: true,

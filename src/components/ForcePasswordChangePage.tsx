@@ -8,10 +8,18 @@ import type { AuthUserProfile } from '../types/auth';
 
 export function validateForcePasswordChangeInput(
   newPassword: string,
-  confirmPassword: string
+  confirmPassword: string,
+  currentPassword?: string,
+  mode: 'forced' | 'recovery' = 'forced'
 ): string | null {
+  if (mode === 'forced' && !currentPassword) {
+    return 'Informe a senha atual.';
+  }
   if (!newPassword || !confirmPassword) {
     return 'Preencha e confirme a nova senha.';
+  }
+  if (mode === 'forced' && currentPassword && newPassword === currentPassword) {
+    return 'A nova senha deve ser diferente da senha atual.';
   }
   if (newPassword !== confirmPassword) {
     return 'A confirmação da nova senha não confere.';
@@ -29,7 +37,8 @@ interface ForcePasswordChangePageProps {
   onLogout: () => Promise<void> | void;
   submitPasswordChange?: (
     newPassword: string,
-    confirmPassword: string
+    confirmPassword: string,
+    currentPassword?: string
   ) => Promise<CompletePasswordChangeResult>;
 }
 
@@ -40,8 +49,10 @@ export function ForcePasswordChangePage({
   onLogout,
   submitPasswordChange
 }: ForcePasswordChangePageProps) {
+  const [currentPassword, setCurrentPassword] = useState('');
   const [newPassword, setNewPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
+  const [showCurrentPassword, setShowCurrentPassword] = useState(false);
   const [showNewPassword, setShowNewPassword] = useState(false);
   const [showConfirmPassword, setShowConfirmPassword] = useState(false);
   const [loading, setLoading] = useState(false);
@@ -51,7 +62,12 @@ export function ForcePasswordChangePage({
     e.preventDefault();
     setErrorMsg(null);
 
-    const validationError = validateForcePasswordChangeInput(newPassword, confirmPassword);
+    const validationError = validateForcePasswordChangeInput(
+      newPassword,
+      confirmPassword,
+      currentPassword,
+      mode
+    );
     if (validationError) {
       setErrorMsg(validationError);
       return;
@@ -61,13 +77,11 @@ export function ForcePasswordChangePage({
     try {
       const executor =
         submitPasswordChange ||
-        ((pwd: string, confirmPwd: string) =>
+        ((pwd: string, confirmPwd: string, curPwd?: string) =>
           mode === 'recovery'
-            ? authService.completeRecoveryPasswordChange(pwd, confirmPwd, {
-                forcePasswordChange: profile?.forcePasswordChange
-              })
-            : authService.completeFirstAccessPasswordChange(pwd, confirmPwd));
-      const res = await executor(newPassword, confirmPassword);
+            ? authService.completeRecoveryPasswordChange(pwd, confirmPwd)
+            : authService.completeFirstAccessPasswordChange(String(curPwd || ''), pwd, confirmPwd));
+      const res = await executor(newPassword, confirmPassword, currentPassword);
       if (!res.success || !res.profile || res.profile.forcePasswordChange) {
         setErrorMsg(
           res.error || 'Não foi possível concluir a alteração obrigatória de senha.'
@@ -75,6 +89,7 @@ export function ForcePasswordChangePage({
         return;
       }
 
+      setCurrentPassword('');
       setNewPassword('');
       setConfirmPassword('');
       onPasswordChanged(res.profile);
@@ -226,6 +241,63 @@ export function ForcePasswordChangePage({
           )}
 
           <form onSubmit={handleSubmit} style={{ display: 'flex', flexDirection: 'column', gap: '16px' }}>
+            {mode === 'forced' && (
+              <div>
+                <label
+                  htmlFor="force-current-password-input"
+                  style={{
+                    display: 'block',
+                    fontSize: '13px',
+                    fontWeight: 600,
+                    color: '#334155',
+                    marginBottom: '6px'
+                  }}
+                >
+                  Senha atual / temporária *
+                </label>
+                <div style={{ position: 'relative' }}>
+                  <input
+                    id="force-current-password-input"
+                    type={showCurrentPassword ? 'text' : 'password'}
+                    required
+                    autoComplete="current-password"
+                    value={currentPassword}
+                    onChange={e => setCurrentPassword(e.target.value)}
+                    placeholder="Informe a senha recebida ou atual"
+                    disabled={loading}
+                    style={{
+                      width: '100%',
+                      height: '46px',
+                      padding: '10px 44px 10px 14px',
+                      borderRadius: '10px',
+                      border: '1.5px solid #cbd5e1',
+                      fontSize: '13.5px',
+                      color: '#1e293b',
+                      boxSizing: 'border-box',
+                      outline: 'none'
+                    }}
+                  />
+                  <button
+                    type="button"
+                    onClick={() => setShowCurrentPassword(v => !v)}
+                    style={{
+                      position: 'absolute',
+                      right: '12px',
+                      top: '50%',
+                      transform: 'translateY(-50%)',
+                      background: 'none',
+                      border: 'none',
+                      cursor: 'pointer',
+                      color: showCurrentPassword ? '#00875a' : '#64748b',
+                      fontSize: '11px',
+                      fontWeight: 600
+                    }}
+                  >
+                    {showCurrentPassword ? 'Ocultar' : 'Ver'}
+                  </button>
+                </div>
+              </div>
+            )}
             <div>
               <label
                 htmlFor="force-new-password-input"

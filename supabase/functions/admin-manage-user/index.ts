@@ -9,7 +9,7 @@
 // 3. reject-user: restrita a Administrador ativo; registra recusa sem conceder acesso
 // 4. create-user: criação direta por Administrador ativo usando DEFAULT_TEMP_PASSWORD e force_password_change = true (com rollback em falha)
 // 5. reset-password: redefinição administrativa por auth_user_id usando DEFAULT_TEMP_PASSWORD e force_password_change = true
-// 6. complete-password-change: confirmação pelo próprio usuário autenticado ativo (via auth.uid()) após troca de senha no Auth
+// 6. complete-password-change: confirma senha atual no Auth, atualiza nova senha para auth.uid() no servidor e limpa force_password_change
 // 7. reset-own-password: autoatendimento com reserva atômica via RPC reserve_password_reset_rate_limit (sem rateLimitStore em produção)
 // 8. list-access-requests / review-access-request / approve-access-request: revisão administrativa segura de solicitações
 

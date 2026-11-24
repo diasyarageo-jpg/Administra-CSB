@@ -642,6 +642,7 @@ export function createAuthService(getDeps?: () => AuthServiceDeps) {
     },
 
     async completeFirstAccessPasswordChange(
+      currentPassword: string,
       newPassword: string,
       confirmPassword?: string
     ): Promise<CompletePasswordChangeResult> {
@@ -650,12 +651,12 @@ export function createAuthService(getDeps?: () => AuthServiceDeps) {
         return { success: false, error: 'Sistema de autenticação não configurado.' };
       }
 
-      if (!newPassword || typeof newPassword !== 'string') {
-        return { success: false, error: 'Informe a nova senha.' };
+      if (!currentPassword || typeof currentPassword !== 'string') {
+        return { success: false, error: 'Informe a senha atual.' };
       }
 
-      if (confirmPassword !== undefined && newPassword !== confirmPassword) {
-        return { success: false, error: 'A confirmação da nova senha não confere.' };
+      if (!newPassword || typeof newPassword !== 'string') {
+        return { success: false, error: 'Informe a nova senha.' };
       }
 
       if (newPassword.length < MIN_PASSWORD_LENGTH) {
@@ -665,37 +666,39 @@ export function createAuthService(getDeps?: () => AuthServiceDeps) {
         };
       }
 
+      if (newPassword === currentPassword) {
+        return {
+          success: false,
+          error: 'A nova senha deve ser diferente da senha atual.'
+        };
+      }
+
+      if (confirmPassword !== undefined && newPassword !== confirmPassword) {
+        return { success: false, error: 'A confirmação da nova senha não confere.' };
+      }
+
       try {
-        const { data: sessionData } = await client.auth.getSession();
+        const { data: sessionData, error: sessionErr } = await client.auth.getSession();
         const currentUid = String(sessionData?.session?.user?.id || '').trim();
-        if (!currentUid) {
+        if (sessionErr || !currentUid) {
           return { success: false, error: 'Sessão inválida ou expirada. Faça login novamente.' };
-        }
-
-        const { error: authErr } = await client.auth.updateUser({
-          password: newPassword
-        });
-
-        if (authErr) {
-          return {
-            success: false,
-            error: authErr.message || 'A nova senha não atende aos requisitos da política de segurança configurada.'
-          };
         }
 
         const { data: fnData, error: fnErr } = await client.functions.invoke('admin-manage-user', {
           body: {
-            action: 'complete-password-change'
+            action: 'complete-password-change',
+            currentPassword,
+            newPassword
           }
         });
 
         if (fnErr || !fnData?.success) {
           return {
             success: false,
-            passwordUpdatedInAuth: true,
             error:
               fnData?.error ||
-              'Senha alterada na autenticação, mas não foi possível confirmar a liberação no servidor.'
+              fnErr?.message ||
+              'Não foi possível concluir a alteração obrigatória de senha.'
           };
         }
 
@@ -707,17 +710,16 @@ export function createAuthService(getDeps?: () => AuthServiceDeps) {
         if (!verifiedRes.profile || verifiedRes.profile.forcePasswordChange) {
           return {
             success: false,
-            passwordUpdatedInAuth: true,
             error:
               verifiedRes.error ||
               'Não foi possível confirmar a atualização do perfil após a troca de senha.'
           };
         }
 
-      return {
-        success: true,
-        profile: verifiedRes.profile
-      };
+        return {
+          success: true,
+          profile: verifiedRes.profile
+        };
       } catch (err: any) {
         return {
           success: false,
@@ -781,17 +783,6 @@ export function createAuthService(getDeps?: () => AuthServiceDeps) {
           return { success: false, error: 'Senha atual incorreta' };
         }
 
-        const { error: updErr } = await client.auth.updateUser({
-          password: newPassword
-        });
-
-        if (updErr) {
-          return {
-            success: false,
-            error: 'Não foi possível atualizar a senha. Verifique os requisitos de segurança e tente novamente.'
-          };
-        }
-
         let requiresForceClear = options?.forcePasswordChange;
         if (requiresForceClear === undefined) {
           const currentProfileRes = await this.resolveVerifiedProfile(
@@ -805,14 +796,18 @@ export function createAuthService(getDeps?: () => AuthServiceDeps) {
         if (requiresForceClear) {
           const { data: fnData, error: fnErr } = await client.functions.invoke('admin-manage-user', {
             body: {
-              action: 'complete-password-change'
+              action: 'complete-password-change',
+              currentPassword,
+              newPassword
             }
           });
 
           if (fnErr || !fnData?.success) {
             return {
               success: false,
-              error: 'Senha alterada na autenticação, mas não foi possível confirmar a liberação no servidor.'
+              error:
+                fnData?.error ||
+                'Não foi possível confirmar a alteração de senha no servidor.'
             };
           }
 
@@ -821,8 +816,27 @@ export function createAuthService(getDeps?: () => AuthServiceDeps) {
             sessionUid,
             refreshedSession?.session?.access_token || reauthData.session?.access_token
           );
+          if (!verifiedRes.profile || verifiedRes.profile.forcePasswordChange) {
+            return {
+              success: false,
+              error:
+                verifiedRes.error ||
+                'Não foi possível confirmar a atualização do perfil após a troca de senha.'
+            };
+          }
           updatedProfile = verifiedRes.profile;
         } else {
+          const { error: updErr } = await client.auth.updateUser({
+            password: newPassword
+          });
+
+          if (updErr) {
+            return {
+              success: false,
+              error: 'Não foi possível atualizar a senha. Verifique os requisitos de segurança e tente novamente.'
+            };
+          }
+
           const { data: refreshedSession } = await client.auth.getSession();
           const verifiedRes = await this.resolveVerifiedProfile(
             sessionUid,
@@ -845,8 +859,7 @@ export function createAuthService(getDeps?: () => AuthServiceDeps) {
 
     async completeRecoveryPasswordChange(
       newPassword: string,
-      confirmPassword: string,
-      options?: { forcePasswordChange?: boolean }
+      confirmPassword: string
     ): Promise<CompletePasswordChangeResult> {
       const { client, configured } = resolveDeps();
       if (!configured || !client) {
@@ -882,21 +895,9 @@ export function createAuthService(getDeps?: () => AuthServiceDeps) {
 
         const { data: sessionData } = await client.auth.getSession();
         const currentUid = String(sessionData?.session?.user?.id || '').trim();
-        let accessToken = sessionData?.session?.access_token;
+        const accessToken = sessionData?.session?.access_token;
 
         if (currentUid) {
-          let needsForceClear = options?.forcePasswordChange;
-          if (needsForceClear === undefined) {
-            const profCheck = await this.resolveVerifiedProfile(currentUid, accessToken);
-            needsForceClear = Boolean(profCheck.profile?.forcePasswordChange);
-          }
-          if (needsForceClear) {
-            await client.functions
-              .invoke('admin-manage-user', {
-                body: { action: 'complete-password-change' }
-              })
-              .catch(() => undefined);
-          }
           const finalProf = await this.resolveVerifiedProfile(currentUid, accessToken);
           return {
             success: true,
