@@ -1,12 +1,30 @@
 import React, { useState } from 'react';
 import {
   authService,
+  MIN_PASSWORD_LENGTH,
   type CompletePasswordChangeResult
 } from '../services/authService';
 import type { AuthUserProfile } from '../types/auth';
 
+export function validateForcePasswordChangeInput(
+  newPassword: string,
+  confirmPassword: string
+): string | null {
+  if (!newPassword || !confirmPassword) {
+    return 'Preencha e confirme a nova senha.';
+  }
+  if (newPassword !== confirmPassword) {
+    return 'A confirmação da nova senha não confere.';
+  }
+  if (newPassword.length < MIN_PASSWORD_LENGTH) {
+    return `A nova senha deve atender à política mínima de segurança (ao menos ${MIN_PASSWORD_LENGTH} caracteres).`;
+  }
+  return null;
+}
+
 interface ForcePasswordChangePageProps {
   profile: AuthUserProfile;
+  mode?: 'forced' | 'recovery';
   onPasswordChanged: (updatedProfile: AuthUserProfile) => void;
   onLogout: () => Promise<void> | void;
   submitPasswordChange?: (
@@ -17,6 +35,7 @@ interface ForcePasswordChangePageProps {
 
 export function ForcePasswordChangePage({
   profile,
+  mode = 'forced',
   onPasswordChanged,
   onLogout,
   submitPasswordChange
@@ -32,18 +51,9 @@ export function ForcePasswordChangePage({
     e.preventDefault();
     setErrorMsg(null);
 
-    if (!newPassword || !confirmPassword) {
-      setErrorMsg('Preencha e confirme a nova senha.');
-      return;
-    }
-
-    if (newPassword !== confirmPassword) {
-      setErrorMsg('A confirmação da nova senha não confere.');
-      return;
-    }
-
-    if (newPassword.length < 6) {
-      setErrorMsg('A nova senha deve atender à política mínima de segurança (ao menos 6 caracteres).');
+    const validationError = validateForcePasswordChangeInput(newPassword, confirmPassword);
+    if (validationError) {
+      setErrorMsg(validationError);
       return;
     }
 
@@ -52,7 +62,11 @@ export function ForcePasswordChangePage({
       const executor =
         submitPasswordChange ||
         ((pwd: string, confirmPwd: string) =>
-          authService.completeFirstAccessPasswordChange(pwd, confirmPwd));
+          mode === 'recovery'
+            ? authService.completeRecoveryPasswordChange(pwd, confirmPwd, {
+                forcePasswordChange: profile?.forcePasswordChange
+              })
+            : authService.completeFirstAccessPasswordChange(pwd, confirmPwd));
       const res = await executor(newPassword, confirmPassword);
       if (!res.success || !res.profile || res.profile.forcePasswordChange) {
         setErrorMsg(
@@ -113,7 +127,9 @@ export function ForcePasswordChangePage({
             ADMINISTRA-CSB
           </span>
           <span style={{ fontSize: '10px', letterSpacing: '0.04em' }}>
-            SEMA-MT · SURH · TROCA OBRIGATÓRIA DE SENHA
+            {mode === 'recovery'
+              ? 'SEMA-MT · SURH · REDEFINIÇÃO DE SENHA'
+              : 'SEMA-MT · SURH · TROCA OBRIGATÓRIA DE SENHA'}
           </span>
         </div>
 
@@ -161,7 +177,15 @@ export function ForcePasswordChangePage({
                 lineHeight: '1.5'
               }}
             >
-              Olá, <strong>{profile.nome || 'servidor'}</strong>. Por segurança, defina uma nova senha pessoal antes de acessar o sistema.
+              {mode === 'recovery' ? (
+                <>
+                  Olá, <strong>{profile.nome || 'servidor'}</strong>. Defina uma nova senha pessoal para concluir a recuperação da sua conta.
+                </>
+              ) : (
+                <>
+                  Olá, <strong>{profile.nome || 'servidor'}</strong>. Por segurança, defina uma nova senha pessoal antes de acessar o sistema.
+                </>
+              )}
             </p>
           </div>
 
@@ -177,7 +201,9 @@ export function ForcePasswordChangePage({
               lineHeight: '1.45'
             }}
           >
-            O acesso aos módulos do sistema permanece bloqueado até a confirmação da nova senha segundo a política de segurança configurada.
+            {mode === 'recovery'
+              ? `Informe uma nova senha com no mínimo ${MIN_PASSWORD_LENGTH} caracteres e demais requisitos de segurança configurados para acessar o sistema.`
+              : `O acesso aos módulos do sistema permanece bloqueado até a confirmação da nova senha com no mínimo ${MIN_PASSWORD_LENGTH} caracteres e demais requisitos de segurança configurados.`}
           </div>
 
           {errorMsg && (
@@ -211,17 +237,18 @@ export function ForcePasswordChangePage({
                   marginBottom: '6px'
                 }}
               >
-                Nova senha *
+                Nova senha (mínimo de {MIN_PASSWORD_LENGTH} caracteres) *
               </label>
               <div style={{ position: 'relative' }}>
                 <input
                   id="force-new-password-input"
                   type={showNewPassword ? 'text' : 'password'}
                   required
+                  minLength={MIN_PASSWORD_LENGTH}
                   autoComplete="new-password"
                   value={newPassword}
                   onChange={e => setNewPassword(e.target.value)}
-                  placeholder="Informe a nova senha pessoal"
+                  placeholder={`Mínimo de ${MIN_PASSWORD_LENGTH} caracteres`}
                   disabled={loading}
                   style={{
                     width: '100%',
@@ -274,6 +301,7 @@ export function ForcePasswordChangePage({
                   id="force-confirm-password-input"
                   type={showConfirmPassword ? 'text' : 'password'}
                   required
+                  minLength={MIN_PASSWORD_LENGTH}
                   autoComplete="new-password"
                   value={confirmPassword}
                   onChange={e => setConfirmPassword(e.target.value)}

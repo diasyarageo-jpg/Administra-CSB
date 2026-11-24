@@ -30,7 +30,11 @@ import {
   RtModal,
   GenericRecordModal
 } from './components/CadastrosModals';
-import { authService } from './services/authService';
+import {
+  authService,
+  clearAuthHashFromUrl,
+  hasRecoveryTokenInHash
+} from './services/authService';
 import {
   ALLOWED_USER_ROLES,
   UserRole,
@@ -43,6 +47,8 @@ import { PaginationBar, PageSizeOption, paginateList } from './components/Pagina
 import { LoginModal } from './components/LoginModal';
 import { LoginPage } from './components/LoginPage';
 import { ForcePasswordChangePage } from './components/ForcePasswordChangePage';
+import { ChangeOwnPasswordModal } from './components/ChangeOwnPasswordModal';
+import { UserProfileMenu } from './components/UserProfileMenu';
 import { UsuarioModal } from './components/UsuarioModal';
 import { BarragensMinimap } from './components/BarragensMinimap';
 import { GeoportalSyncModal } from './components/GeoportalSyncModal';
@@ -286,7 +292,7 @@ const viewNames: Record<string, string> = {
   pendencias: 'Pendências',
   solicitacoes_vistoria: 'Solicitações de Vistoria',
   documentos: 'Documentos',
-  usuarios: 'Usuários',
+  usuarios: 'Gerenciar usuários',
   integracao: 'Estrutura de integração',
   referencias: 'Referências centrais'
 };
@@ -418,6 +424,10 @@ export default function App() {
   const [isAuthChecking, setIsAuthChecking] = useState(true);
   const [authConfigured, setAuthConfigured] = useState<boolean>(() => isSupabaseConfigured());
   const [authErrorNotice, setAuthErrorNotice] = useState<string | null>(null);
+  const [showChangeOwnPasswordModal, setShowChangeOwnPasswordModal] = useState(false);
+  const [isPasswordRecoveryMode, setIsPasswordRecoveryMode] = useState<boolean>(() =>
+    typeof window !== 'undefined' ? hasRecoveryTokenInHash(window.location.hash) : false
+  );
 
   // Proteção fail-closed de toda a aplicação:
   // Só renderiza telas internas quando Supabase Auth estiver configurado E houver sessão ativa
@@ -442,6 +452,7 @@ export default function App() {
     Boolean(currentUserProfile) &&
     currentUserProfile?.situacao === 'Ativo' &&
     !currentUserProfile?.forcePasswordChange &&
+    !isPasswordRecoveryMode &&
     Boolean(
       currentUserProfile?.papel &&
         (ALLOWED_USER_ROLES as readonly string[]).includes(currentUserProfile.papel)
@@ -636,6 +647,8 @@ export default function App() {
       setCurrentUserProfile(null);
       setUserRole('Visualizador');
       setShowLoginModal(false);
+      setShowChangeOwnPasswordModal(false);
+      setIsPasswordRecoveryMode(false);
       setModalConfig(null);
       setViewingRecord(null);
       setPendingVistoriaDraft(null);
@@ -643,6 +656,9 @@ export default function App() {
     };
 
     async function initAuth() {
+      const recoveryHashOnLoad =
+        typeof window !== 'undefined' && hasRecoveryTokenInHash(window.location.hash);
+
       await ensureSupabaseInitialized();
       if (!active) return;
 
@@ -657,6 +673,9 @@ export default function App() {
       });
 
       if (!configuredNow || !supabase) {
+        if (recoveryHashOnLoad) {
+          clearAuthHashFromUrl();
+        }
         clearSessionState(null);
         if (active) setIsAuthChecking(false);
         return;
@@ -666,10 +685,17 @@ export default function App() {
         const restored = await authService.restoreVerifiedSession();
         if (!active) return;
 
+        if (recoveryHashOnLoad) {
+          clearAuthHashFromUrl();
+        }
+
         if (restored.status === 'authenticated' && restored.user && restored.profile) {
           setCurrentAuthUser(restored.user);
           setCurrentUserProfile(restored.profile);
           setUserRole(restored.profile.papel);
+          if (recoveryHashOnLoad) {
+            setIsPasswordRecoveryMode(true);
+          }
           setAuthErrorNotice(null);
         } else if (restored.status === 'blocked' || restored.status === 'expired') {
           clearSessionState(restored.error || 'Sessão inválida ou perfil sem permissão.');
@@ -686,11 +712,20 @@ export default function App() {
           }
 
           if (
+            event === 'PASSWORD_RECOVERY' ||
             event === 'INITIAL_SESSION' ||
             event === 'SIGNED_IN' ||
             event === 'TOKEN_REFRESHED' ||
             event === 'USER_UPDATED'
           ) {
+            const isRecoveryEvent =
+              event === 'PASSWORD_RECOVERY' ||
+              (typeof window !== 'undefined' && hasRecoveryTokenInHash(window.location.hash));
+            if (isRecoveryEvent) {
+              setIsPasswordRecoveryMode(true);
+              clearAuthHashFromUrl();
+            }
+
             const profRes = await authService.resolveVerifiedProfile(
               session.user.id,
               session.access_token
@@ -716,6 +751,9 @@ export default function App() {
 
         subscription = authListener?.subscription ?? null;
       } catch {
+        if (recoveryHashOnLoad) {
+          clearAuthHashFromUrl();
+        }
         clearSessionState(
           'Não foi possível validar a sessão institucional no momento. Faça login novamente.'
         );
@@ -1573,22 +1611,27 @@ export default function App() {
       );
     }
 
-    if (requiresForcedPasswordChange && currentUserProfile) {
+    if ((requiresForcedPasswordChange || isPasswordRecoveryMode) && currentUserProfile) {
       return (
         <ForcePasswordChangePage
           profile={currentUserProfile}
+          mode={isPasswordRecoveryMode ? 'recovery' : 'forced'}
           onPasswordChanged={(updatedProfile) => {
             setCurrentUserProfile(updatedProfile);
             setUserRole(updatedProfile.papel);
+            setIsPasswordRecoveryMode(false);
             setAuthErrorNotice(null);
+            clearAuthHashFromUrl();
           }}
           onLogout={async () => {
             await authService.logout();
             setCurrentAuthUser(null);
             setCurrentUserProfile(null);
             setUserRole('Visualizador');
+            setIsPasswordRecoveryMode(false);
             setAuthErrorNotice(null);
             setShowLoginModal(false);
+            clearAuthHashFromUrl();
           }}
         />
       );
@@ -1755,7 +1798,7 @@ export default function App() {
                 className={`navbtn ${activeView === 'usuarios' ? 'active' : ''}`}
                 onClick={() => navigateToView('usuarios')}
               >
-                <span className="nav-ico">♙</span>Usuários
+                <span className="nav-ico">♙</span>Gerenciar usuários
               </button>
               <button
                 className={`navbtn ${activeView === 'integracao' ? 'active' : ''}`}
@@ -1828,52 +1871,22 @@ export default function App() {
               </span>
             )}
 
-            <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexShrink: 0 }}>
-              <div className="top-user-meta" style={{ display: 'flex', flexDirection: 'column', alignItems: 'flex-end', lineHeight: 1.2 }}>
-                <span className="topname" style={{ fontWeight: 600 }}>
-                  {currentUserProfile?.nome || currentUserProfile?.login || 'Servidor SEMA-MT'}
-                </span>
-                <span style={{ fontSize: '10px', color: '#64748b', whiteSpace: 'nowrap' }}>
-                  {currentUserProfile?.matricula ? (
-                    <span className="top-user-matricula">Matr. {currentUserProfile.matricula} · </span>
-                  ) : null}
-                  <span
-                    style={{
-                      fontWeight: 600,
-                      color:
-                        userRole === 'Administrador'
-                          ? '#7c3aed'
-                          : userRole === 'Analista'
-                          ? '#0369a1'
-                          : userRole === 'Usuário'
-                          ? '#0284c7'
-                          : '#475569'
-                    }}
-                  >
-                    {userRole}
-                  </span>
-                </span>
-              </div>
-
-              <button
-                type="button"
-                className="btn soft small"
-                style={{ padding: '4px 8px', fontSize: '11px' }}
-                onClick={async () => {
-                  await authService.logout();
-                  setCurrentAuthUser(null);
-                  setCurrentUserProfile(null);
-                  setUserRole('Visualizador');
-                  navigateToView('home', { replace: true });
-                  document.title = 'Administra Barragens — CSB / SEMA-MT';
-                  setAuthErrorNotice(null);
-                  setShowLoginModal(false);
-                }}
-                title="Encerrar sessão"
-              >
-                Sair
-              </button>
-            </div>
+            <UserProfileMenu
+              profile={currentUserProfile}
+              userRole={userRole}
+              onOpenChangePassword={() => setShowChangeOwnPasswordModal(true)}
+              onLogout={async () => {
+                await authService.logout();
+                setCurrentAuthUser(null);
+                setCurrentUserProfile(null);
+                setUserRole('Visualizador');
+                navigateToView('home', { replace: true });
+                document.title = 'Administra Barragens — CSB / SEMA-MT';
+                setAuthErrorNotice(null);
+                setShowLoginModal(false);
+                setShowChangeOwnPasswordModal(false);
+              }}
+            />
           </div>
         </header>
 
@@ -4060,6 +4073,29 @@ export default function App() {
           </div>
         </div>
       )}
+
+      <ChangeOwnPasswordModal
+        isOpen={showChangeOwnPasswordModal}
+        profile={currentUserProfile}
+        onClose={() => setShowChangeOwnPasswordModal(false)}
+        onPasswordChanged={(updatedProfile) => {
+          if (updatedProfile) {
+            setCurrentUserProfile(updatedProfile);
+            setUserRole(updatedProfile.papel);
+          }
+          showToast('Senha atualizada com sucesso.');
+        }}
+        onDefaultResetSuccess={(message) => {
+          setShowChangeOwnPasswordModal(false);
+          setCurrentAuthUser(null);
+          setCurrentUserProfile(null);
+          setUserRole('Visualizador');
+          setIsPasswordRecoveryMode(false);
+          setAuthErrorNotice(message);
+          setShowLoginModal(false);
+          navigateToView('home', { replace: true });
+        }}
+      />
 
       {/* PRODUCTIVITY MODAL */}
       {prodModalIndex !== null && (() => {

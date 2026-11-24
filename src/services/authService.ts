@@ -4,6 +4,8 @@
  */
 
 import { supabase, isSupabaseConfigured, ensureSupabaseInitialized } from './supabaseClient';
+// TEMPORÁRIO: voltar para 8 quando o Auth for ajustado
+import { MIN_PASSWORD_LENGTH } from '../../supabase/functions/_shared/passwordPolicy.ts';
 import {
   ALLOWED_USER_ROLES,
   AuthErrorCode,
@@ -11,6 +13,8 @@ import {
   UserRole,
   AccessRequestPayload
 } from '../types/auth';
+
+export { MIN_PASSWORD_LENGTH };
 
 export interface LoginResult {
   success: boolean;
@@ -70,6 +74,49 @@ export interface CompletePasswordChangeResult {
   error?: string;
   profile?: AuthUserProfile | null;
   passwordUpdatedInAuth?: boolean;
+}
+
+export interface ChangeOwnPasswordResult {
+  success: boolean;
+  error?: string;
+  profile?: AuthUserProfile | null;
+}
+
+export interface ResetOwnPasswordResult {
+  success: boolean;
+  error?: string;
+  message?: string;
+}
+
+export function hasRecoveryTokenInHash(rawHash?: string): boolean {
+  const hashStr =
+    rawHash !== undefined
+      ? String(rawHash || '')
+      : typeof window !== 'undefined'
+        ? String(window.location.hash || '')
+        : '';
+  const cleaned = hashStr.replace(/^#/, '').trim();
+  if (!cleaned) return false;
+  try {
+    const params = new URLSearchParams(cleaned);
+    return String(params.get('type') || '').trim().toLowerCase() === 'recovery';
+  } catch {
+    return /(?:^|&)type=recovery(?:&|$)/i.test(cleaned);
+  }
+}
+
+export function clearAuthHashFromUrl(): void {
+  if (typeof window === 'undefined' || !window.location?.hash) return;
+  try {
+    if (window.history && typeof window.history.replaceState === 'function') {
+      const nextUrl = `${window.location.pathname || '/'}${window.location.search || ''}`;
+      window.history.replaceState(window.history.state, '', nextUrl);
+      return;
+    }
+    window.location.hash = '';
+  } catch {
+    // Ignora restrição de histórico em ambientes restritos
+  }
 }
 
 export function normalizeStrictUserRole(rawRole: unknown): UserRole | null {
@@ -574,6 +621,13 @@ export function createAuthService(getDeps?: () => AuthServiceDeps) {
         return { success: false, error: 'Sistema de autenticação não configurado.' };
       }
 
+      if (!newPassword || typeof newPassword !== 'string' || newPassword.length < MIN_PASSWORD_LENGTH) {
+        return {
+          success: false,
+          error: `A nova senha deve atender à política mínima de segurança (ao menos ${MIN_PASSWORD_LENGTH} caracteres).`
+        };
+      }
+
       try {
         const { error } = await client.auth.updateUser({
           password: newPassword
@@ -606,8 +660,11 @@ export function createAuthService(getDeps?: () => AuthServiceDeps) {
         return { success: false, error: 'A confirmação da nova senha não confere.' };
       }
 
-      if (newPassword.length < 6) {
-        return { success: false, error: 'A nova senha deve atender à política mínima de segurança (ao menos 6 caracteres).' };
+      if (newPassword.length < MIN_PASSWORD_LENGTH) {
+        return {
+          success: false,
+          error: `A nova senha deve atender à política mínima de segurança (ao menos ${MIN_PASSWORD_LENGTH} caracteres).`
+        };
       }
 
       try {
@@ -659,14 +716,237 @@ export function createAuthService(getDeps?: () => AuthServiceDeps) {
           };
         }
 
-        return {
-          success: true,
-          profile: verifiedRes.profile
-        };
+      return {
+        success: true,
+        profile: verifiedRes.profile
+      };
       } catch (err: any) {
         return {
           success: false,
           error: err?.message || 'Erro ao concluir a alteração obrigatória de senha.'
+        };
+      }
+    },
+
+    async changeOwnPassword(
+      currentPassword: string,
+      newPassword: string,
+      confirmPassword: string,
+      options?: { forcePasswordChange?: boolean }
+    ): Promise<ChangeOwnPasswordResult> {
+      const { client, configured } = resolveDeps();
+      if (!configured || !client) {
+        return { success: false, error: 'Sistema de autenticação não configurado.' };
+      }
+
+      if (!currentPassword || typeof currentPassword !== 'string') {
+        return { success: false, error: 'Informe a senha atual.' };
+      }
+
+      if (!newPassword || typeof newPassword !== 'string' || newPassword.length < MIN_PASSWORD_LENGTH) {
+        return {
+          success: false,
+          error: `A nova senha deve ter no mínimo ${MIN_PASSWORD_LENGTH} caracteres.`
+        };
+      }
+
+      if (newPassword === currentPassword) {
+        return {
+          success: false,
+          error: 'A nova senha deve ser diferente da senha atual.'
+        };
+      }
+
+      if (newPassword !== confirmPassword) {
+        return {
+          success: false,
+          error: 'A confirmação da nova senha não confere.'
+        };
+      }
+
+      try {
+        const { data: sessionData, error: sessionErr } = await client.auth.getSession();
+        const sessionUser = sessionData?.session?.user;
+        const sessionEmail = String(sessionUser?.email || '').trim().toLowerCase();
+        const sessionUid = String(sessionUser?.id || '').trim();
+
+        if (sessionErr || !sessionUid || !sessionEmail) {
+          return { success: false, error: 'Sessão inválida ou expirada. Faça login novamente.' };
+        }
+
+        const { data: reauthData, error: reauthErr } = await client.auth.signInWithPassword({
+          email: sessionEmail,
+          password: currentPassword
+        });
+
+        if (reauthErr || !reauthData?.user?.id || String(reauthData.user.id) !== sessionUid) {
+          return { success: false, error: 'Senha atual incorreta' };
+        }
+
+        const { error: updErr } = await client.auth.updateUser({
+          password: newPassword
+        });
+
+        if (updErr) {
+          return {
+            success: false,
+            error: 'Não foi possível atualizar a senha. Verifique os requisitos de segurança e tente novamente.'
+          };
+        }
+
+        let requiresForceClear = options?.forcePasswordChange;
+        if (requiresForceClear === undefined) {
+          const currentProfileRes = await this.resolveVerifiedProfile(
+            sessionUid,
+            reauthData.session?.access_token || sessionData?.session?.access_token
+          );
+          requiresForceClear = Boolean(currentProfileRes.profile?.forcePasswordChange);
+        }
+
+        let updatedProfile: AuthUserProfile | null = null;
+        if (requiresForceClear) {
+          const { data: fnData, error: fnErr } = await client.functions.invoke('admin-manage-user', {
+            body: {
+              action: 'complete-password-change'
+            }
+          });
+
+          if (fnErr || !fnData?.success) {
+            return {
+              success: false,
+              error: 'Senha alterada na autenticação, mas não foi possível confirmar a liberação no servidor.'
+            };
+          }
+
+          const { data: refreshedSession } = await client.auth.getSession();
+          const verifiedRes = await this.resolveVerifiedProfile(
+            sessionUid,
+            refreshedSession?.session?.access_token || reauthData.session?.access_token
+          );
+          updatedProfile = verifiedRes.profile;
+        } else {
+          const { data: refreshedSession } = await client.auth.getSession();
+          const verifiedRes = await this.resolveVerifiedProfile(
+            sessionUid,
+            refreshedSession?.session?.access_token || reauthData.session?.access_token
+          );
+          updatedProfile = verifiedRes.profile;
+        }
+
+        return {
+          success: true,
+          profile: updatedProfile
+        };
+      } catch {
+        return {
+          success: false,
+          error: 'Não foi possível concluir a alteração de senha.'
+        };
+      }
+    },
+
+    async completeRecoveryPasswordChange(
+      newPassword: string,
+      confirmPassword: string,
+      options?: { forcePasswordChange?: boolean }
+    ): Promise<CompletePasswordChangeResult> {
+      const { client, configured } = resolveDeps();
+      if (!configured || !client) {
+        return { success: false, error: 'Sistema de autenticação não configurado.' };
+      }
+
+      if (!newPassword || typeof newPassword !== 'string') {
+        return { success: false, error: 'Informe a nova senha.' };
+      }
+
+      if (newPassword !== confirmPassword) {
+        return { success: false, error: 'A confirmação da nova senha não confere.' };
+      }
+
+      if (newPassword.length < MIN_PASSWORD_LENGTH) {
+        return {
+          success: false,
+          error: `A nova senha deve atender à política mínima de segurança (ao menos ${MIN_PASSWORD_LENGTH} caracteres).`
+        };
+      }
+
+      try {
+        const { error: authErr } = await client.auth.updateUser({
+          password: newPassword
+        });
+
+        if (authErr) {
+          return {
+            success: false,
+            error: authErr.message || 'Não foi possível definir a nova senha de recuperação.'
+          };
+        }
+
+        const { data: sessionData } = await client.auth.getSession();
+        const currentUid = String(sessionData?.session?.user?.id || '').trim();
+        let accessToken = sessionData?.session?.access_token;
+
+        if (currentUid) {
+          let needsForceClear = options?.forcePasswordChange;
+          if (needsForceClear === undefined) {
+            const profCheck = await this.resolveVerifiedProfile(currentUid, accessToken);
+            needsForceClear = Boolean(profCheck.profile?.forcePasswordChange);
+          }
+          if (needsForceClear) {
+            await client.functions
+              .invoke('admin-manage-user', {
+                body: { action: 'complete-password-change' }
+              })
+              .catch(() => undefined);
+          }
+          const finalProf = await this.resolveVerifiedProfile(currentUid, accessToken);
+          return {
+            success: true,
+            profile: finalProf.profile
+          };
+        }
+
+        return { success: true, profile: null };
+      } catch {
+        return {
+          success: false,
+          error: 'Erro ao concluir a redefinição de senha.'
+        };
+      }
+    },
+
+    async resetOwnPasswordToDefault(): Promise<ResetOwnPasswordResult> {
+      const { client, configured } = resolveDeps();
+      if (!configured || !client) {
+        return { success: false, error: 'Sistema de autenticação não configurado.' };
+      }
+
+      try {
+        const { data, error } = await client.functions.invoke('admin-manage-user', {
+          body: {
+            action: 'reset-own-password'
+          }
+        });
+
+        if (error || !data?.success) {
+          return {
+            success: false,
+            error: data?.error || 'Não foi possível redefinir a senha para a senha padrão.'
+          };
+        }
+
+        await this.logout();
+
+        return {
+          success: true,
+          message:
+            data.message ||
+            'Senha redefinida. Entre com a senha padrão e crie uma nova.'
+        };
+      } catch {
+        return {
+          success: false,
+          error: 'Não foi possível redefinir a senha para a senha padrão.'
         };
       }
     },

@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { authService } from '../services/authService';
+import { authService, MIN_PASSWORD_LENGTH } from '../services/authService';
 
 interface LoginModalProps {
   isOpen: boolean;
@@ -74,8 +74,8 @@ export function LoginModal({ isOpen, onSuccess, onClose, allowClose = false }: L
     setErrorMsg(null);
     setSuccessMsg(null);
 
-    if (newPassword.length < 6) {
-      setErrorMsg('A nova senha deve ter no mínimo 6 caracteres.');
+    if (newPassword.length < MIN_PASSWORD_LENGTH) {
+      setErrorMsg(`A nova senha deve ter no mínimo ${MIN_PASSWORD_LENGTH} caracteres.`);
       return;
     }
 
@@ -249,11 +249,12 @@ export function LoginModal({ isOpen, onSuccess, onClose, allowClose = false }: L
           {mode === 'reset' && (
             <form onSubmit={handleUpdatePassword}>
               <div className="form-field" style={{ marginBottom: '14px' }}>
-                <label>Nova senha (mínimo de 6 caracteres)</label>
+                <label>Nova senha (mínimo de {MIN_PASSWORD_LENGTH} caracteres)</label>
                 <input
                   className="input"
                   type="password"
                   required
+                  minLength={MIN_PASSWORD_LENGTH}
                   placeholder="••••••••"
                   value={newPassword}
                   onChange={e => setNewPassword(e.target.value)}

@@ -8,6 +8,8 @@ export const corsHeaders: Record<string, string> = {
   'Access-Control-Allow-Methods': 'POST, GET, OPTIONS'
 };
 
+import { MIN_PASSWORD_LENGTH } from '../_shared/passwordPolicy.ts';
+
 export interface AdminManageUserDeps {
   envGet: (name: string) => string | undefined;
   createSupabaseClient: (
@@ -20,6 +22,14 @@ export interface AdminManageUserDeps {
       };
     }
   ) => any;
+  now?: () => number;
+  rateLimitStore?: Map<string, number[]>;
+  onAuditEvent?: (event: {
+    event: string;
+    usuarioId: string;
+    authUserId: string;
+    timestamp: string;
+  }) => void | Promise<void>;
 }
 
 export const ALLOWED_ROLES = ['Administrador', 'Analista', 'Usuário', 'Visualizador'];
@@ -37,6 +47,9 @@ const DEFAULT_SOLICITACAO_LIST_LIMIT = 50;
 const MAX_SOLICITACAO_LIST_LIMIT = 100;
 const UNIFORM_USER_CONFLICT_ERROR = 'Não foi possível concluir o cadastro com os dados informados.';
 const UNIFORM_RESET_TARGET_ERROR = 'Não foi possível redefinir a senha para este cadastro.';
+const RESET_OWN_MAX_PER_HOUR = 3;
+const RESET_OWN_WINDOW_MS = 60 * 60 * 1000;
+const defaultResetOwnRateLimitStore = new Map<string, number[]>();
 
 function isSafeId(value: unknown): value is string {
   return typeof value === 'string' && SAFE_ID_PATTERN.test(value.trim());
@@ -56,10 +69,83 @@ function normalizeMatricula(value: unknown): string {
 
 function getDefaultTempPassword(deps: AdminManageUserDeps): string | null {
   const raw = deps.envGet('DEFAULT_TEMP_PASSWORD');
-  if (typeof raw !== 'string' || !raw.trim()) {
+  if (typeof raw !== 'string' || !raw.trim() || raw.length < MIN_PASSWORD_LENGTH) {
     return null;
   }
   return raw;
+}
+
+export function buildDefaultOwnResetPassword(matriculaRaw: unknown, nomeRaw: unknown): string | null {
+  const matricula = typeof matriculaRaw === 'string' ? matriculaRaw.trim() : '';
+  const nome = typeof nomeRaw === 'string' ? nomeRaw.trim() : '';
+  if (!matricula || !nome) {
+    return null;
+  }
+
+  const firstToken = nome.split(/\s+/)[0] || '';
+  const asciiFirst = firstToken
+    .normalize('NFD')
+    .replace(/[\u0300-\u036f]/g, '')
+    .replace(/[^A-Za-z0-9]/g, '');
+
+  if (!asciiFirst) {
+    return null;
+  }
+
+  const primeiroNome = asciiFirst.charAt(0).toUpperCase() + asciiFirst.slice(1).toLowerCase();
+  const generated = `Csb@${matricula}${primeiroNome}`;
+  if (generated.length < MIN_PASSWORD_LENGTH) {
+    return null;
+  }
+  return generated;
+}
+
+async function recordResetOwnPasswordAuditSafe(
+  supabaseAdmin: any,
+  deps: AdminManageUserDeps,
+  payload: {
+    usuarioId: string;
+    authUserId: string;
+    usuarioLogin: string | null;
+    usuarioNome: string | null;
+    timestamp: string;
+  }
+): Promise<void> {
+  try {
+    if (typeof deps.onAuditEvent === 'function') {
+      await deps.onAuditEvent({
+        event: 'reset-own-password',
+        usuarioId: payload.usuarioId,
+        authUserId: payload.authUserId,
+        timestamp: payload.timestamp
+      });
+    }
+  } catch {
+    // Falha no hook de auditoria nunca deve expor credenciais
+  }
+
+  try {
+    const query = supabaseAdmin?.from?.('historico_alteracoes_dados');
+    if (query && typeof query.insert === 'function') {
+      await query.insert({
+        tabela_nome: 'usuarios',
+        registro_id: payload.usuarioId,
+        operacao: 'UPDATE',
+        usuario_id: payload.usuarioId,
+        usuario_login: payload.usuarioLogin,
+        usuario_nome: payload.usuarioNome,
+        auth_user_id: payload.authUserId,
+        sistema_origem: 'Administra-CSB',
+        alterado_em: payload.timestamp,
+        campos_alterados: ['force_password_change'],
+        motivo: 'reset-own-password',
+        dados_anteriores: null,
+        dados_novos: null
+      });
+    }
+  } catch {
+    // Registro de auditoria em tabela auxiliar é best-effort e nunca grava senha
+  }
 }
 
 async function deleteAuthUserSafe(supabaseAdmin: any, authUserId: string): Promise<void> {
@@ -194,7 +280,7 @@ export async function handleAdminManageUserRequest(
     // Valida perfil institucional vinculado estritamente a auth_user_id = callerUser.id
     let callerProfileRes = await supabaseAdmin
       .from('usuarios')
-      .select('id, auth_user_id, papel, situacao, status, force_password_change')
+      .select('id, auth_user_id, nome, matricula, login, papel, situacao, status, force_password_change')
       .eq('auth_user_id', callerUser.id)
       .maybeSingle();
 
@@ -264,6 +350,136 @@ export async function handleAdminManageUserRequest(
         success: true,
         forcePasswordChange: false,
         message: 'Alteração de senha confirmada com sucesso.'
+      });
+    }
+
+    // =========================================================================
+    // AÇÃO SELF-SERVICE: reset-own-password (Volta para a senha padrão institucional)
+    // Restrita exclusivamente ao próprio usuário autenticado ativo via auth.uid()
+    // Ignora qualquer id, e-mail ou senha enviado pelo cliente.
+    // =========================================================================
+    if (action === 'reset-own-password') {
+      const hasClientPassword = [
+        'password',
+        'newPassword',
+        'new_password',
+        'temporaryPassword',
+        'temporary_password',
+        'senha',
+        'novaSenha',
+        'nova_senha',
+        'senhaPadrao',
+        'senha_padrao'
+      ].some(
+        key => safePayload[key] !== undefined && safePayload[key] !== null && String(safePayload[key]).trim() !== ''
+      );
+      if (hasClientPassword) {
+        return jsonResponse(
+          {
+            success: false,
+            error: 'Não é permitido informar senha pelo cliente.'
+          },
+          400
+        );
+      }
+
+      const callerSituacao = String(callerProfile?.situacao || callerProfile?.status || '').trim();
+      const callerPapel = String(callerProfile?.papel || '').trim();
+      if (
+        callerProfileErr ||
+        !callerProfile ||
+        !callerProfile.id ||
+        !callerLinkedMatches ||
+        callerSituacao !== 'Ativo' ||
+        !ALLOWED_ROLES.includes(callerPapel)
+      ) {
+        return jsonResponse(
+          {
+            success: false,
+            error: 'Não foi possível redefinir a senha.'
+          },
+          403
+        );
+      }
+
+      const generatedPassword = buildDefaultOwnResetPassword(callerProfile.matricula, callerProfile.nome);
+      if (!generatedPassword) {
+        return jsonResponse(
+          {
+            success: false,
+            error: 'Não foi possível redefinir a senha.'
+          },
+          409
+        );
+      }
+
+      const nowMs = typeof deps.now === 'function' ? deps.now() : Date.now();
+      const store = deps.rateLimitStore || defaultResetOwnRateLimitStore;
+      const rateKey = String(callerUser.id);
+      const recentCalls = (store.get(rateKey) || []).filter((ts: number) => ts > nowMs - RESET_OWN_WINDOW_MS);
+      if (recentCalls.length >= RESET_OWN_MAX_PER_HOUR) {
+        store.set(rateKey, recentCalls);
+        return jsonResponse(
+          {
+            success: false,
+            error: 'Limite de solicitações excedido. Tente novamente mais tarde.'
+          },
+          429
+        );
+      }
+
+      const { error: updAuthErr } = await supabaseAdmin.auth.admin.updateUserById(callerUser.id, {
+        password: generatedPassword
+      });
+
+      if (updAuthErr) {
+        return jsonResponse(
+          {
+            success: false,
+            error: 'Não foi possível redefinir a senha.'
+          },
+          500
+        );
+      }
+
+      const nowIso = new Date(nowMs).toISOString();
+      const { data: updatedOwn, error: updOwnErr } = await supabaseAdmin
+        .from('usuarios')
+        .update({
+          force_password_change: true,
+          updated_by: callerUser.id,
+          updated_at: nowIso
+        })
+        .eq('id', callerProfile.id)
+        .eq('auth_user_id', callerUser.id)
+        .select('id, force_password_change')
+        .maybeSingle();
+
+      if (updOwnErr || !updatedOwn) {
+        return jsonResponse(
+          {
+            success: false,
+            error: 'Não foi possível concluir a redefinição de senha.'
+          },
+          500
+        );
+      }
+
+      recentCalls.push(nowMs);
+      store.set(rateKey, recentCalls);
+
+      await recordResetOwnPasswordAuditSafe(supabaseAdmin, deps, {
+        usuarioId: String(callerProfile.id),
+        authUserId: String(callerUser.id),
+        usuarioLogin: callerProfile.login ? String(callerProfile.login) : null,
+        usuarioNome: callerProfile.nome ? String(callerProfile.nome) : null,
+        timestamp: nowIso
+      });
+
+      return jsonResponse({
+        success: true,
+        forcePasswordChange: true,
+        message: 'Senha redefinida. Entre com a senha padrão e crie uma nova.'
       });
     }
 

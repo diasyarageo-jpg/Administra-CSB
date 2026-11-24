@@ -16,11 +16,27 @@ import carLookupHandler from '../api/car-lookup';
 import semaDocumentosHandler from '../api/sema-documentos';
 import { setTestSupabaseAdminForSemaAudit } from '../src/server/semaAudit';
 import {
+  clearAuthHashFromUrl,
   createAuthService,
+  hasRecoveryTokenInHash,
+  MIN_PASSWORD_LENGTH,
   validateInstitutionalProfile
 } from '../src/services/authService';
-import { ForcePasswordChangePage } from '../src/components/ForcePasswordChangePage';
-import { handleAdminManageUserRequest } from '../supabase/functions/admin-manage-user/handler.ts';
+import {
+  ForcePasswordChangePage,
+  validateForcePasswordChangeInput
+} from '../src/components/ForcePasswordChangePage';
+import {
+  ChangeOwnPasswordModal,
+  DEFAULT_RESET_CONFIRMATION_MESSAGE,
+  validateChangeOwnPasswordInput
+} from '../src/components/ChangeOwnPasswordModal';
+import { UserProfileMenu } from '../src/components/UserProfileMenu';
+import { resolveAuthorizedAppView } from '../src/utils/appRoutes';
+import {
+  buildDefaultOwnResetPassword,
+  handleAdminManageUserRequest
+} from '../supabase/functions/admin-manage-user/handler.ts';
 
 const YARA_AUTH_UID = '52f8280d-cc4c-4aad-98f6-7446da912dd1';
 const YARA_USUARIO_ID = 'usr_yara_dias_01';
@@ -3042,11 +3058,13 @@ test('Troca obrigatória no primeiro acesso: auth-session, authService, ForcePas
     else delete process.env.SUPABASE_SERVICE_ROLE_KEY;
   }
 
-  // 2. authService: policy de senha no Auth, confirmação no servidor e re-validação de forcePasswordChange
+  // 2. authService: política mínima temporária de 6 caracteres, policy do Auth, confirmação no servidor e re-validação
+  assert.equal(MIN_PASSWORD_LENGTH, 6);
   let forceFlagInDb = true;
   let rejectWeakPassword = true;
   let failServerComplete = false;
   let invokeCalls: Array<{ fn: string; body: any }> = [];
+  let updateUserCalls: string[] = [];
   let directUsuarioInserts = 0;
 
   const mockClient: any = {
@@ -3064,7 +3082,8 @@ test('Troca obrigatória no primeiro acesso: auth-session, authService, ForcePas
         };
       },
       async updateUser({ password }: { password: string }) {
-        assert.ok(password.length >= 6);
+        updateUserCalls.push(password);
+        assert.ok(password.length >= MIN_PASSWORD_LENGTH);
         if (rejectWeakPassword) {
           return { error: { message: 'Password should contain uppercase, lowercase and number.' } };
         }
@@ -3134,24 +3153,44 @@ test('Troca obrigatória no primeiro acesso: auth-session, authService, ForcePas
   assert.equal(loginRes.success, true);
   assert.equal(loginRes.profile?.forcePasswordChange, true);
 
-  // Falha de política do Auth não chama complete-password-change nem destrava
-  const policyFail = await svc.completeFirstAccessPasswordChange('fraca123', 'fraca123');
+  // Senhas com menos de 6 caracteres são recusadas antes de chamar Auth ou Edge Function
+  for (const shortPwd of ['Ab1!x', '12345']) {
+    const uiErr = validateForcePasswordChangeInput(shortPwd, shortPwd);
+    assert.match(String(uiErr), /6 caracteres/);
+
+    const svcShortErr = await svc.completeFirstAccessPasswordChange(shortPwd, shortPwd);
+    assert.equal(svcShortErr.success, false);
+    assert.match(String(svcShortErr.error), /6 caracteres/);
+
+    const updShortErr = await svc.updatePassword(shortPwd);
+    assert.equal(updShortErr.success, false);
+    assert.match(String(updShortErr.error), /6 caracteres/);
+  }
+  assert.equal(updateUserCalls.length, 0);
+  assert.equal(invokeCalls.length, 0);
+  assert.equal(forceFlagInDb, true);
+
+  // Senha com 6 caracteres sem atender complexidade do Auth é recusada pelo Auth sem destravar
+  assert.equal(validateForcePasswordChangeInput('fraca1', 'fraca1'), null);
+  const policyFail = await svc.completeFirstAccessPasswordChange('fraca1', 'fraca1');
   assert.equal(policyFail.success, false);
   assert.match(String(policyFail.error), /uppercase/i);
+  assert.equal(updateUserCalls.length, 1);
   assert.equal(invokeCalls.length, 0);
   assert.equal(forceFlagInDb, true);
 
   // Falha de confirmação no backend mantém bloqueio
   rejectWeakPassword = false;
   failServerComplete = true;
-  const serverFail = await svc.completeFirstAccessPasswordChange('NovaSenha!2026', 'NovaSenha!2026');
+  const serverFail = await svc.completeFirstAccessPasswordChange('Ab1!xy', 'Ab1!xy');
   assert.equal(serverFail.success, false);
   assert.equal(serverFail.passwordUpdatedInAuth, true);
   assert.equal(forceFlagInDb, true);
 
-  // Sucesso completo atualiza perfil para forcePasswordChange=false
+  // Senha com 6 caracteres válida no Auth conclui e atualiza forcePasswordChange=false
   failServerComplete = false;
-  const completeOk = await svc.completeFirstAccessPasswordChange('NovaSenha!2026', 'NovaSenha!2026');
+  assert.equal(validateForcePasswordChangeInput('Ab1!xy', 'Ab1!xy'), null);
+  const completeOk = await svc.completeFirstAccessPasswordChange('Ab1!xy', 'Ab1!xy');
   assert.equal(completeOk.success, true);
   assert.equal(completeOk.profile?.forcePasswordChange, false);
 
@@ -3178,7 +3217,7 @@ test('Troca obrigatória no primeiro acesso: auth-session, authService, ForcePas
   assert.equal(resetCall?.body?.usuarioId, 'usr_first_71');
   assert.equal(resetCall?.body?.authUserId, synthUid);
 
-  // 3. Renderização da tela ForcePasswordChangePage e inspeção estática de guardas e segredos
+  // 3. Renderização da tela ForcePasswordChangePage e inspeção estática da constante única e comentário temporário
   const html = renderToStaticMarkup(
     React.createElement(ForcePasswordChangePage, {
       profile: {
@@ -3200,12 +3239,19 @@ test('Troca obrigatória no primeiro acesso: auth-session, authService, ForcePas
     })
   );
   assert.ok(html.includes('Definição de Nova Senha'));
+  assert.ok(html.includes('mínimo de 6 caracteres'));
   assert.ok(html.includes('force-new-password-input'));
   assert.ok(html.includes('force-confirm-password-input'));
 
   const root = process.cwd();
   const appSrc = fs.readFileSync(path.join(root, 'src/App.tsx'), 'utf8');
   const modalSrc = fs.readFileSync(path.join(root, 'src/components/UsuarioModal.tsx'), 'utf8');
+  const forcePageSrc = fs.readFileSync(path.join(root, 'src/components/ForcePasswordChangePage.tsx'), 'utf8');
+  const loginModalSrc = fs.readFileSync(path.join(root, 'src/components/LoginModal.tsx'), 'utf8');
+  const changeOwnModalSrc = fs.readFileSync(path.join(root, 'src/components/ChangeOwnPasswordModal.tsx'), 'utf8');
+  const authServiceSrc = fs.readFileSync(path.join(root, 'src/services/authService.ts'), 'utf8');
+  const policySrc = fs.readFileSync(path.join(root, 'supabase/functions/_shared/passwordPolicy.ts'), 'utf8');
+  const handlerSrc = fs.readFileSync(path.join(root, 'supabase/functions/admin-manage-user/handler.ts'), 'utf8');
   const envExample = fs.readFileSync(path.join(root, '.env.example'), 'utf8');
   const docSrc = fs.readFileSync(path.join(root, 'docs/EDGE_FUNCTION_ADMIN_MANAGE_USER.md'), 'utf8');
 
@@ -3216,6 +3262,650 @@ test('Troca obrigatória no primeiro acesso: auth-session, authService, ForcePas
   assert.equal(modalSrc.includes('DEFAULT_TEMP_PASSWORD'), false);
   assert.equal(envExample.includes('DEFAULT_TEMP_PASSWORD'), false);
   assert.equal(docSrc.includes('DEFAULT_TEMP_PASSWORD'), true);
+  assert.equal(policySrc.includes('TEMPORÁRIO: voltar para 8 quando o Auth for ajustado'), true);
+  assert.equal(authServiceSrc.includes('TEMPORÁRIO: voltar para 8 quando o Auth for ajustado'), true);
+  assert.equal(handlerSrc.includes('MIN_PASSWORD_LENGTH'), true);
+  for (const pwdSrc of [forcePageSrc, loginModalSrc, changeOwnModalSrc, authServiceSrc, handlerSrc]) {
+    assert.equal(/length\s*<\s*[68]|minLength=\{?[68]\}?|[68]\s+caracteres/i.test(pwdSrc), false);
+  }
+});
+
+test('Autoatendimento de senha (changeOwnPassword, ChangeOwnPasswordModal) e visibilidade de menu por papel (Analista vs Administrador)', async () => {
+  const synthAnalystUid = '00000000-0000-4000-8000-000000000081';
+  let forceFlag = false;
+  let updateUserCalls: string[] = [];
+  let completeInvokeCalls = 0;
+  let signOutCalls = 0;
+
+  const mockClient: any = {
+    auth: {
+      async getSession() {
+        return {
+          data: {
+            session: {
+              access_token: 'tok-analyst',
+              user: { id: synthAnalystUid, email: 'analista@example.invalid' }
+            }
+          },
+          error: null
+        };
+      },
+      async signInWithPassword({ email, password }: { email: string; password: string }) {
+        assert.equal(email, 'analista@example.invalid');
+        if (password !== 'SenhaAtual@1') {
+          return { data: { user: null, session: null }, error: { message: 'Invalid login credentials (details that must not leak)' } };
+        }
+        return {
+          data: {
+            user: { id: synthAnalystUid, email },
+            session: { access_token: 'tok-analyst', user: { id: synthAnalystUid, email } }
+          },
+          error: null
+        };
+      },
+      async updateUser({ password }: { password: string }) {
+        updateUserCalls.push(password);
+        return { error: null };
+      },
+      async signOut() {
+        signOutCalls += 1;
+        return { error: null };
+      }
+    },
+    functions: {
+      async invoke(_fn: string, opts: any) {
+        if (opts?.body?.action === 'complete-password-change') {
+          completeInvokeCalls += 1;
+          forceFlag = false;
+          return { data: { success: true, forcePasswordChange: false }, error: null };
+        }
+        return { data: null, error: null };
+      }
+    },
+    from(table: string) {
+      assert.equal(table, 'usuarios');
+      return {
+        select() {
+          return {
+            eq() {
+              return {
+                async maybeSingle() {
+                  return {
+                    data: {
+                      id: 'usr_analista_81',
+                      auth_user_id: synthAnalystUid,
+                      nome: 'Analista Teste',
+                      login: 'analista.teste',
+                      email: 'analista@example.invalid',
+                      matricula: '12345',
+                      papel: 'Analista',
+                      situacao: 'Ativo',
+                      force_password_change: forceFlag
+                    },
+                    error: null
+                  };
+                }
+              };
+            }
+          };
+        }
+      };
+    }
+  };
+
+  const svc = createAuthService(() => ({ client: mockClient, configured: true }));
+
+  // 1. Validações de UI e serviço (< 6 caracteres, igual à atual, confirmação diferente)
+  assert.match(String(validateChangeOwnPasswordInput('SenhaAtual@1', 'Ab1!x', 'Ab1!x')), /6 caracteres/);
+  assert.match(String(validateChangeOwnPasswordInput('SenhaAtual@1', 'SenhaAtual@1', 'SenhaAtual@1')), /diferente/);
+  assert.match(String(validateChangeOwnPasswordInput('SenhaAtual@1', 'Nova@6', 'Outra@6')), /não confere/);
+  assert.equal(validateChangeOwnPasswordInput('SenhaAtual@1', 'Nova@6', 'Nova@6'), null);
+
+  const shortRes = await svc.changeOwnPassword('SenhaAtual@1', '12345', '12345');
+  assert.equal(shortRes.success, false);
+  assert.match(String(shortRes.error), /6 caracteres/);
+  assert.equal(updateUserCalls.length, 0);
+
+  // 2. Senha atual incorreta -> retorna exatamente "Senha atual incorreta" sem detalhes e não atualiza senha
+  const wrongCurrentRes = await svc.changeOwnPassword('Errada@1', 'Nova@6', 'Nova@6');
+  assert.equal(wrongCurrentRes.success, false);
+  assert.equal(wrongCurrentRes.error, 'Senha atual incorreta');
+  assert.equal(updateUserCalls.length, 0);
+  assert.equal(completeInvokeCalls, 0);
+
+  // 3. Troca bem-sucedida com forcePasswordChange=false não precisa chamar complete-password-change
+  const okNormalRes = await svc.changeOwnPassword('SenhaAtual@1', 'Nova@6', 'Nova@6');
+  assert.equal(okNormalRes.success, true);
+  assert.deepEqual(updateUserCalls, ['Nova@6']);
+  assert.equal(completeInvokeCalls, 0);
+  assert.equal(okNormalRes.profile?.papel, 'Analista');
+
+  // 4. Troca bem-sucedida com forcePasswordChange=true chama complete-password-change e limpa flag
+  forceFlag = true;
+  const okForceRes = await svc.changeOwnPassword('SenhaAtual@1', 'Nova2@6', 'Nova2@6');
+  assert.equal(okForceRes.success, true);
+  assert.equal(completeInvokeCalls, 1);
+  assert.equal(forceFlag, false);
+  assert.equal(okForceRes.profile?.forcePasswordChange, false);
+
+  // 5. Renderização do ChangeOwnPasswordModal e UserProfileMenu para todos os perfis
+  const baseProfile = {
+    id: 'usr_analista_81',
+    authUserId: synthAnalystUid,
+    nome: 'Analista Teste',
+    login: 'analista.teste',
+    email: 'analista@example.invalid',
+    matricula: '12345',
+    perfilProfissional: 'Analista',
+    setor: 'CSB',
+    papel: 'Analista' as const,
+    situacao: 'Ativo' as const,
+    forcePasswordChange: false,
+    createdAt: '2026-11-24T00:00:00.000Z'
+  };
+
+  for (const role of ['Administrador', 'Analista', 'Usuário', 'Visualizador'] as const) {
+    const menuHtml = renderToStaticMarkup(
+      React.createElement(UserProfileMenu, {
+        profile: { ...baseProfile, papel: role },
+        userRole: role,
+        defaultOpen: true,
+        onOpenChangePassword: () => {},
+        onLogout: () => {}
+      })
+    );
+    assert.ok(menuHtml.includes('Alterar minha senha'), `${role} deve ver "Alterar minha senha"`);
+    assert.equal(menuHtml.includes('Gerenciar usuários'), false);
+  }
+
+  const modalHtml = renderToStaticMarkup(
+    React.createElement(ChangeOwnPasswordModal, {
+      isOpen: true,
+      profile: baseProfile,
+      onClose: () => {}
+    })
+  );
+  assert.ok(modalHtml.includes('Alterar minha senha'));
+  assert.ok(modalHtml.includes('own-current-password-input'));
+  assert.ok(modalHtml.includes('own-new-password-input'));
+  assert.ok(modalHtml.includes('own-confirm-password-input'));
+  assert.ok(modalHtml.includes('Redefinir para a senha padrão'));
+  assert.equal(
+    DEFAULT_RESET_CONFIRMATION_MESSAGE,
+    'Sua senha será redefinida e você terá que criar uma nova no próximo acesso'
+  );
+
+  // 6. Analista não acessa Gerenciar usuários na UI (roteamento + guarda em App.tsx)
+  const appSrc = fs.readFileSync(path.join(process.cwd(), 'src/App.tsx'), 'utf8');
+  const adminSidebarBlockMatch = appSrc.match(
+    /\{userRole === 'Administrador' && \(\s*<>([\s\S]*?)<\/>\s*\)\}/
+  );
+  assert.ok(adminSidebarBlockMatch);
+  assert.ok(adminSidebarBlockMatch[1].includes('Gerenciar usuários'));
+  assert.equal(
+    resolveAuthorizedAppView('usuarios', { userRole: 'Analista', enforceAdminGuard: true }).allowed,
+    false
+  );
+  assert.equal(signOutCalls, 0);
+});
+
+test('Edge Function reset-own-password: JWT obrigatório, alvo estrito auth.uid(), formato Csb@matriculaPrimeiroNome, force_password_change=true, auditoria sem senha, rate limit (429) e logout no cliente', async () => {
+  const synthAnalystUid = '00000000-0000-4000-8000-000000000091';
+  const synthOtherUid = '00000000-0000-4000-8000-000000000092';
+  const synthNoMatUid = '00000000-0000-4000-8000-000000000093';
+  const synthInactiveUid = '00000000-0000-4000-8000-000000000094';
+
+  assert.equal(buildDefaultOwnResetPassword('12345', 'Géssika Almeida'), 'Csb@12345Gessika');
+  assert.equal(buildDefaultOwnResetPassword('9876', '  joão da silva  '), 'Csb@9876Joao');
+  assert.equal(buildDefaultOwnResetPassword('', 'Géssika Almeida'), null);
+  assert.equal(buildDefaultOwnResetPassword(null, 'Géssika Almeida'), null);
+
+  let currentNow = Date.UTC(2026, 10, 24, 15, 0, 0);
+  const rateLimitStore = new Map<string, number[]>();
+  const auditEvents: Array<Record<string, any>> = [];
+  const auditDbRows: Array<Record<string, any>> = [];
+  const authUpdateCalls: Array<{ id: string; password?: string }> = [];
+
+  const usuarios = [
+    {
+      id: 'usr_gessika_91',
+      auth_user_id: synthAnalystUid,
+      nome: 'Géssika Almeida',
+      matricula: '12345',
+      login: 'gessika.almeida',
+      email: 'gessika@example.invalid',
+      papel: 'Analista',
+      situacao: 'Ativo',
+      status: 'Ativo',
+      force_password_change: false
+    },
+    {
+      id: 'usr_outro_92',
+      auth_user_id: synthOtherUid,
+      nome: 'Outro Usuário',
+      matricula: '99999',
+      login: 'outro.usuario',
+      email: 'outro@example.invalid',
+      papel: 'Administrador',
+      situacao: 'Ativo',
+      status: 'Ativo',
+      force_password_change: false
+    },
+    {
+      id: 'usr_sem_mat_93',
+      auth_user_id: synthNoMatUid,
+      nome: 'Sem Matrícula',
+      matricula: '',
+      login: 'sem.mat',
+      email: 'semmat@example.invalid',
+      papel: 'Usuário',
+      situacao: 'Ativo',
+      status: 'Ativo',
+      force_password_change: false
+    },
+    {
+      id: 'usr_inativo_94',
+      auth_user_id: synthInactiveUid,
+      nome: 'Servidor Inativo',
+      matricula: '55555',
+      login: 'inativo',
+      email: 'inativo@example.invalid',
+      papel: 'Visualizador',
+      situacao: 'Inativo',
+      status: 'Inativo',
+      force_password_change: false
+    }
+  ];
+
+  const deps = {
+    envGet(name: string) {
+      if (name === 'SUPABASE_URL') return 'https://example.invalid';
+      if (name === 'SUPABASE_SERVICE_ROLE_KEY') return 'synth-service-role-key-91';
+      return undefined;
+    },
+    now: () => currentNow,
+    rateLimitStore,
+    onAuditEvent(evt: any) {
+      auditEvents.push(evt);
+    },
+    createSupabaseClient() {
+      return {
+        auth: {
+          async getUser(jwt: string) {
+            if (jwt === 'jwt-gessika') return { data: { user: { id: synthAnalystUid } }, error: null };
+            if (jwt === 'jwt-nomat') return { data: { user: { id: synthNoMatUid } }, error: null };
+            if (jwt === 'jwt-inativo') return { data: { user: { id: synthInactiveUid } }, error: null };
+            return { data: { user: null }, error: { message: 'Invalid JWT' } };
+          },
+          admin: {
+            async updateUserById(id: string, patch: any) {
+              authUpdateCalls.push({ id, password: patch?.password });
+              return { error: null };
+            }
+          }
+        },
+        from(table: string) {
+          if (table === 'historico_alteracoes_dados') {
+            return {
+              async insert(row: Record<string, any>) {
+                auditDbRows.push(row);
+                return { error: null };
+              }
+            };
+          }
+          assert.equal(table, 'usuarios');
+          const applyFilters = (rows: any[], filters: Record<string, any>) =>
+            rows.filter(r => Object.entries(filters).every(([k, v]) => r[k] === v));
+          return {
+            select() {
+              const filters: Record<string, any> = {};
+              const chain: any = {
+                eq(col: string, val: any) {
+                  filters[col] = val;
+                  return chain;
+                },
+                async maybeSingle() {
+                  const matched = applyFilters(usuarios, filters);
+                  return { data: matched[0] ? { ...matched[0] } : null, error: null };
+                }
+              };
+              return chain;
+            },
+            update(payload: Record<string, any>) {
+              const filters: Record<string, any> = {};
+              const chain: any = {
+                eq(col: string, val: any) {
+                  filters[col] = val;
+                  return chain;
+                },
+                select() {
+                  return {
+                    async maybeSingle() {
+                      const matched = applyFilters(usuarios, filters);
+                      if (!matched[0]) return { data: null, error: null };
+                      Object.assign(matched[0], payload);
+                      return { data: { ...matched[0] }, error: null };
+                    }
+                  };
+                }
+              };
+              return chain;
+            }
+          };
+        }
+      };
+    }
+  };
+
+  // 1. Sem JWT -> 401
+  const noJwtRes = await handleAdminManageUserRequest(
+    new Request('https://example.invalid/admin-manage-user', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ action: 'reset-own-password' })
+    }),
+    deps
+  );
+  assert.equal(noJwtRes.status, 401);
+
+  // 2. Senha enviada pelo cliente é recusada (400)
+  const clientPwdRes = await handleAdminManageUserRequest(
+    new Request('https://example.invalid/admin-manage-user', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer jwt-gessika' },
+      body: JSON.stringify({ action: 'reset-own-password', password: 'ClientPassword1!' })
+    }),
+    deps
+  );
+  assert.equal(clientPwdRes.status, 400);
+  assert.equal(authUpdateCalls.length, 0);
+
+  // 3. Sem matrícula (409) e usuário inativo (403) recebem erro genérico
+  const noMatRes = await handleAdminManageUserRequest(
+    new Request('https://example.invalid/admin-manage-user', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer jwt-nomat' },
+      body: JSON.stringify({ action: 'reset-own-password' })
+    }),
+    deps
+  );
+  assert.equal(noMatRes.status, 409);
+  const noMatText = await noMatRes.text();
+  assert.equal(/matr[ií]cula/i.test(noMatText), false);
+
+  const inactiveRes = await handleAdminManageUserRequest(
+    new Request('https://example.invalid/admin-manage-user', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer jwt-inativo' },
+      body: JSON.stringify({ action: 'reset-own-password' })
+    }),
+    deps
+  );
+  assert.equal(inactiveRes.status, 403);
+  assert.equal(authUpdateCalls.length, 0);
+
+  // 4. Analista executa reset-own-password mesmo tentando apontar outro usuarioId/email ->
+  //    ignora alvo do cliente, usa auth.uid(), gera Csb@12345Gessika no servidor, marca force_password_change=true,
+  //    registra auditoria sem senha e nunca devolve a senha na resposta
+  const ok1 = await handleAdminManageUserRequest(
+    new Request('https://example.invalid/admin-manage-user', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer jwt-gessika' },
+      body: JSON.stringify({
+        action: 'reset-own-password',
+        usuarioId: 'usr_outro_92',
+        email: 'outro@example.invalid',
+        authUserId: synthOtherUid
+      })
+    }),
+    deps
+  );
+  assert.equal(ok1.status, 200);
+  const ok1Text = await ok1.text();
+  assert.equal(ok1Text.includes('Csb@12345Gessika'), false);
+  assert.equal(ok1Text.includes('Csb@'), false);
+  const ok1Json = JSON.parse(ok1Text);
+  assert.equal(ok1Json.success, true);
+  assert.equal(ok1Json.forcePasswordChange, true);
+  assert.equal(authUpdateCalls.length, 1);
+  assert.equal(authUpdateCalls[0].id, synthAnalystUid);
+  assert.equal(authUpdateCalls[0].password, 'Csb@12345Gessika');
+  assert.equal(usuarios.find(u => u.id === 'usr_gessika_91')?.force_password_change, true);
+  assert.equal(usuarios.find(u => u.id === 'usr_outro_92')?.force_password_change, false);
+  assert.equal(auditEvents.length, 1);
+  assert.equal(auditEvents[0].event, 'reset-own-password');
+  assert.equal(auditEvents[0].usuarioId, 'usr_gessika_91');
+  assert.equal(JSON.stringify(auditEvents[0]).includes('Csb@12345Gessika'), false);
+  assert.equal(auditDbRows.length, 1);
+  assert.equal(JSON.stringify(auditDbRows[0]).includes('Csb@12345Gessika'), false);
+
+  // 5. Analista continua bloqueado (403) para gerenciamento administrativo de outros usuários
+  const adminActionRes = await handleAdminManageUserRequest(
+    new Request('https://example.invalid/admin-manage-user', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer jwt-gessika' },
+      body: JSON.stringify({ action: 'create-user', nome: 'X', email: 'x@example.invalid', papel: 'Usuário' })
+    }),
+    deps
+  );
+  assert.equal(adminActionRes.status, 403);
+
+  // 6. Rate limit: 2ª e 3ª chamadas dentro de 1h passam; 4ª retorna 429; após +1h volta a permitir
+  for (let i = 0; i < 2; i += 1) {
+    currentNow += 5 * 60 * 1000;
+    const res = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer jwt-gessika' },
+        body: JSON.stringify({ action: 'reset-own-password' })
+      }),
+      deps
+    );
+    assert.equal(res.status, 200);
+  }
+  assert.equal(authUpdateCalls.length, 3);
+
+  currentNow += 60 * 1000;
+  const rateLimitedRes = await handleAdminManageUserRequest(
+    new Request('https://example.invalid/admin-manage-user', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer jwt-gessika' },
+      body: JSON.stringify({ action: 'reset-own-password' })
+    }),
+    deps
+  );
+  assert.equal(rateLimitedRes.status, 429);
+  assert.equal(authUpdateCalls.length, 3);
+
+  // Avança > 1 hora da primeira chamada
+  currentNow += 60 * 60 * 1000;
+  const afterWindowRes = await handleAdminManageUserRequest(
+    new Request('https://example.invalid/admin-manage-user', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer jwt-gessika' },
+      body: JSON.stringify({ action: 'reset-own-password' })
+    }),
+    deps
+  );
+  assert.equal(afterWindowRes.status, 200);
+  assert.equal(authUpdateCalls.length, 4);
+
+  // 7. Cliente: resetOwnPasswordToDefault encerra sessão e retorna mensagem esperada
+  let signedOut = false;
+  const clientMock: any = {
+    auth: {
+      async signOut() {
+        signedOut = true;
+        return { error: null };
+      }
+    },
+    functions: {
+      async invoke(fn: string, opts: any) {
+        assert.equal(fn, 'admin-manage-user');
+        assert.equal(opts?.body?.action, 'reset-own-password');
+        return {
+          data: {
+            success: true,
+            message: 'Senha redefinida. Entre com a senha padrão e crie uma nova.'
+          },
+          error: null
+        };
+      }
+    }
+  };
+  const clientSvc = createAuthService(() => ({ client: clientMock, configured: true }));
+  const clientResetRes = await clientSvc.resetOwnPasswordToDefault();
+  assert.equal(clientResetRes.success, true);
+  assert.equal(signedOut, true);
+  assert.equal(clientResetRes.message, 'Senha redefinida. Entre com a senha padrão e crie uma nova.');
+});
+
+test('Recuperação de senha por e-mail: redirectTo com origin dinâmico, detecção/limpeza do hash recovery e completeRecoveryPasswordChange', async () => {
+  const synthUid = '00000000-0000-4000-8000-000000000099';
+  const originalWindow = (globalThis as any).window;
+  let capturedRedirectTo = '';
+  let capturedHash = '#access_token=synth-tok&refresh_token=synth-ref&type=recovery';
+  let replaceStateCalls = 0;
+
+  (globalThis as any).window = {
+    location: {
+      origin: 'https://administra.sema.example.invalid',
+      pathname: '/login',
+      search: '',
+      get hash() {
+        return capturedHash;
+      },
+      set hash(v: string) {
+        capturedHash = v;
+      }
+    },
+    history: {
+      state: { view: 'home' },
+      replaceState(_state: any, _title: string, url: string) {
+        replaceStateCalls += 1;
+        if (!url.includes('#')) capturedHash = '';
+      }
+    }
+  };
+
+  try {
+    assert.equal(hasRecoveryTokenInHash(), true);
+    assert.equal(hasRecoveryTokenInHash('#access_token=abc&type=recovery'), true);
+    assert.equal(hasRecoveryTokenInHash('#access_token=abc&type=signup'), false);
+    assert.equal(hasRecoveryTokenInHash(''), false);
+
+    clearAuthHashFromUrl();
+    assert.equal(capturedHash, '');
+    assert.equal(replaceStateCalls, 1);
+
+    let forceFlag = true;
+    const updatedPasswords: string[] = [];
+    const mockClient: any = {
+      auth: {
+        async resetPasswordForEmail(_email: string, opts: { redirectTo?: string }) {
+          capturedRedirectTo = String(opts?.redirectTo || '');
+          return { error: null };
+        },
+        async getSession() {
+          return {
+            data: { session: { access_token: 'tok-rec', user: { id: synthUid } } },
+            error: null
+          };
+        },
+        async updateUser({ password }: { password: string }) {
+          updatedPasswords.push(password);
+          return { error: null };
+        }
+      },
+      functions: {
+        async invoke(_fn: string, opts: any) {
+          if (opts?.body?.action === 'complete-password-change') {
+            forceFlag = false;
+            return { data: { success: true, forcePasswordChange: false }, error: null };
+          }
+          return { data: null, error: null };
+        }
+      },
+      from() {
+        return {
+          select() {
+            return {
+              eq() {
+                return {
+                  async maybeSingle() {
+                    return {
+                      data: {
+                        id: 'usr_rec_99',
+                        auth_user_id: synthUid,
+                        nome: 'Servidor Recuperação',
+                        login: 'rec.user',
+                        email: 'rec@example.invalid',
+                        matricula: 'MAT-99',
+                        papel: 'Usuário',
+                        situacao: 'Ativo',
+                        force_password_change: forceFlag
+                      },
+                      error: null
+                    };
+                  }
+                };
+              }
+            };
+          }
+        };
+      }
+    };
+
+    const svc = createAuthService(() => ({ client: mockClient, configured: true }));
+    const emailRes = await svc.sendPasswordReset('rec@example.invalid');
+    assert.equal(emailRes.success, true);
+    assert.equal(capturedRedirectTo, 'https://administra.sema.example.invalid');
+    assert.equal(capturedRedirectTo.includes('localhost'), false);
+
+    const shortRecovery = await svc.completeRecoveryPasswordChange('12345', '12345');
+    assert.equal(shortRecovery.success, false);
+    assert.equal(updatedPasswords.length, 0);
+
+    const okRecovery = await svc.completeRecoveryPasswordChange('NovaRec@6', 'NovaRec@6');
+    assert.equal(okRecovery.success, true);
+    assert.deepEqual(updatedPasswords, ['NovaRec@6']);
+    assert.equal(okRecovery.profile?.forcePasswordChange, false);
+
+    const recPageHtml = renderToStaticMarkup(
+      React.createElement(ForcePasswordChangePage, {
+        mode: 'recovery',
+        profile: {
+          id: 'usr_rec_99',
+          authUserId: synthUid,
+          nome: 'Servidor Recuperação',
+          login: 'rec.user',
+          email: 'rec@example.invalid',
+          matricula: 'MAT-99',
+          perfilProfissional: 'Analista',
+          setor: 'CSB',
+          papel: 'Usuário',
+          situacao: 'Ativo',
+          forcePasswordChange: false,
+          createdAt: '2026-11-24T00:00:00.000Z'
+        },
+        onPasswordChanged: () => {},
+        onLogout: () => {}
+      })
+    );
+    assert.ok(recPageHtml.includes('REDEFINIÇÃO DE SENHA'));
+
+    const appSrc = fs.readFileSync(path.join(process.cwd(), 'src/App.tsx'), 'utf8');
+    assert.equal(appSrc.includes('PASSWORD_RECOVERY'), true);
+    assert.equal(appSrc.includes('hasRecoveryTokenInHash'), true);
+    assert.equal(appSrc.includes('clearAuthHashFromUrl'), true);
+    assert.equal(appSrc.includes('isPasswordRecoveryMode'), true);
+  } finally {
+    if (originalWindow === undefined) {
+      delete (globalThis as any).window;
+    } else {
+      (globalThis as any).window = originalWindow;
+    }
+  }
 });
 
 
