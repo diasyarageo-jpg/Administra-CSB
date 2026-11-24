@@ -1272,10 +1272,13 @@ test('Contenção Edge Function admin-manage-user: bloqueia request-access com 4
   assert.equal(insertPayloads.at(-1)?.papel, 'Analista');
 });
 
-test('Edge Function admin-manage-user: revisão e aprovação segura de public.admin_solicitacoes_acesso com idempotência e proteção contra falhas parciais', async () => {
+test('Edge Function admin-manage-user: revisão e aprovação segura de public.admin_solicitacoes_acesso com FK, usuario_id, validação de auth_user_id, falhas parciais e concorrência', async () => {
   const synthAdminUid = '00000000-0000-4000-8000-000000000041';
   const synthUserRoleUid = '00000000-0000-4000-8000-000000000042';
   const synthInactiveAdminUid = '00000000-0000-4000-8000-000000000043';
+  const synthPrelinkedValidAuthUid = '00000000-0000-4000-8000-000000000044';
+  const synthPrelinkedMismatchAuthUid = '00000000-0000-4000-8000-000000000045';
+  const synthPrelinkedSharedAuthUid = '00000000-0000-4000-8000-000000000046';
 
   const createScenarioState = () => {
     const authUsers: Array<{ id: string; email: string; user_metadata: Record<string, any> }> = [];
@@ -1321,6 +1324,16 @@ test('Edge Function admin-manage-user: revisão e aprovação segura de public.a
         status: 'Inativo'
       },
       {
+        id: 'usr_canonico_01_dup',
+        auth_user_id: null,
+        nome: 'Servidor Canônico Um Duplicado',
+        matricula: 'MAT-1001',
+        email: 'servidor.um@example.invalid',
+        papel: 'Visualizador',
+        situacao: 'Pendente',
+        status: 'Inativo'
+      },
+      {
         id: 'usr_canonico_02',
         auth_user_id: null,
         nome: 'Servidor Canônico Dois',
@@ -1338,6 +1351,7 @@ test('Edge Function admin-manage-user: revisão e aprovação segura de public.a
         nome: 'Nome Informado Na Solicitacao',
         matricula: 'mat-1001',
         email: 'SERVIDOR.UM@example.invalid',
+        usuario_id: null,
         status: 'pendente',
         observacoes_admin: null,
         revisado_por: null,
@@ -1353,6 +1367,7 @@ test('Edge Function admin-manage-user: revisão e aprovação segura de public.a
         nome: 'Servidor Divergente',
         matricula: 'MAT-9999',
         email: 'servidor.dois@example.invalid',
+        usuario_id: null,
         status: 'pendente',
         observacoes_admin: null,
         revisado_por: null,
@@ -1365,9 +1380,10 @@ test('Edge Function admin-manage-user: revisão e aprovação segura de public.a
         nome: 'Solicitação Já Aprovada',
         matricula: 'MAT-3003',
         email: 'finalizada@example.invalid',
+        usuario_id: 'usr_operacional_42',
         status: 'aprovada',
         observacoes_admin: 'Concluída',
-        revisado_por: synthAdminUid,
+        revisado_por: 'usr_admin_41',
         revisado_em: '2026-11-22T12:00:00.000Z',
         criado_em: '2026-11-22T10:00:00.000Z',
         atualizado_em: '2026-11-22T12:00:00.000Z'
@@ -1386,7 +1402,8 @@ test('Edge Function admin-manage-user: revisão e aprovação segura de public.a
       failAuthInvite: false,
       failAuthCreate: false,
       failUsuarioUpdateOnce: false,
-      failSolicitacaoUpdateOnce: false
+      failSolicitacaoApproveUpdateOnce: false,
+      failSolicitacaoRollbackOnce: false
     };
 
     const deps = (envPresent = true) => ({
@@ -1412,6 +1429,13 @@ test('Edge Function admin-manage-user: revisão e aprovação segura de public.a
             admin: {
               async listUsers() {
                 return { data: { users: authUsers.map(u => ({ ...u })) }, error: null };
+              },
+              async getUserById(id: string) {
+                const found = authUsers.find(u => u.id === id);
+                if (!found) {
+                  return { data: { user: null }, error: { status: 404, message: 'User not found' } };
+                }
+                return { data: { user: { ...found } }, error: null };
               },
               async updateUserById(id: string, patch: any) {
                 stats.authUpdateCalls += 1;
@@ -1451,7 +1475,11 @@ test('Edge Function admin-manage-user: revisão e aprovação segura de public.a
           from(table: string) {
             stats.dbCalls += 1;
             const tableRows = table === 'usuarios' ? usuarios : solicitacoes;
-            const matchRows = (filters: Record<string, any>, inFilters: Record<string, any[]>) =>
+            const matchRows = (
+              filters: Record<string, any>,
+              inFilters: Record<string, any[]>,
+              isFilters: Record<string, any>
+            ) =>
               tableRows.filter(row => {
                 for (const [k, v] of Object.entries(filters)) {
                   if (row[k] !== v) return false;
@@ -1459,19 +1487,48 @@ test('Edge Function admin-manage-user: revisão e aprovação segura de public.a
                 for (const [k, allowed] of Object.entries(inFilters)) {
                   if (!allowed.includes(row[k])) return false;
                 }
+                for (const [k, expectedNullOrBool] of Object.entries(isFilters)) {
+                  if ((row[k] ?? null) !== expectedNullOrBool) return false;
+                }
                 return true;
               });
+
+            const validateForeignKeysOnSolicitacao = (updPayload: Record<string, any>) => {
+              if (table !== 'admin_solicitacoes_acesso') return null;
+              if (updPayload.revisado_por !== undefined && updPayload.revisado_por !== null) {
+                const existsAdmin = usuarios.some(u => u.id === updPayload.revisado_por);
+                if (!existsAdmin) {
+                  return {
+                    code: '23503',
+                    message:
+                      'insert or update on table "admin_solicitacoes_acesso" violates foreign key constraint "admin_solicitacoes_acesso_revisado_por_fkey"'
+                  };
+                }
+              }
+              if (updPayload.usuario_id !== undefined && updPayload.usuario_id !== null) {
+                const existsUsuario = usuarios.some(u => u.id === updPayload.usuario_id);
+                if (!existsUsuario) {
+                  return {
+                    code: '23503',
+                    message:
+                      'insert or update on table "admin_solicitacoes_acesso" violates foreign key constraint "admin_solicitacoes_acesso_usuario_id_fkey"'
+                  };
+                }
+              }
+              return null;
+            };
 
             return {
               select() {
                 const filters: Record<string, any> = {};
                 const inFilters: Record<string, any[]> = {};
+                const isFilters: Record<string, any> = {};
                 let limitVal: number | null = null;
                 let orderCol: string | null = null;
                 let orderAsc = true;
 
                 const runQuery = () => {
-                  let res = matchRows(filters, inFilters).map(r => ({ ...r }));
+                  let res = matchRows(filters, inFilters, isFilters).map(r => ({ ...r }));
                   if (orderCol) {
                     res.sort((a, b) => {
                       const va = String(a[orderCol!] || '');
@@ -1495,6 +1552,10 @@ test('Edge Function admin-manage-user: revisão e aprovação segura de public.a
                   },
                   in(col: string, vals: any[]) {
                     inFilters[col] = vals;
+                    return chain;
+                  },
+                  is(col: string, val: any) {
+                    isFilters[col] = val;
                     return chain;
                   },
                   order(col: string, opts?: { ascending?: boolean }) {
@@ -1524,6 +1585,39 @@ test('Edge Function admin-manage-user: revisão e aprovação segura de public.a
               update(updPayload: Record<string, any>) {
                 const filters: Record<string, any> = {};
                 const inFilters: Record<string, any[]> = {};
+                const isFilters: Record<string, any> = {};
+
+                const executeUpdate = () => {
+                  const fkError = validateForeignKeysOnSolicitacao(updPayload);
+                  if (fkError) {
+                    return { data: null, error: fkError };
+                  }
+                  if (table === 'usuarios' && stats.failUsuarioUpdateOnce) {
+                    stats.failUsuarioUpdateOnce = false;
+                    return { data: null, error: { message: 'Simulated DB error updating usuarios' } };
+                  }
+                  if (
+                    table === 'admin_solicitacoes_acesso' &&
+                    updPayload.status === 'aprovada' &&
+                    stats.failSolicitacaoApproveUpdateOnce
+                  ) {
+                    stats.failSolicitacaoApproveUpdateOnce = false;
+                    return { data: null, error: { message: 'Simulated DB error approving solicitacao' } };
+                  }
+                  if (
+                    table === 'admin_solicitacoes_acesso' &&
+                    filters.status === 'aprovada' &&
+                    stats.failSolicitacaoRollbackOnce
+                  ) {
+                    stats.failSolicitacaoRollbackOnce = false;
+                    return { data: null, error: { message: 'Simulated DB error rolling back solicitacao' } };
+                  }
+                  const matched = matchRows(filters, inFilters, isFilters);
+                  if (!matched[0]) return { data: null, error: null };
+                  Object.assign(matched[0], updPayload);
+                  return { data: { ...matched[0] }, error: null };
+                };
+
                 const chain: any = {
                   eq(col: string, val: any) {
                     filters[col] = val;
@@ -1533,35 +1627,23 @@ test('Edge Function admin-manage-user: revisão e aprovação segura de public.a
                     inFilters[col] = vals;
                     return chain;
                   },
+                  is(col: string, val: any) {
+                    isFilters[col] = val;
+                    return chain;
+                  },
+                  then(resolve: (val: any) => void) {
+                    resolve(executeUpdate());
+                  },
                   select() {
                     return {
                       async maybeSingle() {
-                        if (table === 'usuarios' && stats.failUsuarioUpdateOnce) {
-                          stats.failUsuarioUpdateOnce = false;
-                          return { data: null, error: { message: 'Simulated DB error updating usuarios' } };
-                        }
-                        if (table === 'admin_solicitacoes_acesso' && stats.failSolicitacaoUpdateOnce) {
-                          stats.failSolicitacaoUpdateOnce = false;
-                          return { data: null, error: { message: 'Simulated DB error updating solicitacao' } };
-                        }
-                        const matched = matchRows(filters, inFilters);
-                        if (!matched[0]) return { data: null, error: null };
-                        Object.assign(matched[0], updPayload);
-                        return { data: { ...matched[0] }, error: null };
+                        return executeUpdate();
                       },
                       async single() {
-                        if (table === 'usuarios' && stats.failUsuarioUpdateOnce) {
-                          stats.failUsuarioUpdateOnce = false;
-                          return { data: null, error: { message: 'Simulated DB error updating usuarios' } };
-                        }
-                        if (table === 'admin_solicitacoes_acesso' && stats.failSolicitacaoUpdateOnce) {
-                          stats.failSolicitacaoUpdateOnce = false;
-                          return { data: null, error: { message: 'Simulated DB error updating solicitacao' } };
-                        }
-                        const matched = matchRows(filters, inFilters);
-                        if (!matched[0]) return { data: null, error: { message: 'Not found' } };
-                        Object.assign(matched[0], updPayload);
-                        return { data: { ...matched[0] }, error: null };
+                        const res = executeUpdate();
+                        if (res.error) return res;
+                        if (!res.data) return { data: null, error: { message: 'Not found' } };
+                        return res;
                       }
                     };
                   }
@@ -1694,11 +1776,12 @@ test('Edge Function admin-manage-user: revisão e aprovação segura de public.a
       'observacoes_admin',
       'revisado_em',
       'revisado_por',
-      'status'
+      'status',
+      'usuario_id'
     ]);
   }
 
-  // 4. review-access-request: validações e bloqueio de solicitação já finalizada
+  // 4. review-access-request: validações, FK de revisado_por (adminRecord.id) e bloqueio de solicitação já finalizada
   {
     const s = createScenarioState();
     const invalidIdRes = await handleAdminManageUserRequest(
@@ -1782,7 +1865,8 @@ test('Edge Function admin-manage-user: revisão e aprovação segura de public.a
     assert.equal(correcaoRes.status, 200);
     const correcaoJson = await correcaoRes.json();
     assert.equal(correcaoJson.solicitacao.status, 'aguardando_correcao');
-    assert.equal(correcaoJson.solicitacao.revisado_por, synthAdminUid);
+    assert.equal(correcaoJson.solicitacao.revisado_por, 'usr_admin_41');
+    assert.notEqual(correcaoJson.solicitacao.revisado_por, synthAdminUid);
     assert.ok(correcaoJson.solicitacao.revisado_em);
     assert.equal(correcaoJson.solicitacao.observacoes_admin, 'Confirmar matrícula funcional');
     assert.ok(correcaoJson.solicitacao.atualizado_em);
@@ -1804,6 +1888,8 @@ test('Edge Function admin-manage-user: revisão e aprovação segura de public.a
       s.deps(true)
     );
     assert.equal(recusarRes.status, 200);
+    const recusarJson = await recusarRes.json();
+    assert.equal(recusarJson.solicitacao.revisado_por, 'usr_admin_41');
 
     // Após recusada (finalizada), nova revisão é bloqueada
     const afterRecusaRes = await handleAdminManageUserRequest(
@@ -1825,7 +1911,7 @@ test('Edge Function admin-manage-user: revisão e aprovação segura de public.a
     assert.equal(afterRecusaRes.status, 409);
   }
 
-  // 5. approve-access-request: exige cadastro existente, valida e-mail/matrícula, atribui somente papel Usuário e trata falhas parciais de forma idempotente
+  // 5. approve-access-request: validações, falhas parciais com reversão e idempotência
   {
     const s = createScenarioState();
 
@@ -1884,8 +1970,9 @@ test('Edge Function admin-manage-user: revisão e aprovação segura de public.a
     assert.equal(s.stats.authInviteCalls, 0);
     assert.equal(s.usuarios.find(u => u.id === 'usr_canonico_02')?.situacao, 'Pendente');
     assert.equal(s.solicitacoes.find(r => r.id === 'sol_div_02')?.status, 'pendente');
+    assert.equal(s.solicitacoes.find(r => r.id === 'sol_div_02')?.usuario_id, null);
 
-    // Falha parcial 1: Auth falha -> 500, cadastro permanece Pendente e solicitação permanece pendente
+    // Falha parcial 1: Auth falha -> 500, libera reserva da solicitação e cadastro permanece Pendente
     s.stats.failAuthInvite = true;
     s.stats.failAuthCreate = true;
     const authFailRes = await handleAdminManageUserRequest(
@@ -1909,12 +1996,14 @@ test('Edge Function admin-manage-user: revisão e aprovação segura de public.a
     assert.equal(authFailBody.includes('synth-super-secret-service-role-key'), false);
     assert.equal(s.usuarios.find(u => u.id === 'usr_canonico_01')?.situacao, 'Pendente');
     assert.equal(s.solicitacoes.find(r => r.id === 'sol_pend_01')?.status, 'pendente');
+    assert.equal(s.solicitacoes.find(r => r.id === 'sol_pend_01')?.usuario_id, null);
 
-    // Falha parcial 2: Auth cria conta, mas update em public.usuarios falha -> solicitação NÃO é aprovada
+    // Falha parcial 2: Auth cria conta, mas update de aprovação em admin_solicitacoes_acesso falha ->
+    // cadastro NÃO é ativado (permanece Pendente) e reserva da solicitação é liberada
     s.stats.failAuthInvite = false;
     s.stats.failAuthCreate = false;
-    s.stats.failUsuarioUpdateOnce = true;
-    const userUpdFailRes = await handleAdminManageUserRequest(
+    s.stats.failSolicitacaoApproveUpdateOnce = true;
+    const solicApproveFailRes = await handleAdminManageUserRequest(
       new Request('https://example.invalid/admin-manage-user', {
         method: 'POST',
         headers: {
@@ -1929,14 +2018,16 @@ test('Edge Function admin-manage-user: revisão e aprovação segura de public.a
       }),
       s.deps(true)
     );
-    assert.equal(userUpdFailRes.status, 500);
+    assert.equal(solicApproveFailRes.status, 500);
     assert.equal(s.authUsers.length, 1);
     assert.equal(s.usuarios.find(u => u.id === 'usr_canonico_01')?.situacao, 'Pendente');
     assert.equal(s.solicitacoes.find(r => r.id === 'sol_pend_01')?.status, 'pendente');
+    assert.equal(s.solicitacoes.find(r => r.id === 'sol_pend_01')?.usuario_id, null);
 
-    // Falha parcial 3: Retry ativa public.usuarios, mas update em admin_solicitacoes_acesso falha -> NÃO cria 2ª conta Auth e solicitação ainda não fica aprovada
-    s.stats.failSolicitacaoUpdateOnce = true;
-    const solicUpdFailRes = await handleAdminManageUserRequest(
+    // Falha parcial 3: solicitação é marcada como aprovada, mas update em public.usuarios falha ->
+    // NUNCA deixa cadastro ativo com solicitação pendente; reverte a solicitação para pendente e mantém cadastro Pendente
+    s.stats.failUsuarioUpdateOnce = true;
+    const userUpdFailRes = await handleAdminManageUserRequest(
       new Request('https://example.invalid/admin-manage-user', {
         method: 'POST',
         headers: {
@@ -1947,18 +2038,22 @@ test('Edge Function admin-manage-user: revisão e aprovação segura de public.a
           action: 'approve-access-request',
           solicitacaoId: 'sol_pend_01',
           usuarioId: 'usr_canonico_01',
-          papel: 'Administrador'
+          papel: 'Administrador',
+          observacoesAdmin: 'Tentativa que sofre falha ao ativar usuario'
         })
       }),
       s.deps(true)
     );
-    assert.equal(solicUpdFailRes.status, 500);
+    assert.equal(userUpdFailRes.status, 500);
     assert.equal(s.authUsers.length, 1);
-    assert.equal(s.usuarios.find(u => u.id === 'usr_canonico_01')?.situacao, 'Ativo');
-    assert.equal(s.usuarios.find(u => u.id === 'usr_canonico_01')?.papel, 'Usuário');
+    assert.equal(s.usuarios.find(u => u.id === 'usr_canonico_01')?.situacao, 'Pendente');
     assert.equal(s.solicitacoes.find(r => r.id === 'sol_pend_01')?.status, 'pendente');
+    assert.equal(s.solicitacoes.find(r => r.id === 'sol_pend_01')?.usuario_id, null);
+    assert.equal(s.solicitacoes.find(r => r.id === 'sol_pend_01')?.revisado_por, null);
+    assert.equal(s.solicitacoes.find(r => r.id === 'sol_pend_01')?.revisado_em, null);
+    assert.equal(s.solicitacoes.find(r => r.id === 'sol_pend_01')?.observacoes_admin, null);
 
-    // Retry final após falha parcial conclui com sucesso, usando dados canônicos e papel Usuário (nunca Administrador)
+    // Retry final após falhas parciais conclui com sucesso, reutiliza conta Auth existente, grava usuario_id e revisado_por=adminRecord.id
     const approveOkRes = await handleAdminManageUserRequest(
       new Request('https://example.invalid/admin-manage-user', {
         method: 'POST',
@@ -1987,11 +2082,13 @@ test('Edge Function admin-manage-user: revisão e aprovação segura de public.a
     assert.equal(approveJson.usuarioRecord.papel, 'Usuário');
     assert.equal(approveJson.usuarioRecord.situacao, 'Ativo');
     assert.equal(approveJson.solicitacao.status, 'aprovada');
-    assert.equal(approveJson.solicitacao.revisado_por, synthAdminUid);
+    assert.equal(approveJson.solicitacao.usuario_id, 'usr_canonico_01');
+    assert.equal(approveJson.solicitacao.revisado_por, 'usr_admin_41');
+    assert.notEqual(approveJson.solicitacao.revisado_por, synthAdminUid);
     assert.equal(approveJson.solicitacao.observacoes_admin, 'Aprovado após conferência cadastral');
     assert.equal(s.stats.usuariosInsertCalls, 0);
 
-    // Repetição após aprovação (mesmo tentando apontar outro cadastro) é bloqueada com 409 sem criar conta ou ativar outro cadastro
+    // Repetição após aprovação (mesmo tentando apontar outro cadastro) é bloqueada com 409
     const replayRes = await handleAdminManageUserRequest(
       new Request('https://example.invalid/admin-manage-user', {
         method: 'POST',
@@ -2002,15 +2099,225 @@ test('Edge Function admin-manage-user: revisão e aprovação segura de public.a
         body: JSON.stringify({
           action: 'approve-access-request',
           solicitacaoId: 'sol_pend_01',
-          usuarioId: 'usr_canonico_02'
+          usuarioId: 'usr_canonico_01_dup'
         })
       }),
       s.deps(true)
     );
     assert.equal(replayRes.status, 409);
     assert.equal(s.authUsers.length, 1);
-    assert.equal(s.usuarios.find(u => u.id === 'usr_canonico_02')?.situacao, 'Pendente');
+    assert.equal(s.usuarios.find(u => u.id === 'usr_canonico_01_dup')?.situacao, 'Pendente');
     assert.equal(s.stats.usuariosInsertCalls, 0);
   }
+
+  // 6. Falha de reversão após erro em public.usuarios nunca deixa usuário Ativo com solicitação pendente
+  {
+    const s = createScenarioState();
+    s.stats.failUsuarioUpdateOnce = true;
+    s.stats.failSolicitacaoRollbackOnce = true;
+
+    const doubleFailRes = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer synth-admin-jwt'
+        },
+        body: JSON.stringify({
+          action: 'approve-access-request',
+          solicitacaoId: 'sol_pend_01',
+          usuarioId: 'usr_canonico_01'
+        })
+      }),
+      s.deps(true)
+    );
+    assert.equal(doubleFailRes.status, 500);
+    assert.equal(s.usuarios.find(u => u.id === 'usr_canonico_01')?.situacao, 'Pendente');
+    assert.equal(s.solicitacoes.find(r => r.id === 'sol_pend_01')?.status, 'aprovada');
+    assert.equal(s.solicitacoes.find(r => r.id === 'sol_pend_01')?.usuario_id, 'usr_canonico_01');
+  }
+
+  // 7. Validação estrita quando public.usuarios já possui auth_user_id (existência no Auth, e-mail canônico e unicidade)
+  {
+    const s = createScenarioState();
+    s.authUsers.push(
+      {
+        id: synthPrelinkedValidAuthUid,
+        email: 'servidor.dois@example.invalid',
+        user_metadata: {}
+      },
+      {
+        id: synthPrelinkedMismatchAuthUid,
+        email: 'outro.email@example.invalid',
+        user_metadata: {}
+      },
+      {
+        id: synthPrelinkedSharedAuthUid,
+        email: 'servidor.dois@example.invalid',
+        user_metadata: {}
+      }
+    );
+
+    const sol2 = s.solicitacoes.find(r => r.id === 'sol_div_02')!;
+    sol2.matricula = 'MAT-2002';
+
+    const target2 = s.usuarios.find(u => u.id === 'usr_canonico_02')!;
+
+    // 7a. auth_user_id inexistente no Auth -> 409 sem ativar cadastro nem aprovar solicitação
+    target2.auth_user_id = '00000000-0000-4000-8000-999999999999';
+    const ghostAuthRes = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer synth-admin-jwt'
+        },
+        body: JSON.stringify({
+          action: 'approve-access-request',
+          solicitacaoId: 'sol_div_02',
+          usuarioId: 'usr_canonico_02'
+        })
+      }),
+      s.deps(true)
+    );
+    assert.equal(ghostAuthRes.status, 409);
+    assert.equal(target2.situacao, 'Pendente');
+    assert.equal(sol2.status, 'pendente');
+    assert.equal(sol2.usuario_id, null);
+
+    // 7b. auth_user_id pertence a conta Auth com e-mail divergente do e-mail canônico -> 409
+    target2.auth_user_id = synthPrelinkedMismatchAuthUid;
+    const wrongEmailRes = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer synth-admin-jwt'
+        },
+        body: JSON.stringify({
+          action: 'approve-access-request',
+          solicitacaoId: 'sol_div_02',
+          usuarioId: 'usr_canonico_02'
+        })
+      }),
+      s.deps(true)
+    );
+    assert.equal(wrongEmailRes.status, 409);
+    assert.equal(target2.situacao, 'Pendente');
+    assert.equal(sol2.status, 'pendente');
+    assert.equal(sol2.usuario_id, null);
+
+    // 7c. auth_user_id já está vinculado a outro cadastro em public.usuarios -> 409
+    s.usuarios.push({
+      id: 'usr_outro_vinculado',
+      auth_user_id: synthPrelinkedSharedAuthUid,
+      nome: 'Outro Vinculado',
+      matricula: 'MAT-8888',
+      email: 'outro.vinculado@example.invalid',
+      papel: 'Usuário',
+      situacao: 'Ativo',
+      status: 'Ativo'
+    });
+    target2.auth_user_id = synthPrelinkedSharedAuthUid;
+    const sharedAuthRes = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer synth-admin-jwt'
+        },
+        body: JSON.stringify({
+          action: 'approve-access-request',
+          solicitacaoId: 'sol_div_02',
+          usuarioId: 'usr_canonico_02'
+        })
+      }),
+      s.deps(true)
+    );
+    assert.equal(sharedAuthRes.status, 409);
+    assert.equal(target2.situacao, 'Pendente');
+    assert.equal(sol2.status, 'pendente');
+    assert.equal(sol2.usuario_id, null);
+
+    // 7d. auth_user_id válido (existe no Auth, mesmo e-mail canônico e exclusivo do cadastro) -> 200
+    target2.auth_user_id = synthPrelinkedValidAuthUid;
+    const validPrelinkedRes = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer synth-admin-jwt'
+        },
+        body: JSON.stringify({
+          action: 'approve-access-request',
+          solicitacaoId: 'sol_div_02',
+          usuarioId: 'usr_canonico_02'
+        })
+      }),
+      s.deps(true)
+    );
+    assert.equal(validPrelinkedRes.status, 200);
+    const validPrelinkedJson = await validPrelinkedRes.json();
+    assert.equal(validPrelinkedJson.authUserId, synthPrelinkedValidAuthUid);
+    assert.equal(target2.situacao, 'Ativo');
+    assert.equal(target2.papel, 'Usuário');
+    assert.equal(sol2.status, 'aprovada');
+    assert.equal(sol2.usuario_id, 'usr_canonico_02');
+    assert.equal(sol2.revisado_por, 'usr_admin_41');
+  }
+
+  // 8. Aprovações concorrentes da mesma solicitação para cadastros diferentes -> somente 1 vence (200) e a outra recebe 409
+  {
+    const s = createScenarioState();
+    const sharedDeps = s.deps(true);
+
+    const [resA, resB] = await Promise.all([
+      handleAdminManageUserRequest(
+        new Request('https://example.invalid/admin-manage-user', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: 'Bearer synth-admin-jwt'
+          },
+          body: JSON.stringify({
+            action: 'approve-access-request',
+            solicitacaoId: 'sol_pend_01',
+            usuarioId: 'usr_canonico_01'
+          })
+        }),
+        sharedDeps
+      ),
+      handleAdminManageUserRequest(
+        new Request('https://example.invalid/admin-manage-user', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: 'Bearer synth-admin-jwt'
+          },
+          body: JSON.stringify({
+            action: 'approve-access-request',
+            solicitacaoId: 'sol_pend_01',
+            usuarioId: 'usr_canonico_01_dup'
+          })
+        }),
+        sharedDeps
+      )
+    ]);
+
+    const statuses = [resA.status, resB.status].sort((a, b) => a - b);
+    assert.deepEqual(statuses, [200, 409]);
+
+    const activeMatches = s.usuarios.filter(
+      u => (u.id === 'usr_canonico_01' || u.id === 'usr_canonico_01_dup') && u.situacao === 'Ativo'
+    );
+    assert.equal(activeMatches.length, 1);
+
+    const sol = s.solicitacoes.find(r => r.id === 'sol_pend_01')!;
+    assert.equal(sol.status, 'aprovada');
+    assert.equal(sol.usuario_id, activeMatches[0].id);
+    assert.equal(sol.revisado_por, 'usr_admin_41');
+    assert.equal(s.authUsers.length, 1);
+  }
 });
+
 

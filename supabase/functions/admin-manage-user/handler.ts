@@ -27,7 +27,7 @@ export const SOLICITACAO_ALLOWED_STATUSES = ['pendente', 'aguardando_correcao', 
 export const SOLICITACAO_REVIEW_MUTABLE_STATUSES = ['aguardando_correcao', 'recusada'] as const;
 export const SOLICITACAO_FINALIZED_STATUSES = ['aprovada', 'recusada'] as const;
 const SOLICITACAO_REVIEW_COLUMNS =
-  'id, nome, matricula, email, status, observacoes_admin, revisado_por, revisado_em, criado_em, atualizado_em';
+  'id, nome, matricula, email, usuario_id, status, observacoes_admin, revisado_por, revisado_em, criado_em, atualizado_em';
 const SAFE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
 const MAX_ADMIN_OBSERVACAO_LENGTH = 1000;
 const DEFAULT_SOLICITACAO_LIST_LIMIT = 50;
@@ -73,6 +73,7 @@ function sanitizeSolicitacaoForAdmin(row: Record<string, any>) {
     nome: row.nome ?? null,
     matricula: row.matricula ?? null,
     email: row.email ?? null,
+    usuario_id: row.usuario_id ?? null,
     status: row.status ?? null,
     observacoes_admin: row.observacoes_admin ?? null,
     revisado_por: row.revisado_por ?? null,
@@ -169,7 +170,13 @@ export async function handleAdminManageUserRequest(
       .eq('auth_user_id', callerUser.id)
       .maybeSingle();
 
-    if (adminErr || !adminRecord || adminRecord.papel !== 'Administrador' || adminRecord.situacao !== 'Ativo') {
+    if (
+      adminErr ||
+      !adminRecord ||
+      !adminRecord.id ||
+      adminRecord.papel !== 'Administrador' ||
+      adminRecord.situacao !== 'Ativo'
+    ) {
       return jsonResponse(
         {
           success: false,
@@ -582,13 +589,16 @@ export async function handleAdminManageUserRequest(
       }
 
       const now = new Date().toISOString();
-      const updatePayload = {
+      const updatePayload: Record<string, any> = {
         status: nextStatus,
-        revisado_por: callerUser.id,
+        revisado_por: adminRecord.id,
         revisado_em: now,
         observacoes_admin: obsParsed.value,
         atualizado_em: now
       };
+      if (currentResult.data.usuario_id !== undefined && currentResult.data.usuario_id !== null) {
+        updatePayload.usuario_id = null;
+      }
 
       const executeReviewUpdate = async (columns: string) =>
         await supabaseAdmin
@@ -696,6 +706,17 @@ export async function handleAdminManageUserRequest(
         );
       }
 
+      const initialUsuarioId = solicitacao.usuario_id ? String(solicitacao.usuario_id).trim() : null;
+      if (initialUsuarioId && initialUsuarioId !== usuarioId) {
+        return jsonResponse(
+          {
+            success: false,
+            error: 'Esta solicitação já está vinculada a outro cadastro em public.usuarios.'
+          },
+          409
+        );
+      }
+
       // 2. Consulta o cadastro canônico existente em public.usuarios (nunca cria cadastro novo)
       const { data: targetUser, error: targetErr } = await supabaseAdmin
         .from('usuarios')
@@ -750,15 +771,188 @@ export async function handleAdminManageUserRequest(
         );
       }
 
-      // 4. Provisiona/vincula conta no Supabase Auth usando exclusivamente os dados canônicos e papel padrão Usuário
+      // 4. Validação prévia (somente leitura) de auth_user_id existente ou vínculo prévio de Auth
       const assignedRole = 'Usuário';
-      let authUserId: string;
+      const existingTargetAuthId = targetUser.auth_user_id ? String(targetUser.auth_user_id).trim() : '';
+      let preValidatedAuthUser: any = null;
 
-      if (targetUser.auth_user_id) {
-        authUserId = String(targetUser.auth_user_id);
+      const checkAuthIdLinkedElsewhere = async (
+        candidateAuthId: string
+      ): Promise<{ ok: true } | { ok: false; status: number; error: string }> => {
+        const { data: linkedRows, error: linkedErr } = await supabaseAdmin
+          .from('usuarios')
+          .select('id')
+          .eq('auth_user_id', candidateAuthId);
+
+        if (linkedErr) {
+          return { ok: false, status: 500, error: 'Falha ao verificar vínculo de autenticação existente.' };
+        }
+
+        const otherLinked = Array.isArray(linkedRows)
+          ? linkedRows.find((row: any) => String(row.id) !== usuarioId)
+          : null;
+
+        if (otherLinked) {
+          return {
+            ok: false,
+            status: 409,
+            error: 'A conta de autenticação já está vinculada a outro cadastro em public.usuarios.'
+          };
+        }
+        return { ok: true };
+      };
+
+      const findAuthUserByCanonicalEmail = async (): Promise<
+        { ok: true; user: any | null } | { ok: false; status: number; error: string }
+      > => {
+        const { data: listData, error: listErr } = await supabaseAdmin.auth.admin.listUsers({
+          page: 1,
+          perPage: 1000
+        });
+        if (listErr) {
+          return { ok: false, status: 500, error: 'Falha ao consultar serviço de autenticação.' };
+        }
+        const found = listData?.users?.find((u: any) => normalizeEmail(u.email) === canonicalEmail) ?? null;
+        return { ok: true, user: found };
+      };
+
+      if (existingTargetAuthId) {
+        const uniquenessCheck = await checkAuthIdLinkedElsewhere(existingTargetAuthId);
+        if (!uniquenessCheck.ok) {
+          return jsonResponse({ success: false, error: uniquenessCheck.error }, uniquenessCheck.status);
+        }
+
+        if (typeof supabaseAdmin.auth?.admin?.getUserById === 'function') {
+          const { data: authByIdData, error: authByIdErr } = await supabaseAdmin.auth.admin.getUserById(
+            existingTargetAuthId
+          );
+          if (authByIdErr) {
+            const msg = String(authByIdErr.message || '');
+            const notFound = authByIdErr.status === 404 || /not\s*found/i.test(msg);
+            return jsonResponse(
+              {
+                success: false,
+                error: notFound
+                  ? 'A conta de autenticação vinculada ao cadastro (auth_user_id) não existe no serviço de autenticação.'
+                  : 'Falha ao validar conta de autenticação vinculada.'
+              },
+              notFound ? 409 : 500
+            );
+          }
+          preValidatedAuthUser = authByIdData?.user ?? null;
+        } else {
+          const { data: listData, error: listErr } = await supabaseAdmin.auth.admin.listUsers({
+            page: 1,
+            perPage: 1000
+          });
+          if (listErr) {
+            return jsonResponse({ success: false, error: 'Falha ao validar conta de autenticação vinculada.' }, 500);
+          }
+          preValidatedAuthUser =
+            listData?.users?.find((u: any) => String(u.id) === existingTargetAuthId) ?? null;
+        }
+
+        if (!preValidatedAuthUser || String(preValidatedAuthUser.id) !== existingTargetAuthId) {
+          return jsonResponse(
+            {
+              success: false,
+              error: 'A conta de autenticação vinculada ao cadastro (auth_user_id) não existe no serviço de autenticação.'
+            },
+            409
+          );
+        }
+
+        if (normalizeEmail(preValidatedAuthUser.email) !== canonicalEmail) {
+          return jsonResponse(
+            {
+              success: false,
+              error:
+                'Divergência entre o e-mail da conta de autenticação vinculada (auth_user_id) e o e-mail do cadastro canônico.'
+            },
+            409
+          );
+        }
+      } else {
+        const foundRes = await findAuthUserByCanonicalEmail();
+        if (!foundRes.ok) {
+          return jsonResponse({ success: false, error: foundRes.error }, foundRes.status);
+        }
+        if (foundRes.user) {
+          const uniquenessCheck = await checkAuthIdLinkedElsewhere(String(foundRes.user.id));
+          if (!uniquenessCheck.ok) {
+            return jsonResponse({ success: false, error: uniquenessCheck.error }, uniquenessCheck.status);
+          }
+          preValidatedAuthUser = foundRes.user;
+        }
+      }
+
+      // 5. Reserva atômica da solicitação para este usuarioId antes de criar/alterar Auth ou ativar usuarios
+      // Impede aprovações concorrentes da mesma solicitação (inclusive para cadastros diferentes)
+      const claimNow = new Date().toISOString();
+      let claimQuery = supabaseAdmin
+        .from('admin_solicitacoes_acesso')
+        .update({
+          usuario_id: usuarioId,
+          atualizado_em: claimNow
+        })
+        .eq('id', solicitacaoId)
+        .in('status', ['pendente', 'aguardando_correcao']);
+
+      if (initialUsuarioId) {
+        claimQuery = claimQuery.eq('usuario_id', usuarioId);
+        if (solicitacao.atualizado_em) {
+          claimQuery = claimQuery.eq('atualizado_em', solicitacao.atualizado_em);
+        } else {
+          claimQuery = claimQuery.is('atualizado_em', null);
+        }
+      } else {
+        claimQuery = claimQuery.is('usuario_id', null);
+      }
+
+      const { data: claimedSolicitacao, error: claimErr } = await claimQuery
+        .select('id, status, usuario_id')
+        .maybeSingle();
+
+      if (claimErr) {
+        return jsonResponse(
+          { success: false, error: 'Falha ao reservar solicitação de acesso para aprovação.' },
+          500
+        );
+      }
+
+      if (!claimedSolicitacao) {
+        return jsonResponse(
+          {
+            success: false,
+            error: 'Solicitação já finalizada ou reservada por outra operação concorrente.'
+          },
+          409
+        );
+      }
+
+      const releaseClaim = async () => {
+        await supabaseAdmin
+          .from('admin_solicitacoes_acesso')
+          .update({
+            usuario_id: initialUsuarioId,
+            atualizado_em: new Date().toISOString()
+          })
+          .eq('id', solicitacaoId)
+          .in('status', ['pendente', 'aguardando_correcao'])
+          .eq('usuario_id', usuarioId)
+          .select('id')
+          .maybeSingle();
+      };
+
+      // 6. Provisiona/sincroniza conta no Supabase Auth usando exclusivamente os dados canônicos
+      let authUserId = '';
+
+      if (preValidatedAuthUser) {
+        authUserId = String(preValidatedAuthUser.id);
         const { error: updAuthErr } = await supabaseAdmin.auth.admin.updateUserById(authUserId, {
           email_confirm: true,
           user_metadata: {
+            ...(preValidatedAuthUser.user_metadata || {}),
             nome: targetUser.nome,
             matricula: targetUser.matricula,
             papel: assignedRole
@@ -766,67 +960,47 @@ export async function handleAdminManageUserRequest(
         });
 
         if (updAuthErr) {
+          await releaseClaim().catch(() => undefined);
           return jsonResponse({ success: false, error: 'Falha ao atualizar conta no serviço de autenticação.' }, 500);
         }
       } else {
-        const { data: listData, error: listErr } = await supabaseAdmin.auth.admin.listUsers({
-          page: 1,
-          perPage: 1000
-        });
-
-        if (listErr) {
-          return jsonResponse({ success: false, error: 'Falha ao consultar serviço de autenticação.' }, 500);
-        }
-
-        const existingAuth = listData?.users?.find((u: any) => normalizeEmail(u.email) === canonicalEmail);
-
-        if (existingAuth) {
-          const { data: otherLinkedUser, error: otherLinkedErr } = await supabaseAdmin
-            .from('usuarios')
-            .select('id')
-            .eq('auth_user_id', existingAuth.id)
-            .maybeSingle();
-
-          if (otherLinkedErr) {
-            return jsonResponse({ success: false, error: 'Falha ao verificar vínculo de autenticação existente.' }, 500);
-          }
-          if (otherLinkedUser && otherLinkedUser.id !== usuarioId) {
-            return jsonResponse(
-              {
-                success: false,
-                error: 'A conta de autenticação deste e-mail já está vinculada a outro cadastro em public.usuarios.'
-              },
-              409
-            );
-          }
-
-          authUserId = existingAuth.id;
-          const { error: updAuthErr } = await supabaseAdmin.auth.admin.updateUserById(existingAuth.id, {
-            email_confirm: true,
-            user_metadata: {
-              ...existingAuth.user_metadata,
+        const { data: inviteData, error: inviteErr } = await supabaseAdmin.auth.admin.inviteUserByEmail(
+          canonicalEmail,
+          {
+            data: {
               nome: targetUser.nome,
               matricula: targetUser.matricula,
               papel: assignedRole
             }
-          });
-
-          if (updAuthErr) {
-            return jsonResponse({ success: false, error: 'Falha ao atualizar conta no serviço de autenticação.' }, 500);
           }
+        );
+
+        if (!inviteErr && inviteData?.user) {
+          authUserId = String(inviteData.user.id);
         } else {
-          const { data: inviteData, error: inviteErr } = await supabaseAdmin.auth.admin.inviteUserByEmail(
-            canonicalEmail,
-            {
-              data: {
+          // Reconsulta Auth caso outra chamada concorrente tenha acabado de registrar o mesmo e-mail
+          const retryLookup = await findAuthUserByCanonicalEmail();
+          if (retryLookup.ok && retryLookup.user) {
+            const uniquenessCheck = await checkAuthIdLinkedElsewhere(String(retryLookup.user.id));
+            if (!uniquenessCheck.ok) {
+              await releaseClaim().catch(() => undefined);
+              return jsonResponse({ success: false, error: uniquenessCheck.error }, uniquenessCheck.status);
+            }
+            authUserId = String(retryLookup.user.id);
+            const { error: updRetryAuthErr } = await supabaseAdmin.auth.admin.updateUserById(authUserId, {
+              email_confirm: true,
+              user_metadata: {
+                ...(retryLookup.user.user_metadata || {}),
                 nome: targetUser.nome,
                 matricula: targetUser.matricula,
                 papel: assignedRole
               }
+            });
+            if (updRetryAuthErr) {
+              await releaseClaim().catch(() => undefined);
+              return jsonResponse({ success: false, error: 'Falha ao atualizar conta no serviço de autenticação.' }, 500);
             }
-          );
-
-          if (inviteErr) {
+          } else {
             const { data: createdAuth, error: createAuthErr } = await supabaseAdmin.auth.admin.createUser({
               email: canonicalEmail,
               email_confirm: true,
@@ -838,19 +1012,66 @@ export async function handleAdminManageUserRequest(
             });
 
             if (createAuthErr || !createdAuth?.user) {
+              await releaseClaim().catch(() => undefined);
               return jsonResponse({ success: false, error: 'Falha ao criar conta no serviço de autenticação.' }, 500);
             }
-            authUserId = createdAuth.user.id;
-          } else if (inviteData?.user) {
-            authUserId = inviteData.user.id;
-          } else {
-            return jsonResponse({ success: false, error: 'Falha inesperada ao provisionar conta de autenticação.' }, 500);
+            authUserId = String(createdAuth.user.id);
           }
         }
       }
 
-      // 5. Ativa o cadastro canônico em public.usuarios com papel padrão Usuário
+      // 7. Aprova atomicamente a solicitação ANTES de ativar public.usuarios
+      // Impede deixar public.usuarios Ativo enquanto a solicitação permanecer pendente e bloqueia corrida dupla
       const now = new Date().toISOString();
+      const solicitacaoUpdatePayload: Record<string, any> = {
+        status: 'aprovada',
+        usuario_id: usuarioId,
+        revisado_por: adminRecord.id,
+        revisado_em: now,
+        atualizado_em: now
+      };
+      if (obsParsed.provided) {
+        solicitacaoUpdatePayload.observacoes_admin = obsParsed.value;
+      }
+
+      const executeApproveUpdate = async (columns: string) =>
+        await supabaseAdmin
+          .from('admin_solicitacoes_acesso')
+          .update(solicitacaoUpdatePayload)
+          .eq('id', solicitacaoId)
+          .in('status', ['pendente', 'aguardando_correcao'])
+          .eq('usuario_id', usuarioId)
+          .select(columns)
+          .maybeSingle();
+
+      let updSolicitacaoRes = await executeApproveUpdate(SOLICITACAO_REVIEW_COLUMNS);
+      if (updSolicitacaoRes.error && isMissingColumnError(updSolicitacaoRes.error)) {
+        updSolicitacaoRes = await executeApproveUpdate('*');
+      }
+
+      if (updSolicitacaoRes.error) {
+        await releaseClaim().catch(() => undefined);
+        return jsonResponse(
+          {
+            success: false,
+            error: 'Falha ao registrar aprovação da solicitação; o cadastro de usuário não foi ativado.'
+          },
+          500
+        );
+      }
+
+      if (!updSolicitacaoRes.data) {
+        return jsonResponse(
+          {
+            success: false,
+            error: 'Solicitação já foi finalizada ou alterada por outra operação.'
+          },
+          409
+        );
+      }
+
+      // 8. Ativa o cadastro canônico em public.usuarios com papel padrão Usuário;
+      // se falhar, reverte a aprovação da solicitação para não manter estado divergente
       const { data: updatedUsuario, error: updUsuarioErr } = await supabaseAdmin
         .from('usuarios')
         .update({
@@ -866,57 +1087,31 @@ export async function handleAdminManageUserRequest(
         .single();
 
       if (updUsuarioErr || !updatedUsuario) {
-        return jsonResponse(
-          {
-            success: false,
-            error: 'Conta de autenticação preparada, mas falhou ao ativar o cadastro de usuário.'
-          },
-          500
-        );
-      }
-
-      // 6. Marca a solicitação como aprovada somente após Auth e public.usuarios terem sucesso
-      const solicitacaoUpdatePayload: Record<string, any> = {
-        status: 'aprovada',
-        revisado_por: callerUser.id,
-        revisado_em: now,
-        atualizado_em: now
-      };
-      if (obsParsed.provided) {
-        solicitacaoUpdatePayload.observacoes_admin = obsParsed.value;
-      }
-
-      const executeApproveUpdate = async (columns: string) =>
-        await supabaseAdmin
+        const rollbackPayload: Record<string, any> = {
+          status: solicitacao.status,
+          usuario_id: initialUsuarioId,
+          revisado_por: solicitacao.revisado_por ?? null,
+          revisado_em: solicitacao.revisado_em ?? null,
+          observacoes_admin: solicitacao.observacoes_admin ?? null,
+          atualizado_em: new Date().toISOString()
+        };
+        const rollbackRes = await supabaseAdmin
           .from('admin_solicitacoes_acesso')
-          .update(solicitacaoUpdatePayload)
+          .update(rollbackPayload)
           .eq('id', solicitacaoId)
-          .in('status', ['pendente', 'aguardando_correcao'])
-          .select(columns)
+          .eq('status', 'aprovada')
+          .eq('usuario_id', usuarioId)
+          .select('id')
           .maybeSingle();
 
-      let updSolicitacaoRes = await executeApproveUpdate(SOLICITACAO_REVIEW_COLUMNS);
-      if (updSolicitacaoRes.error && isMissingColumnError(updSolicitacaoRes.error)) {
-        updSolicitacaoRes = await executeApproveUpdate('*');
-      }
-
-      if (updSolicitacaoRes.error) {
         return jsonResponse(
           {
             success: false,
-            error: 'Cadastro ativado, mas falhou ao finalizar o status da solicitação. Repita a operação para concluir.'
+            error: rollbackRes?.error
+              ? 'Falha ao ativar o cadastro de usuário e ao reverter o status da solicitação.'
+              : 'Falha ao ativar o cadastro de usuário; aprovação da solicitação revertida.'
           },
           500
-        );
-      }
-
-      if (!updSolicitacaoRes.data) {
-        return jsonResponse(
-          {
-            success: false,
-            error: 'Solicitação já foi finalizada por outra operação.'
-          },
-          409
         );
       }
 
