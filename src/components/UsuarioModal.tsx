@@ -1,5 +1,5 @@
 import React, { useState } from 'react';
-import { UsuarioRecord } from '../services/notificaDataService';
+import { UsuarioRecord, fromDbUsuario } from '../services/notificaDataService';
 import { authService } from '../services/authService';
 import {
   PERFIS_PROFISSIONAIS,
@@ -13,7 +13,7 @@ interface UsuarioModalProps {
   record: Partial<UsuarioRecord>;
   isNew: boolean;
   onClose: () => void;
-  onSave: (savedRecord: any) => void;
+  onSave: (savedRecord: any, remoteAlreadySaved?: boolean) => void;
 }
 
 export function UsuarioModal({ record, isNew, onClose, onSave }: UsuarioModalProps) {
@@ -29,9 +29,6 @@ export function UsuarioModal({ record, isNew, onClose, onSave }: UsuarioModalPro
   const [situacao, setSituacao] = useState(record.situacao || 'Ativo');
   const [observacoes, setObservacoes] = useState(record.observacoes || '');
 
-  // Ações de criação no serviço de autenticação
-  const [authAction, setAuthAction] = useState<'invite' | 'password' | 'db_only'>('invite');
-  const [temporaryPassword, setTemporaryPassword] = useState('');
   const [loading, setLoading] = useState(false);
   const [statusMessage, setStatusMessage] = useState<{ type: 'error' | 'success' | 'info'; text: string } | null>(null);
 
@@ -57,51 +54,54 @@ export function UsuarioModal({ record, isNew, onClose, onSave }: UsuarioModalPro
     setLoading(true);
 
     try {
-      let authUserId = record.authUserId;
+      if (isNew) {
+        setStatusMessage({ type: 'info', text: 'Provisionando conta institucional no servidor...' });
+        const emailClean = email.trim().toLowerCase();
+        const loginClean = (login.trim() || emailClean.split('@')[0]).toLowerCase();
 
-      // Se for novo cadastro e selecionou convite ou senha temporária
-      if (isNew && authAction !== 'db_only') {
-        setStatusMessage({ type: 'info', text: 'Comunicando com o sistema de autenticação...' });
         const res = await authService.adminCreateUser({
           nome: nome.trim(),
           matricula: matricula.trim(),
-          email: email.trim(),
-          login: login.trim() || email.trim(),
+          email: emailClean,
+          login: loginClean,
           perfilProfissional,
           setor,
           papel,
           situacao,
-          observacoes,
-          sendInviteEmail: authAction === 'invite',
-          temporaryPassword: authAction === 'password' ? temporaryPassword : undefined
+          observacoes: observacoes.trim()
         });
 
-        if (!res.success) {
+        if (!res.success || !res.usuarioRecord) {
           setStatusMessage({
             type: 'error',
-            text: `Atenção: Não foi possível provisionar o acesso automático (${res.error}). O registro será salvo apenas no cadastro interno.`
+            text: res.error || 'Não foi possível provisionar o usuário no servidor.'
           });
-        } else if (res.authUserId) {
-          authUserId = res.authUserId;
+          return;
         }
+
+        const createdRecord = fromDbUsuario(res.usuarioRecord);
+        onSave(createdRecord, true);
+        return;
       }
+
+      const emailClean = email.trim().toLowerCase();
+      const loginClean = (login.trim() || emailClean.split('@')[0]).toLowerCase();
 
       const updatedRecord: Partial<UsuarioRecord> = {
         ...record,
         nome: nome.trim(),
         matricula: matricula.trim(),
-        email: email.trim().toLowerCase(),
-        login: (login.trim() || email.trim()).toLowerCase(),
+        email: emailClean,
+        login: loginClean,
         perfilProfissional,
         setor,
         papel,
         situacao: situacao as any,
-        status: (situacao === 'Inativo' ? 'Inativo' : 'Ativo') as any,
-        authUserId,
+        status: (situacao === 'Inativo' || situacao === 'Recusado' ? 'Inativo' : 'Ativo') as any,
         observacoes: observacoes.trim()
       };
 
-      onSave(updatedRecord);
+      onSave(updatedRecord, false);
     } catch (err: any) {
       setStatusMessage({
         type: 'error',
@@ -280,58 +280,8 @@ export function UsuarioModal({ record, isNew, onClose, onSave }: UsuarioModalPro
                 </div>
 
                 {isNew && (
-                  <div style={{ marginTop: '10px' }}>
-                    <div style={{ fontSize: '11px', color: '#6b7280', marginBottom: '8px' }}>
-                      Como deseja provisionar a autenticação deste servidor?
-                    </div>
-                    <div style={{ display: 'flex', flexDirection: 'column', gap: '6px' }}>
-                      <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', cursor: 'pointer' }}>
-                        <input
-                          type="radio"
-                          name="authAction"
-                          checked={authAction === 'invite'}
-                          onChange={() => setAuthAction('invite')}
-                          disabled={loading}
-                        />
-                        <span>Enviar convite automático por e-mail</span>
-                      </label>
-
-                      <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', cursor: 'pointer' }}>
-                        <input
-                          type="radio"
-                          name="authAction"
-                          checked={authAction === 'password'}
-                          onChange={() => setAuthAction('password')}
-                          disabled={loading}
-                        />
-                        <span>Definir senha inicial temporária</span>
-                      </label>
-
-                      {authAction === 'password' && (
-                        <div style={{ marginLeft: '24px', marginTop: '4px' }}>
-                          <input
-                            className="input"
-                            type="password"
-                            placeholder="Mínimo 6 caracteres"
-                            value={temporaryPassword}
-                            onChange={e => setTemporaryPassword(e.target.value)}
-                            disabled={loading}
-                            style={{ maxWidth: '280px' }}
-                          />
-                        </div>
-                      )}
-
-                      <label style={{ display: 'flex', alignItems: 'center', gap: '8px', fontSize: '12px', cursor: 'pointer' }}>
-                        <input
-                          type="radio"
-                          name="authAction"
-                          checked={authAction === 'db_only'}
-                          onChange={() => setAuthAction('db_only')}
-                          disabled={loading}
-                        />
-                        <span>Salvar apenas o cadastro de servidor (sem convite imediato)</span>
-                      </label>
-                    </div>
+                  <div style={{ marginTop: '10px', fontSize: '11.5px', color: '#475569', lineHeight: '1.5' }}>
+                    A conta será criada no serviço de autenticação do servidor com a senha inicial padrão institucional e exigirá definição de nova senha no primeiro acesso.
                   </div>
                 )}
               </div>

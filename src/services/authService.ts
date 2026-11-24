@@ -50,8 +50,6 @@ export interface AdminCreateUserPayload {
   papel: UserRole;
   situacao?: string;
   observacoes?: string;
-  sendInviteEmail?: boolean;
-  temporaryPassword?: string;
 }
 
 export interface AdminCreateUserResult {
@@ -59,6 +57,19 @@ export interface AdminCreateUserResult {
   error?: string;
   authUserId?: string;
   usuarioRecord?: any;
+}
+
+export interface AdminResetPasswordResult {
+  success: boolean;
+  error?: string;
+  message?: string;
+}
+
+export interface CompletePasswordChangeResult {
+  success: boolean;
+  error?: string;
+  profile?: AuthUserProfile | null;
+  passwordUpdatedInAuth?: boolean;
 }
 
 export function normalizeStrictUserRole(rawRole: unknown): UserRole | null {
@@ -172,6 +183,7 @@ export function validateInstitutionalProfile(
       setor: String(row.setor || '').trim(),
       papel,
       situacao: 'Ativo',
+      forcePasswordChange: Boolean(row.force_password_change ?? row.forcePasswordChange ?? false),
       observacoes: row.observacoes ? String(row.observacoes) : '',
       createdBy: row.created_by || undefined,
       updatedBy: row.updated_by || undefined,
@@ -300,7 +312,7 @@ export function createAuthService(getDeps?: () => AuthServiceDeps) {
         let { data: row, error: queryErr } = await client
           .from('usuarios')
           .select(
-            'id, auth_user_id, nome, login, matricula, perfil_profissional, setor, papel, situacao, status, observacoes, created_by, updated_by, created_at, updated_at'
+            'id, auth_user_id, nome, login, matricula, perfil_profissional, setor, papel, situacao, status, force_password_change, observacoes, created_by, updated_by, created_at, updated_at'
           )
           .eq('auth_user_id', cleanUid)
           .maybeSingle();
@@ -577,6 +589,88 @@ export function createAuthService(getDeps?: () => AuthServiceDeps) {
       }
     },
 
+    async completeFirstAccessPasswordChange(
+      newPassword: string,
+      confirmPassword?: string
+    ): Promise<CompletePasswordChangeResult> {
+      const { client, configured } = resolveDeps();
+      if (!configured || !client) {
+        return { success: false, error: 'Sistema de autenticação não configurado.' };
+      }
+
+      if (!newPassword || typeof newPassword !== 'string') {
+        return { success: false, error: 'Informe a nova senha.' };
+      }
+
+      if (confirmPassword !== undefined && newPassword !== confirmPassword) {
+        return { success: false, error: 'A confirmação da nova senha não confere.' };
+      }
+
+      if (newPassword.length < 6) {
+        return { success: false, error: 'A nova senha deve atender à política mínima de segurança (ao menos 6 caracteres).' };
+      }
+
+      try {
+        const { data: sessionData } = await client.auth.getSession();
+        const currentUid = String(sessionData?.session?.user?.id || '').trim();
+        if (!currentUid) {
+          return { success: false, error: 'Sessão inválida ou expirada. Faça login novamente.' };
+        }
+
+        const { error: authErr } = await client.auth.updateUser({
+          password: newPassword
+        });
+
+        if (authErr) {
+          return {
+            success: false,
+            error: authErr.message || 'A nova senha não atende aos requisitos da política de segurança configurada.'
+          };
+        }
+
+        const { data: fnData, error: fnErr } = await client.functions.invoke('admin-manage-user', {
+          body: {
+            action: 'complete-password-change'
+          }
+        });
+
+        if (fnErr || !fnData?.success) {
+          return {
+            success: false,
+            passwordUpdatedInAuth: true,
+            error:
+              fnData?.error ||
+              'Senha alterada na autenticação, mas não foi possível confirmar a liberação no servidor.'
+          };
+        }
+
+        const { data: refreshedSession } = await client.auth.getSession();
+        const accessToken =
+          refreshedSession?.session?.access_token || sessionData?.session?.access_token;
+        const verifiedRes = await this.resolveVerifiedProfile(currentUid, accessToken);
+
+        if (!verifiedRes.profile || verifiedRes.profile.forcePasswordChange) {
+          return {
+            success: false,
+            passwordUpdatedInAuth: true,
+            error:
+              verifiedRes.error ||
+              'Não foi possível confirmar a atualização do perfil após a troca de senha.'
+          };
+        }
+
+        return {
+          success: true,
+          profile: verifiedRes.profile
+        };
+      } catch (err: any) {
+        return {
+          success: false,
+          error: err?.message || 'Erro ao concluir a alteração obrigatória de senha.'
+        };
+      }
+    },
+
     async logout(): Promise<void> {
       const { client, configured } = resolveDeps();
       if (configured && client) {
@@ -710,6 +804,56 @@ export function createAuthService(getDeps?: () => AuthServiceDeps) {
       }
     },
 
+    async adminResetUserPassword(
+      usuarioId: string,
+      authUserId?: string
+    ): Promise<AdminResetPasswordResult> {
+      const { client, configured } = resolveDeps();
+      if (!configured || !client) {
+        return { success: false, error: 'Sistema de autenticação não configurado.' };
+      }
+
+      if (!String(usuarioId || '').trim() && !String(authUserId || '').trim()) {
+        return { success: false, error: 'Identificador de usuário inválido para redefinição.' };
+      }
+
+      try {
+        const { data, error } = await client.functions.invoke('admin-manage-user', {
+          body: {
+            action: 'reset-password',
+            usuarioId: String(usuarioId || '').trim() || undefined,
+            authUserId: String(authUserId || '').trim() || undefined
+          }
+        });
+
+        if (error) {
+          return {
+            success: false,
+            error: `Falha ao redefinir senha no servidor: ${error.message}.`
+          };
+        }
+
+        if (!data?.success) {
+          return {
+            success: false,
+            error: data?.error || 'Não foi possível concluir a redefinição de senha.'
+          };
+        }
+
+        return {
+          success: true,
+          message:
+            data.message ||
+            'Senha redefinida para a senha temporária institucional. Troca obrigatória no próximo acesso.'
+        };
+      } catch (err: any) {
+        return {
+          success: false,
+          error: err?.message || 'Erro ao acionar redefinição de senha no servidor.'
+        };
+      }
+    },
+
     async adminCreateUser(payload: AdminCreateUserPayload): Promise<AdminCreateUserResult> {
       const { client, configured } = resolveDeps();
       if (!configured || !client) {
@@ -725,58 +869,41 @@ export function createAuthService(getDeps?: () => AuthServiceDeps) {
         const { data, error } = await client.functions.invoke('admin-manage-user', {
           body: {
             action: 'create-user',
-            ...payload,
-            papel: validRole
+            nome: payload.nome,
+            matricula: payload.matricula,
+            email: payload.email,
+            login: payload.login,
+            perfilProfissional: payload.perfilProfissional,
+            setor: payload.setor,
+            papel: validRole,
+            situacao: payload.situacao,
+            observacoes: payload.observacoes
           }
         });
 
-        if (!error && data?.success) {
+        if (error) {
           return {
-            success: true,
-            authUserId: data?.authUserId,
-            usuarioRecord: data?.usuarioRecord
+            success: false,
+            error: `Falha ao criar usuário no servidor: ${error.message}`
           };
         }
 
-        const newId = `usr_${crypto.randomUUID().replace(/-/g, '').slice(0, 12)}`;
-        const { data: inserted, error: insertError } = await client
-          .from('usuarios')
-          .insert({
-            id: newId,
-            nome: payload.nome.trim(),
-            matricula: payload.matricula.trim(),
-            email: payload.email.trim().toLowerCase(),
-            login: (payload.login?.trim() || payload.email.trim().split('@')[0]).toLowerCase(),
-            perfil_profissional: payload.perfilProfissional,
-            setor: payload.setor,
-            papel: validRole,
-            situacao: payload.situacao || 'Ativo',
-            status:
-              payload.situacao === 'Inativo' || payload.situacao === 'Recusado'
-                ? 'Inativo'
-                : 'Ativo',
-            observacoes: payload.observacoes || null,
-            created_at: new Date().toISOString(),
-            updated_at: new Date().toISOString()
-          })
-          .select()
-          .maybeSingle();
-
-        if (insertError) {
+        if (!data?.success) {
           return {
             success: false,
-            error: `Falha ao criar usuário: ${insertError.message}`
+            error: data?.error || 'Não foi possível concluir o cadastro do usuário.'
           };
         }
 
         return {
           success: true,
-          usuarioRecord: inserted
+          authUserId: data?.authUserId,
+          usuarioRecord: data?.usuarioRecord
         };
       } catch (err: any) {
         return {
           success: false,
-          error: err?.message || 'Falha ao cadastrar usuário no banco.'
+          error: err?.message || 'Falha ao cadastrar usuário no servidor.'
         };
       }
     }

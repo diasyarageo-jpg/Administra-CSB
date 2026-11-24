@@ -42,6 +42,7 @@ import { DocumentosView } from './components/DocumentosView';
 import { PaginationBar, PageSizeOption, paginateList } from './components/PaginationBar';
 import { LoginModal } from './components/LoginModal';
 import { LoginPage } from './components/LoginPage';
+import { ForcePasswordChangePage } from './components/ForcePasswordChangePage';
 import { UsuarioModal } from './components/UsuarioModal';
 import { BarragensMinimap } from './components/BarragensMinimap';
 import { GeoportalSyncModal } from './components/GeoportalSyncModal';
@@ -420,13 +421,27 @@ export default function App() {
 
   // Proteção fail-closed de toda a aplicação:
   // Só renderiza telas internas quando Supabase Auth estiver configurado E houver sessão ativa
-  // com cadastro institucional Ativo e papel válido em public.usuarios (via auth_user_id).
+  // com cadastro institucional Ativo, papel válido e sem exigência pendente de troca de senha.
+  const requiresForcedPasswordChange = Boolean(
+    authConfigured &&
+      isSupabaseConfigured() &&
+      currentAuthUser &&
+      currentUserProfile &&
+      currentUserProfile.situacao === 'Ativo' &&
+      Boolean(
+        currentUserProfile.papel &&
+          (ALLOWED_USER_ROLES as readonly string[]).includes(currentUserProfile.papel)
+      ) &&
+      currentUserProfile.forcePasswordChange === true
+  );
+
   const hasValidAuthenticatedAccess =
     authConfigured &&
     isSupabaseConfigured() &&
     Boolean(currentAuthUser) &&
     Boolean(currentUserProfile) &&
     currentUserProfile?.situacao === 'Ativo' &&
+    !currentUserProfile?.forcePasswordChange &&
     Boolean(
       currentUserProfile?.papel &&
         (ALLOWED_USER_ROLES as readonly string[]).includes(currentUserProfile.papel)
@@ -461,6 +476,8 @@ export default function App() {
   const [userToReject, setUserToReject] = useState<any | null>(null);
   const [rejectMotivo, setRejectMotivo] = useState('');
   const [isRejecting, setIsRejecting] = useState(false);
+  const [userToResetPassword, setUserToResetPassword] = useState<any | null>(null);
+  const [isResettingPassword, setIsResettingPassword] = useState(false);
   const [usuarioSituacaoFilter, setUsuarioSituacaoFilter] = useState<string>('Todos');
 
   // Estados de Pesquisa Avançada por banco de dados
@@ -597,14 +614,16 @@ export default function App() {
 
   useEffect(() => {
     if (
+      hasValidAuthenticatedAccess &&
       activeView === 'integracao' &&
       userRole === 'Administrador' &&
       currentAuthUser &&
-      currentUserProfile?.situacao === 'Ativo'
+      currentUserProfile?.situacao === 'Ativo' &&
+      !currentUserProfile?.forcePasswordChange
     ) {
       fetchExternalIntegrationsStatus();
     }
-  }, [activeView, userRole, currentAuthUser, currentUserProfile]);
+  }, [hasValidAuthenticatedAccess, activeView, userRole, currentAuthUser, currentUserProfile]);
 
   // Inicialização do Supabase Auth e verificação estrita da sessão e perfil institucional
   useEffect(() => {
@@ -750,6 +769,7 @@ export default function App() {
       isSupabaseConfigured() &&
       Boolean(currentAuthUser) &&
       currentUserProfile?.situacao === 'Ativo' &&
+      !currentUserProfile?.forcePasswordChange &&
       Boolean(currentUserProfile?.papel && (ALLOWED_USER_ROLES as readonly string[]).includes(currentUserProfile.papel));
 
     if (isVerifiedActive) {
@@ -882,7 +902,7 @@ export default function App() {
     });
   };
 
-  const handleSaveCustomRecord = (savedRecord: any) => {
+  const handleSaveCustomRecord = (savedRecord: any, remoteAlreadySaved = false) => {
     if (!modalConfig) return;
     if (userRole === 'Visualizador') {
       showToast('Perfil Visualizador não possui permissão para salvar alterações.');
@@ -895,8 +915,8 @@ export default function App() {
     }
 
     savedRecord.id = savedRecord.id || modalConfig.record.id || (crypto.randomUUID ? crypto.randomUUID() : String(Date.now()));
-    savedRecord.createdAt = modalConfig.record.createdAt || new Date().toISOString();
-    savedRecord.updatedAt = new Date().toISOString();
+    savedRecord.createdAt = modalConfig.record.createdAt || savedRecord.createdAt || new Date().toISOString();
+    savedRecord.updatedAt = savedRecord.updatedAt || new Date().toISOString();
     savedRecord.situacao = savedRecord.situacao || 'Ativo';
 
     const currentList = [...(db[key as keyof typeof db] || [])];
@@ -906,8 +926,15 @@ export default function App() {
       currentList[index] = savedRecord;
     }
 
-    setDb(prev => ({ ...prev, [key]: currentList }));
+    const updatedLocalDb = { ...db, [key]: currentList };
+    setDb(updatedLocalDb);
     setModalConfig(null);
+
+    if (remoteAlreadySaved) {
+      saveNotificaDatabase(updatedLocalDb);
+      showToast('Usuário cadastrado no servidor com troca obrigatória de senha no primeiro acesso.');
+      return;
+    }
 
     notificaDataService.saveRecord(db, key as any, savedRecord, index, currentAuthUser?.id).then(res => {
       if (res.savedRemote) {
@@ -1485,6 +1512,39 @@ export default function App() {
     }
   };
 
+  const handleConfirmResetPassword = async () => {
+    if (!userToResetPassword) return;
+    setIsResettingPassword(true);
+    try {
+      const res = await authService.adminResetUserPassword(
+        userToResetPassword.id,
+        userToResetPassword.authUserId
+      );
+      if (!res.success) {
+        showToast(`Erro ao redefinir senha: ${res.error}`);
+      } else {
+        const updatedUsuarios = db.usuarios.map(u => {
+          if (u.id === userToResetPassword.id) {
+            return {
+              ...u,
+              forcePasswordChange: true
+            };
+          }
+          return u;
+        });
+        const newDb = { ...db, usuarios: updatedUsuarios };
+        setDb(newDb);
+        saveNotificaDatabase(newDb);
+        showToast(res.message || 'Senha redefinida para a senha temporária institucional.');
+        setUserToResetPassword(null);
+      }
+    } catch (err: any) {
+      showToast(`Falha ao redefinir senha: ${err?.message}`);
+    } finally {
+      setIsResettingPassword(false);
+    }
+  };
+
   const conciliacaoPendencias = computeConciliacaoPendencias(db.empreendedores, db.barragens);
   const pendingReviewsCount =
     db.revisoes.filter((item: any) => item.situacao === 'Pendente').length +
@@ -1510,6 +1570,27 @@ export default function App() {
           <div style={{ fontSize: '16px', fontWeight: 700, letterSpacing: '0.04em' }}>ADMINISTRA-CSB</div>
           <div style={{ fontSize: '11px', opacity: 0.8, marginTop: '6px' }}>Verificando autenticação institucional...</div>
         </div>
+      );
+    }
+
+    if (requiresForcedPasswordChange && currentUserProfile) {
+      return (
+        <ForcePasswordChangePage
+          profile={currentUserProfile}
+          onPasswordChanged={(updatedProfile) => {
+            setCurrentUserProfile(updatedProfile);
+            setUserRole(updatedProfile.papel);
+            setAuthErrorNotice(null);
+          }}
+          onLogout={async () => {
+            await authService.logout();
+            setCurrentAuthUser(null);
+            setCurrentUserProfile(null);
+            setUserRole('Visualizador');
+            setAuthErrorNotice(null);
+            setShowLoginModal(false);
+          }}
+        />
       );
     }
 
@@ -2632,6 +2713,21 @@ export default function App() {
                                           Recusar
                                         </button>
                                       </>
+                                    )}
+
+                                    {activeView === 'usuarios' && record.situacao === 'Ativo' && Boolean(record.authUserId) && userRole === 'Administrador' && (
+                                      <button
+                                        type="button"
+                                        className="iconbtn"
+                                        style={{ color: '#b45309', fontWeight: 600 }}
+                                        title="Redefinir senha para a senha temporária institucional com troca obrigatória"
+                                        onClick={(e) => {
+                                          e.stopPropagation();
+                                          setUserToResetPassword(record);
+                                        }}
+                                      >
+                                        Redefinir senha
+                                      </button>
                                     )}
 
                                     {userRole === 'Visualizador' || isInteractiveDb ? (
@@ -3907,6 +4003,58 @@ export default function App() {
                 disabled={isRejecting}
               >
                 {isRejecting ? 'Registrando recusa...' : 'Confirmar Recusa'}
+              </button>
+            </div>
+          </div>
+        </div>
+      )}
+
+      {/* PASSWORD RESET MODAL (Administrador redefine senha no servidor via DEFAULT_TEMP_PASSWORD) */}
+      {userToResetPassword && (
+        <div className="modal-back">
+          <div className="modal" style={{ maxWidth: '460px', width: '100%' }}>
+            <div className="modal-head">
+              <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+                <span style={{ fontSize: '18px', color: '#b45309' }}>🔑</span>
+                <div>
+                  <h3 style={{ margin: 0, fontSize: '15px', fontWeight: 700 }}>Redefinir Senha de Acesso</h3>
+                  <p style={{ margin: 0, fontSize: '11px', color: '#6b7280' }}>
+                    Aplica a senha temporária institucional e exige troca no próximo login
+                  </p>
+                </div>
+              </div>
+              <button type="button" className="modal-close" onClick={() => setUserToResetPassword(null)}>×</button>
+            </div>
+            <div className="modal-body">
+              <p style={{ fontSize: '12px', color: '#374151', margin: '0 0 12px', lineHeight: '1.5' }}>
+                Confirma a redefinição de senha para <strong>{userToResetPassword.nome}</strong>?
+              </p>
+              <div
+                style={{
+                  padding: '10px 12px',
+                  background: '#fffbeb',
+                  border: '1px solid #fde68a',
+                  borderRadius: '8px',
+                  fontSize: '11.5px',
+                  color: '#92400e',
+                  lineHeight: '1.45'
+                }}
+              >
+                A nova senha temporária é aplicada exclusivamente no servidor e não será exibida na tela. No próximo acesso, o servidor será bloqueado até cadastrar uma senha pessoal.
+              </div>
+            </div>
+            <div className="modal-foot">
+              <button type="button" className="btn light" onClick={() => setUserToResetPassword(null)} disabled={isResettingPassword}>
+                Cancelar
+              </button>
+              <button
+                type="button"
+                className="btn"
+                style={{ background: '#b45309', color: '#ffffff' }}
+                onClick={handleConfirmResetPassword}
+                disabled={isResettingPassword}
+              >
+                {isResettingPassword ? 'Redefinindo...' : 'Confirmar Redefinição'}
               </button>
             </div>
           </div>

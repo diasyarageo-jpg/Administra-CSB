@@ -4,6 +4,8 @@ import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
 import type { IncomingMessage, ServerResponse } from 'http';
+import React from 'react';
+import { renderToStaticMarkup } from 'react-dom/server';
 import authConfigHandler, { resolvePublicSupabaseConfigFromEnv } from '../api/auth-config';
 import authSessionHandler from '../api/auth-session';
 import integracoesStatusHandler from '../api/integracoes-status';
@@ -17,6 +19,7 @@ import {
   createAuthService,
   validateInstitutionalProfile
 } from '../src/services/authService';
+import { ForcePasswordChangePage } from '../src/components/ForcePasswordChangePage';
 import { handleAdminManageUserRequest } from '../supabase/functions/admin-manage-user/handler.ts';
 
 const YARA_AUTH_UID = '52f8280d-cc4c-4aad-98f6-7446da912dd1';
@@ -984,6 +987,7 @@ test('Contenção Edge Function admin-manage-user: bloqueia request-access com 4
       if (!envPresent) return undefined;
       if (name === 'SUPABASE_URL') return 'https://example.invalid';
       if (name === 'SUPABASE_SERVICE_ROLE_KEY') return 'synth-service-role';
+      if (name === 'DEFAULT_TEMP_PASSWORD') return 'Synth#Temp!Pass123';
       return undefined;
     },
     createSupabaseClient() {
@@ -1270,6 +1274,7 @@ test('Contenção Edge Function admin-manage-user: bloqueia request-access com 4
   assert.equal(createAnalistaJson.success, true);
   assert.equal(createAnalistaJson.usuarioRecord?.papel, 'Analista');
   assert.equal(insertPayloads.at(-1)?.papel, 'Analista');
+  assert.equal(insertPayloads.at(-1)?.force_password_change, true);
 });
 
 test('Edge Function admin-manage-user: revisão e aprovação segura de public.admin_solicitacoes_acesso com FK, usuario_id, validação de auth_user_id, falhas parciais e concorrência', async () => {
@@ -2319,5 +2324,899 @@ test('Edge Function admin-manage-user: revisão e aprovação segura de public.a
     assert.equal(s.authUsers.length, 1);
   }
 });
+
+test('Edge Function admin-manage-user: create-user seguro com DEFAULT_TEMP_PASSWORD, rollback em falha, sem enumeração e proteção a Administrador ativo', async () => {
+  const synthAdminUid = '00000000-0000-4000-8000-000000000051';
+  const synthActiveAdminTargetUid = '00000000-0000-4000-8000-000000000052';
+  const synthOrphanAuthUid = '00000000-0000-4000-8000-000000000053';
+  const synthTempSecret = 'Synth#DefaultTempSecret2026!';
+
+  const makeState = (opts?: { defaultTempPassword?: string }) => {
+    const authUsers: Array<{ id: string; email: string; password?: string; user_metadata?: Record<string, any> }> = [
+      { id: synthAdminUid, email: 'admin.criador@example.invalid' },
+      { id: synthActiveAdminTargetUid, email: 'admin.ativo@example.invalid' },
+      { id: synthOrphanAuthUid, email: 'auth.previo@example.invalid' }
+    ];
+    const usuarios: Array<Record<string, any>> = [
+      {
+        id: 'usr_admin_51',
+        auth_user_id: synthAdminUid,
+        nome: 'Admin Criador',
+        matricula: 'ADM-51',
+        email: 'admin.criador@example.invalid',
+        login: 'admin.criador',
+        papel: 'Administrador',
+        situacao: 'Ativo',
+        status: 'Ativo',
+        force_password_change: false
+      },
+      {
+        id: 'usr_admin_alvo_52',
+        auth_user_id: synthActiveAdminTargetUid,
+        nome: 'Admin Alvo Ativo',
+        matricula: 'ADM-52',
+        email: 'admin.ativo@example.invalid',
+        login: 'admin.ativo',
+        papel: 'Administrador',
+        situacao: 'Ativo',
+        status: 'Ativo',
+        force_password_change: false
+      }
+    ];
+    const stats = {
+      authCreateCalls: 0,
+      authDeleteCalls: [] as string[],
+      usuariosInsertCalls: 0,
+      usuariosUpdateCalls: 0,
+      failNextUsuarioInsert: false,
+      lastCreatedPassword: ''
+    };
+
+    const deps = {
+      envGet(name: string) {
+        if (name === 'SUPABASE_URL') return 'https://example.invalid';
+        if (name === 'SUPABASE_SERVICE_ROLE_KEY') return 'synth-service-role-secret-51';
+        if (name === 'DEFAULT_TEMP_PASSWORD') return opts?.defaultTempPassword;
+        return undefined;
+      },
+      createSupabaseClient() {
+        return {
+          auth: {
+            async getUser(jwt: string) {
+              if (jwt === 'synth-admin-jwt') return { data: { user: { id: synthAdminUid } }, error: null };
+              return { data: { user: null }, error: { message: 'Invalid JWT' } };
+            },
+            admin: {
+              async listUsers() {
+                return { data: { users: authUsers.map(u => ({ ...u })) }, error: null };
+              },
+              async createUser(payload: any) {
+                stats.authCreateCalls += 1;
+                stats.lastCreatedPassword = String(payload?.password || '');
+                const created = {
+                  id: `00000000-0000-4000-8000-${String(100000000000 + authUsers.length + 1)}`,
+                  email: payload.email,
+                  password: payload.password,
+                  user_metadata: payload.user_metadata || {}
+                };
+                authUsers.push(created);
+                return { data: { user: created }, error: null };
+              },
+              async deleteUser(id: string) {
+                stats.authDeleteCalls.push(id);
+                const idx = authUsers.findIndex(u => u.id === id);
+                if (idx >= 0) authUsers.splice(idx, 1);
+                return { error: null };
+              }
+            }
+          },
+          from(table: string) {
+            assert.equal(table, 'usuarios');
+            return {
+              select() {
+                const filters: Record<string, any> = {};
+                const chain: any = {
+                  eq(col: string, val: any) {
+                    filters[col] = val;
+                    return chain;
+                  },
+                  async maybeSingle() {
+                    const found = usuarios.find(r =>
+                      Object.entries(filters).every(([k, v]) => r[k] === v)
+                    );
+                    return { data: found ? { ...found } : null, error: null };
+                  },
+                  async single() {
+                    const found = usuarios.find(r =>
+                      Object.entries(filters).every(([k, v]) => r[k] === v)
+                    );
+                    if (!found) return { data: null, error: { message: 'Not found' } };
+                    return { data: { ...found }, error: null };
+                  }
+                };
+                return chain;
+              },
+              insert(row: Record<string, any>) {
+                stats.usuariosInsertCalls += 1;
+                return {
+                  select() {
+                    return {
+                      async single() {
+                        if (stats.failNextUsuarioInsert) {
+                          stats.failNextUsuarioInsert = false;
+                          return { data: null, error: { message: 'Simulated DB insert failure' } };
+                        }
+                        usuarios.push({ ...row });
+                        return { data: { ...row }, error: null };
+                      }
+                    };
+                  }
+                };
+              },
+              update() {
+                stats.usuariosUpdateCalls += 1;
+                return {
+                  eq() {
+                    return {
+                      select() {
+                        return {
+                          async single() {
+                            return { data: null, error: null };
+                          }
+                        };
+                      }
+                    };
+                  }
+                };
+              }
+            };
+          }
+        };
+      }
+    };
+
+    return { authUsers, usuarios, stats, deps };
+  };
+
+  // 1. approve-user não pode alterar papel de um Administrador ativo
+  {
+    const s = makeState({ defaultTempPassword: synthTempSecret });
+    const res = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer synth-admin-jwt'
+        },
+        body: JSON.stringify({
+          action: 'approve-user',
+          usuarioId: 'usr_admin_alvo_52',
+          papel: 'Visualizador'
+        })
+      }),
+      s.deps
+    );
+    assert.equal(res.status, 409);
+    assert.equal(s.stats.usuariosUpdateCalls, 0);
+    assert.equal(s.usuarios.find(u => u.id === 'usr_admin_alvo_52')?.papel, 'Administrador');
+  }
+
+  // 2. create-user rejeita senha temporária enviada pelo cliente (400)
+  {
+    const s = makeState({ defaultTempPassword: synthTempSecret });
+    const res = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer synth-admin-jwt'
+        },
+        body: JSON.stringify({
+          action: 'create-user',
+          nome: 'Pessoa Sintética',
+          email: 'pessoa.nova@example.invalid',
+          matricula: 'MAT-700',
+          papel: 'Usuário',
+          temporaryPassword: 'ClienteNaoPodeDefinirSenha'
+        })
+      }),
+      s.deps
+    );
+    assert.equal(res.status, 400);
+    assert.equal(s.stats.authCreateCalls, 0);
+    assert.equal(s.stats.usuariosInsertCalls, 0);
+  }
+
+  // 3. create-user falha fechado (500) quando DEFAULT_TEMP_PASSWORD está ausente ou em branco, sem criar conta parcial
+  for (const missingSecret of [undefined, '   ']) {
+    const s = makeState({ defaultTempPassword: missingSecret });
+    const res = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer synth-admin-jwt'
+        },
+        body: JSON.stringify({
+          action: 'create-user',
+          nome: 'Pessoa Sem Secret',
+          email: 'sem.secret@example.invalid',
+          matricula: 'MAT-701',
+          papel: 'Analista'
+        })
+      }),
+      s.deps
+    );
+    assert.equal(res.status, 500);
+    const bodyText = await res.text();
+    assert.equal(bodyText.includes('synth-service-role-secret-51'), false);
+    assert.equal(s.stats.authCreateCalls, 0);
+    assert.equal(s.stats.usuariosInsertCalls, 0);
+  }
+
+  // 4. create-user cria conta no Auth com DEFAULT_TEMP_PASSWORD, normaliza e-mail, grava auth_user_id e force_password_change=true
+  {
+    const s = makeState({ defaultTempPassword: synthTempSecret });
+    const res = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer synth-admin-jwt'
+        },
+        body: JSON.stringify({
+          action: 'create-user',
+          nome: 'Novo Servidor Sintético',
+          email: '  Novo.Servidor@EXAMPLE.invalid ',
+          matricula: 'MAT-702',
+          papel: 'Analista'
+        })
+      }),
+      s.deps
+    );
+    assert.equal(res.status, 200);
+    const rawText = await res.text();
+    assert.equal(rawText.includes(synthTempSecret), false);
+    const json = JSON.parse(rawText);
+    assert.equal(json.success, true);
+    assert.equal(s.stats.lastCreatedPassword, synthTempSecret);
+    assert.equal(json.usuarioRecord.email, 'novo.servidor@example.invalid');
+    assert.equal(json.usuarioRecord.login, 'novo.servidor');
+    assert.equal(json.usuarioRecord.papel, 'Analista');
+    assert.equal(json.usuarioRecord.force_password_change, true);
+    assert.equal(json.usuarioRecord.auth_user_id, json.authUserId);
+    assert.equal(Object.prototype.hasOwnProperty.call(json.usuarioRecord, 'senha_provisoria_enc'), false);
+  }
+
+  // 5. Duplicidades (e-mail, login, matrícula, conta prévia no Auth) retornam 409 uniforme sem enumeração
+  {
+    const s = makeState({ defaultTempPassword: synthTempSecret });
+    const conflictPayloads = [
+      // Conflito por e-mail já cadastrado em usuarios
+      { nome: 'Dup Email', email: 'ADMIN.ATIVO@example.invalid', login: 'unico.login.1', matricula: 'MAT-UNICA-1' },
+      // Conflito por login já cadastrado em usuarios
+      { nome: 'Dup Login', email: 'unico.email.2@example.invalid', login: 'admin.ativo', matricula: 'MAT-UNICA-2' },
+      // Conflito por matrícula já cadastrada em usuarios
+      { nome: 'Dup Matricula', email: 'unico.email.3@example.invalid', login: 'unico.login.3', matricula: 'ADM-52' },
+      // Conflito por e-mail já existente no Auth (sem linha em usuarios)
+      { nome: 'Dup Auth', email: 'auth.previo@example.invalid', login: 'unico.login.4', matricula: 'MAT-UNICA-4' }
+    ];
+
+    const conflictBodies: string[] = [];
+    for (const payload of conflictPayloads) {
+      const res = await handleAdminManageUserRequest(
+        new Request('https://example.invalid/admin-manage-user', {
+          method: 'POST',
+          headers: {
+            'Content-Type': 'application/json',
+            Authorization: 'Bearer synth-admin-jwt'
+          },
+          body: JSON.stringify({
+            action: 'create-user',
+            papel: 'Usuário',
+            ...payload
+          })
+        }),
+        s.deps
+      );
+      assert.equal(res.status, 409);
+      conflictBodies.push(await res.text());
+    }
+    assert.equal(new Set(conflictBodies).size, 1);
+    assert.equal(s.stats.authCreateCalls, 0);
+    assert.equal(s.stats.usuariosInsertCalls, 0);
+  }
+
+  // 6. Falha ao inserir em public.usuarios após criar no Auth executa rollback (deleteUser) e não vaza detalhes
+  {
+    const s = makeState({ defaultTempPassword: synthTempSecret });
+    const initialAuthCount = s.authUsers.length;
+    s.stats.failNextUsuarioInsert = true;
+
+    const res = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+          Authorization: 'Bearer synth-admin-jwt'
+        },
+        body: JSON.stringify({
+          action: 'create-user',
+          nome: 'Rollback Teste',
+          email: 'rollback.teste@example.invalid',
+          matricula: 'MAT-ROLLBACK',
+          papel: 'Usuário'
+        })
+      }),
+      s.deps
+    );
+    assert.equal(res.status, 500);
+    const bodyText = await res.text();
+    assert.equal(bodyText.includes('Simulated DB insert failure'), false);
+    assert.equal(bodyText.includes(synthTempSecret), false);
+    assert.equal(s.stats.authDeleteCalls.length, 1);
+    assert.equal(s.authUsers.length, initialAuthCount);
+  }
+});
+
+test('Edge Function admin-manage-user: reset-password por auth_user_id (sem e-mail) e complete-password-change restrito ao caller auth.uid()', async () => {
+  const synthAdminUid = '00000000-0000-4000-8000-000000000061';
+  const synthUserUid = '00000000-0000-4000-8000-000000000062';
+  const synthViewerUid = '00000000-0000-4000-8000-000000000063';
+  const synthInactiveAdminUid = '00000000-0000-4000-8000-000000000064';
+  const synthTempSecret = 'Synth#ResetSecret2026!';
+
+  const makeResetScenario = (opts?: { defaultTempPassword?: string }) => {
+    const authUsers = [
+      { id: synthAdminUid, email: 'admin.reset@example.invalid', password: 'old' },
+      { id: synthUserUid, email: 'servidor.reset@example.invalid', password: 'old' },
+      { id: synthViewerUid, email: 'leitor.reset@example.invalid', password: 'old' },
+      { id: synthInactiveAdminUid, email: 'admin.inativo@example.invalid', password: 'old' }
+    ];
+    const usuarios: Array<Record<string, any>> = [
+      {
+        id: 'usr_admin_61',
+        auth_user_id: synthAdminUid,
+        nome: 'Admin Reset',
+        matricula: 'ADM-61',
+        email: 'admin.reset@example.invalid',
+        papel: 'Administrador',
+        situacao: 'Ativo',
+        status: 'Ativo',
+        force_password_change: false
+      },
+      {
+        id: 'usr_srv_62',
+        auth_user_id: synthUserUid,
+        nome: 'Servidor Resetado',
+        matricula: 'MAT-620',
+        email: 'servidor.reset@example.invalid',
+        papel: 'Usuário',
+        situacao: 'Ativo',
+        status: 'Ativo',
+        force_password_change: false
+      },
+      {
+        id: 'usr_viewer_63',
+        auth_user_id: synthViewerUid,
+        nome: 'Leitor Primeiro Acesso',
+        matricula: 'MAT-630',
+        email: 'leitor.reset@example.invalid',
+        papel: 'Visualizador',
+        situacao: 'Ativo',
+        status: 'Ativo',
+        force_password_change: true
+      },
+      {
+        id: 'usr_admin_inativo_64',
+        auth_user_id: synthInactiveAdminUid,
+        nome: 'Admin Inativo',
+        matricula: 'ADM-64',
+        email: 'admin.inativo@example.invalid',
+        papel: 'Administrador',
+        situacao: 'Inativo',
+        status: 'Inativo',
+        force_password_change: false
+      },
+      {
+        id: 'usr_sem_vinculo_65',
+        auth_user_id: null,
+        nome: 'Sem Auth Vinculado',
+        matricula: 'MAT-650',
+        email: 'semvinculo@example.invalid',
+        papel: 'Usuário',
+        situacao: 'Ativo',
+        status: 'Ativo',
+        force_password_change: false
+      },
+      {
+        id: 'usr_inativo_66',
+        auth_user_id: '00000000-0000-4000-8000-000000000066',
+        nome: 'Usuário Inativo',
+        matricula: 'MAT-660',
+        email: 'inativo@example.invalid',
+        papel: 'Usuário',
+        situacao: 'Inativo',
+        status: 'Inativo',
+        force_password_change: false
+      }
+    ];
+    const stats = {
+      authUpdateCalls: [] as Array<{ id: string; password?: string }>,
+      failNextAuthUpdate: false,
+      usuarioUpdates: [] as Array<Record<string, any>>
+    };
+
+    const deps = {
+      envGet(name: string) {
+        if (name === 'SUPABASE_URL') return 'https://example.invalid';
+        if (name === 'SUPABASE_SERVICE_ROLE_KEY') return 'synth-service-role-secret-61';
+        if (name === 'DEFAULT_TEMP_PASSWORD') return opts?.defaultTempPassword;
+        return undefined;
+      },
+      createSupabaseClient() {
+        return {
+          auth: {
+            async getUser(jwt: string) {
+              if (jwt === 'synth-admin-jwt') return { data: { user: { id: synthAdminUid } }, error: null };
+              if (jwt === 'synth-user-jwt') return { data: { user: { id: synthUserUid } }, error: null };
+              if (jwt === 'synth-viewer-jwt') return { data: { user: { id: synthViewerUid } }, error: null };
+              if (jwt === 'synth-inactive-admin-jwt') {
+                return { data: { user: { id: synthInactiveAdminUid } }, error: null };
+              }
+              return { data: { user: null }, error: { message: 'Invalid JWT' } };
+            },
+            admin: {
+              async getUserById(id: string) {
+                const found = authUsers.find(u => u.id === id);
+                if (!found) return { data: { user: null }, error: { status: 404, message: 'User not found' } };
+                return { data: { user: { ...found } }, error: null };
+              },
+              async updateUserById(id: string, patch: any) {
+                stats.authUpdateCalls.push({ id, password: patch?.password });
+                if (stats.failNextAuthUpdate) {
+                  stats.failNextAuthUpdate = false;
+                  return { error: { message: 'Auth update failure' } };
+                }
+                const found = authUsers.find(u => u.id === id);
+                if (!found) return { error: { message: 'User not found' } };
+                if (patch?.password) found.password = patch.password;
+                return { error: null };
+              }
+            }
+          },
+          from(table: string) {
+            assert.equal(table, 'usuarios');
+            const applyFilter = (rows: any[], filters: Record<string, any>) =>
+              rows.filter(r => Object.entries(filters).every(([k, v]) => r[k] === v));
+
+            return {
+              select() {
+                const filters: Record<string, any> = {};
+                const chain: any = {
+                  eq(col: string, val: any) {
+                    filters[col] = val;
+                    return chain;
+                  },
+                  async maybeSingle() {
+                    const matched = applyFilter(usuarios, filters);
+                    return { data: matched[0] ? { ...matched[0] } : null, error: null };
+                  }
+                };
+                return chain;
+              },
+              update(payload: Record<string, any>) {
+                const filters: Record<string, any> = {};
+                const chain: any = {
+                  eq(col: string, val: any) {
+                    filters[col] = val;
+                    return chain;
+                  },
+                  select() {
+                    return {
+                      async maybeSingle() {
+                        const matched = applyFilter(usuarios, filters);
+                        if (!matched[0]) return { data: null, error: null };
+                        Object.assign(matched[0], payload);
+                        stats.usuarioUpdates.push({ id: matched[0].id, payload: { ...payload } });
+                        return { data: { ...matched[0] }, error: null };
+                      }
+                    };
+                  }
+                };
+                return chain;
+              }
+            };
+          }
+        };
+      }
+    };
+
+    return { authUsers, usuarios, stats, deps };
+  };
+
+  // 1. Autorização de reset-password: nega sem JWT (401), usuário comum (403) e admin inativo (403)
+  {
+    const s = makeResetScenario({ defaultTempPassword: synthTempSecret });
+    const unauth = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'reset-password', usuarioId: 'usr_srv_62' })
+      }),
+      s.deps
+    );
+    assert.equal(unauth.status, 401);
+
+    for (const badJwt of ['synth-user-jwt', 'synth-inactive-admin-jwt']) {
+      const forbidden = await handleAdminManageUserRequest(
+        new Request('https://example.invalid/admin-manage-user', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${badJwt}` },
+          body: JSON.stringify({ action: 'reset-password', usuarioId: 'usr_srv_62' })
+        }),
+        s.deps
+      );
+      assert.equal(forbidden.status, 403);
+    }
+    assert.equal(s.stats.authUpdateCalls.length, 0);
+  }
+
+  // 2. Rejeita identificação somente por e-mail ou ausente (400) e falta de DEFAULT_TEMP_PASSWORD (500)
+  {
+    const s = makeResetScenario({ defaultTempPassword: synthTempSecret });
+    const emailOnlyRes = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer synth-admin-jwt' },
+        body: JSON.stringify({ action: 'reset-password', email: 'servidor.reset@example.invalid' })
+      }),
+      s.deps
+    );
+    assert.equal(emailOnlyRes.status, 400);
+
+    const noSecret = makeResetScenario({ defaultTempPassword: undefined });
+    const missingEnvRes = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer synth-admin-jwt' },
+        body: JSON.stringify({ action: 'reset-password', usuarioId: 'usr_srv_62' })
+      }),
+      noSecret.deps
+    );
+    assert.equal(missingEnvRes.status, 500);
+    assert.equal(noSecret.stats.authUpdateCalls.length, 0);
+  }
+
+  // 3. Alvo inexistente, sem auth_user_id ou inativo retorna 409 uniforme (sem enumeração)
+  {
+    const s = makeResetScenario({ defaultTempPassword: synthTempSecret });
+    const errorBodies: string[] = [];
+    for (const body of [
+      { action: 'reset-password', usuarioId: 'usr_nao_existe' },
+      { action: 'reset-password', usuarioId: 'usr_sem_vinculo_65' },
+      { action: 'reset-password', usuarioId: 'usr_inativo_66' },
+      { action: 'reset-password', usuarioId: 'usr_srv_62', authUserId: synthViewerUid }
+    ]) {
+      const res = await handleAdminManageUserRequest(
+        new Request('https://example.invalid/admin-manage-user', {
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json', Authorization: 'Bearer synth-admin-jwt' },
+          body: JSON.stringify(body)
+        }),
+        s.deps
+      );
+      assert.equal(res.status, 409);
+      errorBodies.push(await res.text());
+    }
+    assert.equal(new Set(errorBodies).size, 1);
+    assert.equal(s.stats.authUpdateCalls.length, 0);
+  }
+
+  // 4. Se updateUserById falhar no Auth, NÃO marca force_password_change=true
+  {
+    const s = makeResetScenario({ defaultTempPassword: synthTempSecret });
+    s.stats.failNextAuthUpdate = true;
+    const res = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer synth-admin-jwt' },
+        body: JSON.stringify({ action: 'reset-password', usuarioId: 'usr_srv_62', authUserId: synthUserUid })
+      }),
+      s.deps
+    );
+    assert.equal(res.status, 500);
+    assert.equal(s.usuarios.find(u => u.id === 'usr_srv_62')?.force_password_change, false);
+    assert.equal(s.stats.usuarioUpdates.length, 0);
+  }
+
+  // 5. Sucesso no reset-password atualiza senha Auth com DEFAULT_TEMP_PASSWORD, marca force_password_change=true e não vaza PII/segredos
+  {
+    const s = makeResetScenario({ defaultTempPassword: synthTempSecret });
+    const res = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer synth-admin-jwt' },
+        body: JSON.stringify({ action: 'reset-password', authUserId: synthUserUid })
+      }),
+      s.deps
+    );
+    assert.equal(res.status, 200);
+    const bodyText = await res.text();
+    assert.equal(bodyText.includes(synthTempSecret), false);
+    assert.equal(bodyText.includes('servidor.reset@example.invalid'), false);
+    assert.equal(bodyText.includes('MAT-620'), false);
+    assert.equal(bodyText.includes(synthUserUid), false);
+    assert.equal(s.stats.authUpdateCalls.length, 1);
+    assert.equal(s.stats.authUpdateCalls[0].id, synthUserUid);
+    assert.equal(s.stats.authUpdateCalls[0].password, synthTempSecret);
+    assert.equal(s.usuarios.find(u => u.id === 'usr_srv_62')?.force_password_change, true);
+  }
+
+  // 6. complete-password-change: funciona para Visualizador ativo e ignora tentativa de alterar outro usuário ou papel
+  {
+    const s = makeResetScenario({ defaultTempPassword: synthTempSecret });
+    const noAuth = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ action: 'complete-password-change' })
+      }),
+      s.deps
+    );
+    assert.equal(noAuth.status, 401);
+
+    const inactive = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer synth-inactive-admin-jwt' },
+        body: JSON.stringify({ action: 'complete-password-change' })
+      }),
+      s.deps
+    );
+    assert.equal(inactive.status, 403);
+
+    const viewerOk = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer synth-viewer-jwt' },
+        body: JSON.stringify({
+          action: 'complete-password-change',
+          usuarioId: 'usr_admin_61',
+          papel: 'Administrador'
+        })
+      }),
+      s.deps
+    );
+    assert.equal(viewerOk.status, 200);
+    const viewerJson = await viewerOk.json();
+    assert.equal(viewerJson.success, true);
+    assert.equal(viewerJson.forcePasswordChange, false);
+    assert.equal(s.usuarios.find(u => u.id === 'usr_viewer_63')?.force_password_change, false);
+    assert.equal(s.usuarios.find(u => u.id === 'usr_viewer_63')?.papel, 'Visualizador');
+  }
+});
+
+test('Troca obrigatória no primeiro acesso: auth-session, authService, ForcePasswordChangePage e bloqueio de telas/APIs', async () => {
+  const synthUid = '00000000-0000-4000-8000-000000000071';
+
+  // 1. /api/auth-session propaga forcePasswordChange do banco
+  const prevUrl = process.env.SUPABASE_URL;
+  const prevViteUrl = process.env.VITE_SUPABASE_URL;
+  const prevSrv = process.env.SUPABASE_SERVICE_ROLE_KEY;
+  process.env.SUPABASE_URL = 'https://example.invalid';
+  process.env.SUPABASE_SERVICE_ROLE_KEY = 'synth-service-role';
+  setTestSupabaseAdminForSemaAudit(
+    createServerAuthSupabaseMock({
+      tokenMap: { 'tok-first-access': { id: synthUid, email: 'primeiro@example.invalid' } },
+      usuariosRows: [
+        {
+          id: 'usr_first_71',
+          auth_user_id: synthUid,
+          nome: 'Servidor Primeiro Acesso',
+          login: 'primeiro.acesso',
+          matricula: 'MAT-71',
+          papel: 'Usuário',
+          situacao: 'Ativo',
+          force_password_change: true
+        }
+      ]
+    })
+  );
+
+  try {
+    const res = createMockRes();
+    await authSessionHandler(
+      createMockReq({ method: 'GET', headers: { authorization: 'Bearer tok-first-access' } }) as any,
+      res as any
+    );
+    assert.equal(res.getStatus(), 200);
+    assert.equal(res.getBody().profile.forcePasswordChange, true);
+  } finally {
+    setTestSupabaseAdminForSemaAudit(null);
+    if (prevUrl !== undefined) process.env.SUPABASE_URL = prevUrl;
+    else delete process.env.SUPABASE_URL;
+    if (prevViteUrl !== undefined) process.env.VITE_SUPABASE_URL = prevViteUrl;
+    else delete process.env.VITE_SUPABASE_URL;
+    if (prevSrv !== undefined) process.env.SUPABASE_SERVICE_ROLE_KEY = prevSrv;
+    else delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+  }
+
+  // 2. authService: policy de senha no Auth, confirmação no servidor e re-validação de forcePasswordChange
+  let forceFlagInDb = true;
+  let rejectWeakPassword = true;
+  let failServerComplete = false;
+  let invokeCalls: Array<{ fn: string; body: any }> = [];
+  let directUsuarioInserts = 0;
+
+  const mockClient: any = {
+    auth: {
+      async getSession() {
+        return { data: { session: { access_token: 'tok-first-access', user: { id: synthUid } } }, error: null };
+      },
+      async signInWithPassword() {
+        return {
+          data: {
+            user: { id: synthUid, email: 'primeiro@example.invalid' },
+            session: { access_token: 'tok-first-access', user: { id: synthUid } }
+          },
+          error: null
+        };
+      },
+      async updateUser({ password }: { password: string }) {
+        assert.ok(password.length >= 6);
+        if (rejectWeakPassword) {
+          return { error: { message: 'Password should contain uppercase, lowercase and number.' } };
+        }
+        return { error: null };
+      },
+      async signOut() {
+        return { error: null };
+      }
+    },
+    functions: {
+      async invoke(fn: string, opts: any) {
+        invokeCalls.push({ fn, body: opts?.body });
+        if (opts?.body?.action === 'complete-password-change') {
+          if (failServerComplete) {
+            return { data: null, error: { message: 'Server confirm failed' } };
+          }
+          forceFlagInDb = false;
+          return { data: { success: true, forcePasswordChange: false }, error: null };
+        }
+        if (opts?.body?.action === 'create-user') {
+          return { data: null, error: { message: 'Edge function unavailable' } };
+        }
+        if (opts?.body?.action === 'reset-password') {
+          return { data: { success: true, message: 'Senha redefinida.' }, error: null };
+        }
+        return { data: null, error: null };
+      }
+    },
+    from(table: string) {
+      assert.equal(table, 'usuarios');
+      return {
+        select() {
+          return {
+            eq() {
+              return {
+                async maybeSingle() {
+                  return {
+                    data: {
+                      id: 'usr_first_71',
+                      auth_user_id: synthUid,
+                      nome: 'Servidor Primeiro Acesso',
+                      login: 'primeiro.acesso',
+                      email: 'primeiro@example.invalid',
+                      matricula: 'MAT-71',
+                      papel: 'Usuário',
+                      situacao: 'Ativo',
+                      force_password_change: forceFlagInDb
+                    },
+                    error: null
+                  };
+                }
+              };
+            }
+          };
+        },
+        insert() {
+          directUsuarioInserts += 1;
+          return { error: null };
+        }
+      };
+    }
+  };
+
+  const svc = createAuthService(() => ({ client: mockClient, configured: true }));
+
+  const loginRes = await svc.loginWithPassword('primeiro@example.invalid', 'TempPass!1');
+  assert.equal(loginRes.success, true);
+  assert.equal(loginRes.profile?.forcePasswordChange, true);
+
+  // Falha de política do Auth não chama complete-password-change nem destrava
+  const policyFail = await svc.completeFirstAccessPasswordChange('fraca123', 'fraca123');
+  assert.equal(policyFail.success, false);
+  assert.match(String(policyFail.error), /uppercase/i);
+  assert.equal(invokeCalls.length, 0);
+  assert.equal(forceFlagInDb, true);
+
+  // Falha de confirmação no backend mantém bloqueio
+  rejectWeakPassword = false;
+  failServerComplete = true;
+  const serverFail = await svc.completeFirstAccessPasswordChange('NovaSenha!2026', 'NovaSenha!2026');
+  assert.equal(serverFail.success, false);
+  assert.equal(serverFail.passwordUpdatedInAuth, true);
+  assert.equal(forceFlagInDb, true);
+
+  // Sucesso completo atualiza perfil para forcePasswordChange=false
+  failServerComplete = false;
+  const completeOk = await svc.completeFirstAccessPasswordChange('NovaSenha!2026', 'NovaSenha!2026');
+  assert.equal(completeOk.success, true);
+  assert.equal(completeOk.profile?.forcePasswordChange, false);
+
+  // adminCreateUser nunca envia temporaryPassword e nunca faz fallback de insert direto
+  const createFail = await svc.adminCreateUser({
+    nome: 'Teste',
+    matricula: '999',
+    email: 'teste@example.invalid',
+    perfilProfissional: 'Analista',
+    setor: 'CSB',
+    papel: 'Usuário'
+  });
+  assert.equal(createFail.success, false);
+  assert.equal(directUsuarioInserts, 0);
+  const createCall = invokeCalls.find(c => c.body?.action === 'create-user');
+  assert.ok(createCall);
+  assert.equal('temporaryPassword' in createCall.body, false);
+  assert.equal('sendInviteEmail' in createCall.body, false);
+
+  // adminResetUserPassword aciona reset-password com usuarioId/authUserId
+  const resetRes = await svc.adminResetUserPassword('usr_first_71', synthUid);
+  assert.equal(resetRes.success, true);
+  const resetCall = invokeCalls.find(c => c.body?.action === 'reset-password');
+  assert.equal(resetCall?.body?.usuarioId, 'usr_first_71');
+  assert.equal(resetCall?.body?.authUserId, synthUid);
+
+  // 3. Renderização da tela ForcePasswordChangePage e inspeção estática de guardas e segredos
+  const html = renderToStaticMarkup(
+    React.createElement(ForcePasswordChangePage, {
+      profile: {
+        id: 'usr_first_71',
+        authUserId: synthUid,
+        nome: 'Servidor Primeiro Acesso',
+        login: 'primeiro.acesso',
+        email: 'primeiro@example.invalid',
+        matricula: 'MAT-71',
+        perfilProfissional: 'Analista',
+        setor: 'CSB',
+        papel: 'Usuário',
+        situacao: 'Ativo',
+        forcePasswordChange: true,
+        createdAt: '2026-11-24T00:00:00.000Z'
+      },
+      onPasswordChanged: () => {},
+      onLogout: () => {}
+    })
+  );
+  assert.ok(html.includes('Definição de Nova Senha'));
+  assert.ok(html.includes('force-new-password-input'));
+  assert.ok(html.includes('force-confirm-password-input'));
+
+  const root = process.cwd();
+  const appSrc = fs.readFileSync(path.join(root, 'src/App.tsx'), 'utf8');
+  const modalSrc = fs.readFileSync(path.join(root, 'src/components/UsuarioModal.tsx'), 'utf8');
+  const envExample = fs.readFileSync(path.join(root, '.env.example'), 'utf8');
+  const docSrc = fs.readFileSync(path.join(root, 'docs/EDGE_FUNCTION_ADMIN_MANAGE_USER.md'), 'utf8');
+
+  assert.equal(appSrc.includes('requiresForcedPasswordChange'), true);
+  assert.equal(appSrc.includes('!currentUserProfile?.forcePasswordChange'), true);
+  assert.equal(appSrc.includes('<ForcePasswordChangePage'), true);
+  assert.equal(modalSrc.includes('temporaryPassword'), false);
+  assert.equal(modalSrc.includes('DEFAULT_TEMP_PASSWORD'), false);
+  assert.equal(envExample.includes('DEFAULT_TEMP_PASSWORD'), false);
+  assert.equal(docSrc.includes('DEFAULT_TEMP_PASSWORD'), true);
+});
+
 
 

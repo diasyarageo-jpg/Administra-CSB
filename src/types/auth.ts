@@ -54,6 +54,7 @@ export interface AuthUserProfile {
   setor?: SetorLotacao | string;
   papel: UserRole;
   situacao: 'Ativo' | 'Inativo' | 'Pendente' | 'Recusado';
+  forcePasswordChange?: boolean;
   observacoes?: string;
   createdBy?: string;
   updatedBy?: string;

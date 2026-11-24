@@ -269,6 +269,7 @@ export interface UsuarioRecord {
   situacao?: 'Ativo' | 'Inativo' | 'Pendente' | 'Recusado';
   status?: 'Ativo' | 'Inativo';
   authUserId?: string;
+  forcePasswordChange?: boolean;
   observacoes?: string;
   createdBy?: string;
   updatedBy?: string;
@@ -897,6 +898,7 @@ export function fromDbUsuario(row: any): UsuarioRecord {
     situacao: row.situacao ?? row.status ?? 'Ativo',
     status: row.status ?? row.situacao ?? 'Ativo',
     authUserId: row.auth_user_id ?? row.authUserId ?? '',
+    forcePasswordChange: Boolean(row.force_password_change ?? row.forcePasswordChange ?? false),
     observacoes: row.observacoes ?? '',
     createdBy: row.created_by ?? row.createdBy ?? '',
     updatedBy: row.updated_by ?? row.updatedBy ?? '',

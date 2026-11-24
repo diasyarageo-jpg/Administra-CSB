@@ -28,8 +28,10 @@ export interface SemaAuthContext {
   login?: string | null;
   userName?: string | null;
   matricula?: string | null;
+  papel?: string | null;
   perfilProfissional?: string | null;
   setor?: string | null;
+  forcePasswordChange?: boolean;
   supabaseAdmin: SupabaseClient<any, any, any> | null;
 }
 
@@ -242,7 +244,9 @@ export async function authorizeSemaLookupRequest(
     // Vinculo estrito por auth_user_id = auth.uid() (sem fallback por e-mail nem user_metadata)
     const primaryRes = await supabaseAdmin
       .from('usuarios')
-      .select('id, papel, situacao, status, auth_user_id, login, nome, matricula, perfil_profissional, setor')
+      .select(
+        'id, papel, situacao, status, auth_user_id, login, nome, matricula, perfil_profissional, setor, force_password_change'
+      )
       .eq('auth_user_id', userData.user.id)
       .maybeSingle();
 
@@ -361,6 +365,7 @@ export async function authorizeSemaLookupRequest(
         ? String(profile.perfil_profissional).trim()
         : null,
       setor: profile.setor ? String(profile.setor).trim() : null,
+      forcePasswordChange: Boolean(profile.force_password_change),
       supabaseAdmin
     };
   } catch {

@@ -29,12 +29,21 @@ export const SOLICITACAO_FINALIZED_STATUSES = ['aprovada', 'recusada'] as const;
 const SOLICITACAO_REVIEW_COLUMNS =
   'id, nome, matricula, email, usuario_id, status, observacoes_admin, revisado_por, revisado_em, criado_em, atualizado_em';
 const SAFE_ID_PATTERN = /^[A-Za-z0-9_-]{1,128}$/;
+const UUID_PATTERN = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i;
+const EMAIL_PATTERN = /^[^\s@]+@[^\s@]+\.[^\s@]+$/;
+const ALLOWED_SITUACOES = ['Ativo', 'Inativo', 'Pendente', 'Recusado'] as const;
 const MAX_ADMIN_OBSERVACAO_LENGTH = 1000;
 const DEFAULT_SOLICITACAO_LIST_LIMIT = 50;
 const MAX_SOLICITACAO_LIST_LIMIT = 100;
+const UNIFORM_USER_CONFLICT_ERROR = 'Não foi possível concluir o cadastro com os dados informados.';
+const UNIFORM_RESET_TARGET_ERROR = 'Não foi possível redefinir a senha para este cadastro.';
 
 function isSafeId(value: unknown): value is string {
   return typeof value === 'string' && SAFE_ID_PATTERN.test(value.trim());
+}
+
+function isUuid(value: unknown): value is string {
+  return typeof value === 'string' && UUID_PATTERN.test(value.trim());
 }
 
 function normalizeEmail(value: unknown): string {
@@ -43,6 +52,25 @@ function normalizeEmail(value: unknown): string {
 
 function normalizeMatricula(value: unknown): string {
   return typeof value === 'string' ? value.trim().toUpperCase() : '';
+}
+
+function getDefaultTempPassword(deps: AdminManageUserDeps): string | null {
+  const raw = deps.envGet('DEFAULT_TEMP_PASSWORD');
+  if (typeof raw !== 'string' || !raw.trim()) {
+    return null;
+  }
+  return raw;
+}
+
+async function deleteAuthUserSafe(supabaseAdmin: any, authUserId: string): Promise<void> {
+  if (!authUserId || typeof supabaseAdmin?.auth?.admin?.deleteUser !== 'function') {
+    return;
+  }
+  try {
+    await supabaseAdmin.auth.admin.deleteUser(authUserId);
+  } catch {
+    // Falha na compensação nunca deve expor credenciais ou dados internos
+  }
 }
 
 function parseAdminObservacao(
@@ -163,17 +191,89 @@ export async function handleAdminManageUserRequest(
       return jsonResponse({ success: false, error: 'Sessão inválida ou expirada. Efetue login novamente.' }, 401);
     }
 
-    // Valida se o solicitante possui perfil de Administrador ativo na tabela usuarios
-    const { data: adminRecord, error: adminErr } = await supabaseAdmin
+    // Valida perfil institucional vinculado estritamente a auth_user_id = callerUser.id
+    let callerProfileRes = await supabaseAdmin
       .from('usuarios')
-      .select('id, papel, situacao')
+      .select('id, auth_user_id, papel, situacao, status, force_password_change')
       .eq('auth_user_id', callerUser.id)
       .maybeSingle();
 
+    if (callerProfileRes.error && isMissingColumnError(callerProfileRes.error)) {
+      callerProfileRes = await supabaseAdmin
+        .from('usuarios')
+        .select('id, papel, situacao')
+        .eq('auth_user_id', callerUser.id)
+        .maybeSingle();
+    }
+
+    const callerProfile = callerProfileRes.data;
+    const callerProfileErr = callerProfileRes.error;
+    const callerLinkedMatches =
+      callerProfile &&
+      (callerProfile.auth_user_id === undefined ||
+        String(callerProfile.auth_user_id || '').trim() === String(callerUser.id).trim());
+
+    // =========================================================================
+    // AÇÃO SELF-SERVICE: complete-password-change (Conclusão de troca obrigatória)
+    // Restrita exclusivamente ao próprio usuário autenticado ativo via auth.uid()
+    // =========================================================================
+    if (action === 'complete-password-change') {
+      const callerSituacao = String(callerProfile?.situacao || callerProfile?.status || '').trim();
+      const callerPapel = String(callerProfile?.papel || '').trim();
+      if (
+        callerProfileErr ||
+        !callerProfile ||
+        !callerProfile.id ||
+        !callerLinkedMatches ||
+        callerSituacao !== 'Ativo' ||
+        !ALLOWED_ROLES.includes(callerPapel)
+      ) {
+        return jsonResponse(
+          {
+            success: false,
+            error: 'Permissão negada: conta sem perfil institucional ativo vinculado.'
+          },
+          403
+        );
+      }
+
+      const now = new Date().toISOString();
+      const { data: updatedOwn, error: updOwnErr } = await supabaseAdmin
+        .from('usuarios')
+        .update({
+          force_password_change: false,
+          updated_by: callerUser.id,
+          updated_at: now
+        })
+        .eq('id', callerProfile.id)
+        .eq('auth_user_id', callerUser.id)
+        .select('id, force_password_change')
+        .maybeSingle();
+
+      if (updOwnErr || !updatedOwn) {
+        return jsonResponse(
+          {
+            success: false,
+            error: 'Não foi possível confirmar a conclusão da alteração de senha.'
+          },
+          500
+        );
+      }
+
+      return jsonResponse({
+        success: true,
+        forcePasswordChange: false,
+        message: 'Alteração de senha confirmada com sucesso.'
+      });
+    }
+
+    // Valida se o solicitante possui perfil de Administrador ativo na tabela usuarios
+    const adminRecord = callerProfile;
     if (
-      adminErr ||
+      callerProfileErr ||
       !adminRecord ||
       !adminRecord.id ||
+      !callerLinkedMatches ||
       adminRecord.papel !== 'Administrador' ||
       adminRecord.situacao !== 'Ativo'
     ) {
@@ -217,6 +317,16 @@ export async function handleAdminManageUserRequest(
 
       if (targetErr || !targetUser) {
         return jsonResponse({ success: false, error: 'Cadastro de usuário não encontrado.' }, 404);
+      }
+
+      if (targetUser.papel === 'Administrador' && targetUser.situacao === 'Ativo') {
+        return jsonResponse(
+          {
+            success: false,
+            error: 'Não é permitido alterar o papel de um Administrador ativo por meio desta aprovação.'
+          },
+          409
+        );
       }
 
       const targetEmail = String(targetUser.email).trim().toLowerCase();
@@ -375,9 +485,19 @@ export async function handleAdminManageUserRequest(
     }
 
     // =========================================================================
-    // AÇÃO 4: create-user (Cadastro direto por Administrador)
+    // AÇÃO 4: create-user (Cadastro direto por Administrador com DEFAULT_TEMP_PASSWORD)
     // =========================================================================
     if (action === 'create-user') {
+      const hasClientPassword = ['temporaryPassword', 'temporary_password', 'password', 'senha', 'senhaProvisoria', 'senha_provisoria'].some(
+        key => safePayload[key] !== undefined && safePayload[key] !== null && String(safePayload[key]).trim() !== ''
+      );
+      if (hasClientPassword) {
+        return jsonResponse(
+          { success: false, error: 'Não é permitido informar senha temporária pelo cliente.' },
+          400
+        );
+      }
+
       const {
         nome,
         matricula,
@@ -390,37 +510,135 @@ export async function handleAdminManageUserRequest(
         observacoes = ''
       } = safePayload;
 
-      if (!email || !nome) {
-        return jsonResponse({ success: false, error: 'Campos obrigatórios ausentes: nome e e-mail são necessários.' }, 400);
+      const nomeClean = typeof nome === 'string' ? nome.trim() : '';
+      const emailClean = normalizeEmail(email);
+
+      if (!nomeClean || !emailClean || !EMAIL_PATTERN.test(emailClean)) {
+        return jsonResponse(
+          { success: false, error: 'Campos obrigatórios ausentes ou inválidos: nome e e-mail válido são necessários.' },
+          400
+        );
       }
 
-      const emailClean = String(email).trim().toLowerCase();
+      if (papel !== undefined && papel !== null && papel !== '' && !ALLOWED_ROLES.includes(papel)) {
+        return jsonResponse(
+          {
+            success: false,
+            error: `Papel inválido. As funções permitidas são: ${ALLOWED_ROLES.join(', ')}.`
+          },
+          400
+        );
+      }
       const selectedPapel = ALLOWED_ROLES.includes(papel) ? papel : 'Usuário';
 
-      // Cria convite por e-mail no Supabase Auth
-      let authUserId: string | null = null;
-      const { data: inviteData, error: inviteErr } = await supabaseAdmin.auth.admin.inviteUserByEmail(
-        emailClean,
-        { data: { nome, matricula, papel: selectedPapel } }
-      );
+      const selectedSituacao =
+        situacao !== undefined && situacao !== null && String(situacao).trim() !== ''
+          ? String(situacao).trim()
+          : 'Ativo';
+      if (!(ALLOWED_SITUACOES as readonly string[]).includes(selectedSituacao)) {
+        return jsonResponse({ success: false, error: 'Situação funcional inválida.' }, 400);
+      }
 
-      if (!inviteErr && inviteData?.user) {
-        authUserId = inviteData.user.id;
-      } else {
-        const { data: listData } = await supabaseAdmin.auth.admin.listUsers();
-        const existing = listData?.users?.find((u: any) => u.email?.toLowerCase() === emailClean);
-        if (existing) {
-          authUserId = existing.id;
-        } else {
-          const { data: createdAuth } = await supabaseAdmin.auth.admin.createUser({
-            email: emailClean,
-            email_confirm: true,
-            user_metadata: { nome, matricula, papel: selectedPapel }
-          });
-          if (createdAuth?.user) {
-            authUserId = createdAuth.user.id;
-          }
+      const matriculaClean =
+        matricula !== undefined && matricula !== null && String(matricula).trim() !== ''
+          ? String(matricula).trim()
+          : null;
+      const loginClean =
+        login !== undefined && login !== null && String(login).trim() !== ''
+          ? String(login).trim().toLowerCase()
+          : emailClean.split('@')[0];
+
+      if (!loginClean) {
+        return jsonResponse({ success: false, error: 'Identificação de login inválida.' }, 400);
+      }
+
+      const defaultTempPassword = getDefaultTempPassword(deps);
+      if (!defaultTempPassword) {
+        return jsonResponse(
+          {
+            success: false,
+            error: 'Configuração de senha inicial indisponível no ambiente do servidor.'
+          },
+          500
+        );
+      }
+
+      // Verificação de duplicidade em public.usuarios (mensagem uniforme para evitar enumeração)
+      const duplicateChecks: Array<{ col: 'email' | 'login' | 'matricula'; val: string }> = [
+        { col: 'email', val: emailClean },
+        { col: 'login', val: loginClean }
+      ];
+      if (matriculaClean) {
+        duplicateChecks.push({ col: 'matricula', val: matriculaClean });
+      }
+
+      for (const check of duplicateChecks) {
+        const { data: dupRow, error: dupErr } = await supabaseAdmin
+          .from('usuarios')
+          .select('id')
+          .eq(check.col, check.val)
+          .maybeSingle();
+
+        if (dupErr && dupErr.code !== 'PGRST116') {
+          return jsonResponse({ success: false, error: 'Falha ao validar dados do cadastro.' }, 500);
         }
+        if (dupRow || dupErr?.code === 'PGRST116') {
+          return jsonResponse({ success: false, error: UNIFORM_USER_CONFLICT_ERROR }, 409);
+        }
+      }
+
+      // Verifica existência prévia no Supabase Auth sem revelar detalhes nem sobrescrever contas existentes
+      const { data: listData, error: listErr } = await supabaseAdmin.auth.admin.listUsers({
+        page: 1,
+        perPage: 1000
+      });
+      if (listErr) {
+        return jsonResponse({ success: false, error: 'Falha ao consultar serviço de autenticação.' }, 500);
+      }
+
+      const existingAuth = listData?.users?.find((u: any) => normalizeEmail(u.email) === emailClean);
+      if (existingAuth) {
+        return jsonResponse({ success: false, error: UNIFORM_USER_CONFLICT_ERROR }, 409);
+      }
+
+      const { data: createdAuth, error: createAuthErr } = await supabaseAdmin.auth.admin.createUser({
+        email: emailClean,
+        password: defaultTempPassword,
+        email_confirm: true,
+        user_metadata: {
+          nome: nomeClean,
+          matricula: matriculaClean,
+          papel: selectedPapel
+        }
+      });
+
+      if (createAuthErr || !createdAuth?.user?.id) {
+        const msg = String(createAuthErr?.message || '');
+        if (/already|exists|registered|duplicate/i.test(msg)) {
+          return jsonResponse({ success: false, error: UNIFORM_USER_CONFLICT_ERROR }, 409);
+        }
+        return jsonResponse(
+          { success: false, error: 'Não foi possível provisionar a conta no serviço de autenticação.' },
+          500
+        );
+      }
+
+      const authUserId = String(createdAuth.user.id);
+
+      // Garante unicidade de auth_user_id antes da inserção
+      const { data: existingByAuth, error: existingByAuthErr } = await supabaseAdmin
+        .from('usuarios')
+        .select('id')
+        .eq('auth_user_id', authUserId)
+        .maybeSingle();
+
+      if (existingByAuthErr && existingByAuthErr.code !== 'PGRST116') {
+        await deleteAuthUserSafe(supabaseAdmin, authUserId);
+        return jsonResponse({ success: false, error: 'Falha ao validar vínculo de autenticação.' }, 500);
+      }
+      if (existingByAuth || existingByAuthErr?.code === 'PGRST116') {
+        await deleteAuthUserSafe(supabaseAdmin, authUserId);
+        return jsonResponse({ success: false, error: UNIFORM_USER_CONFLICT_ERROR }, 409);
       }
 
       const now = new Date().toISOString();
@@ -429,16 +647,17 @@ export async function handleAdminManageUserRequest(
         .from('usuarios')
         .insert({
           id: newId,
-          nome: String(nome).trim(),
-          matricula: matricula ? String(matricula).trim() : null,
+          nome: nomeClean,
+          matricula: matriculaClean,
           email: emailClean,
-          login: login ? String(login).trim().toLowerCase() : emailClean.split('@')[0],
-          perfil_profissional: perfilProfissional || null,
-          setor: setor || null,
+          login: loginClean,
+          perfil_profissional: perfilProfissional ? String(perfilProfissional).trim() : null,
+          setor: setor ? String(setor).trim() : null,
           papel: selectedPapel,
-          situacao: situacao || 'Ativo',
-          status: situacao === 'Ativo' ? 'Ativo' : 'Inativo',
-          observacoes: observacoes || null,
+          situacao: selectedSituacao,
+          status: selectedSituacao === 'Ativo' ? 'Ativo' : 'Inativo',
+          force_password_change: true,
+          observacoes: observacoes ? String(observacoes).trim() : null,
           auth_user_id: authUserId,
           created_by: callerUser.id,
           updated_by: callerUser.id,
@@ -448,15 +667,143 @@ export async function handleAdminManageUserRequest(
         .select()
         .single();
 
-      if (insErr) {
-        return jsonResponse({ success: false, error: `Erro ao cadastrar usuário: ${insErr.message}` }, 500);
+      if (insErr || !inserted) {
+        await deleteAuthUserSafe(supabaseAdmin, authUserId);
+        if (insErr?.code === '23505') {
+          return jsonResponse({ success: false, error: UNIFORM_USER_CONFLICT_ERROR }, 409);
+        }
+        return jsonResponse({ success: false, error: 'Não foi possível concluir o cadastro do usuário.' }, 500);
       }
 
       return jsonResponse({
         success: true,
         authUserId,
         usuarioRecord: inserted,
-        message: 'Usuário cadastrado com sucesso.'
+        message: 'Usuário cadastrado com sucesso. Troca de senha obrigatória habilitada para o primeiro acesso.'
+      });
+    }
+
+    // =========================================================================
+    // AÇÃO 4B: reset-password (Redefinição administrativa por auth_user_id)
+    // =========================================================================
+    if (action === 'reset-password') {
+      const rawUsuarioId = safePayload.usuarioId;
+      const rawAuthUserId = safePayload.authUserId ?? safePayload.auth_user_id;
+
+      const hasUsuarioId = rawUsuarioId !== undefined && rawUsuarioId !== null && String(rawUsuarioId).trim() !== '';
+      const hasAuthUserId = rawAuthUserId !== undefined && rawAuthUserId !== null && String(rawAuthUserId).trim() !== '';
+
+      if (!hasUsuarioId && !hasAuthUserId) {
+        return jsonResponse({ success: false, error: 'Identificador de usuário ausente ou inválido.' }, 400);
+      }
+      if (hasUsuarioId && !isSafeId(rawUsuarioId)) {
+        return jsonResponse({ success: false, error: 'Identificador de usuário ausente ou inválido.' }, 400);
+      }
+      if (hasAuthUserId && !isUuid(rawAuthUserId)) {
+        return jsonResponse({ success: false, error: 'Identificador de usuário ausente ou inválido.' }, 400);
+      }
+
+      const defaultTempPassword = getDefaultTempPassword(deps);
+      if (!defaultTempPassword) {
+        return jsonResponse(
+          {
+            success: false,
+            error: 'Configuração de senha inicial indisponível no ambiente do servidor.'
+          },
+          500
+        );
+      }
+
+      const targetUsuarioId = hasUsuarioId ? String(rawUsuarioId).trim() : '';
+      const requestedAuthUserId = hasAuthUserId ? String(rawAuthUserId).trim() : '';
+
+      let targetQuery = supabaseAdmin
+        .from('usuarios')
+        .select('id, auth_user_id, papel, situacao, status');
+
+      if (targetUsuarioId) {
+        targetQuery = targetQuery.eq('id', targetUsuarioId);
+      } else {
+        targetQuery = targetQuery.eq('auth_user_id', requestedAuthUserId);
+      }
+
+      const { data: targetUser, error: targetErr } = await targetQuery.maybeSingle();
+      if (targetErr) {
+        return jsonResponse({ success: false, error: 'Falha ao consultar cadastro de usuário.' }, 500);
+      }
+
+      const targetAuthUserId = targetUser?.auth_user_id ? String(targetUser.auth_user_id).trim() : '';
+      const targetSituacao = String(targetUser?.situacao || targetUser?.status || '').trim();
+
+      if (
+        !targetUser ||
+        !targetAuthUserId ||
+        !isUuid(targetAuthUserId) ||
+        (requestedAuthUserId && targetAuthUserId !== requestedAuthUserId) ||
+        targetSituacao !== 'Ativo'
+      ) {
+        return jsonResponse({ success: false, error: UNIFORM_RESET_TARGET_ERROR }, 409);
+      }
+
+      if (typeof supabaseAdmin.auth?.admin?.getUserById === 'function') {
+        const { data: authByIdData, error: authByIdErr } = await supabaseAdmin.auth.admin.getUserById(
+          targetAuthUserId
+        );
+        if (authByIdErr) {
+          const msg = String(authByIdErr.message || '');
+          const notFound = authByIdErr.status === 404 || /not\s*found/i.test(msg);
+          return jsonResponse(
+            {
+              success: false,
+              error: notFound
+                ? UNIFORM_RESET_TARGET_ERROR
+                : 'Não foi possível validar a conta no serviço de autenticação.'
+            },
+            notFound ? 409 : 500
+          );
+        }
+        if (!authByIdData?.user || String(authByIdData.user.id) !== targetAuthUserId) {
+          return jsonResponse({ success: false, error: UNIFORM_RESET_TARGET_ERROR }, 409);
+        }
+      }
+
+      const { error: updAuthErr } = await supabaseAdmin.auth.admin.updateUserById(targetAuthUserId, {
+        password: defaultTempPassword
+      });
+
+      if (updAuthErr) {
+        return jsonResponse(
+          { success: false, error: 'Não foi possível redefinir a senha no serviço de autenticação.' },
+          500
+        );
+      }
+
+      const now = new Date().toISOString();
+      const { data: updatedUser, error: updUserErr } = await supabaseAdmin
+        .from('usuarios')
+        .update({
+          force_password_change: true,
+          updated_by: callerUser.id,
+          updated_at: now
+        })
+        .eq('id', targetUser.id)
+        .eq('auth_user_id', targetAuthUserId)
+        .select('id, force_password_change')
+        .maybeSingle();
+
+      if (updUserErr || !updatedUser) {
+        return jsonResponse(
+          {
+            success: false,
+            error: 'Senha redefinida na autenticação, mas não foi possível atualizar o estado do cadastro.'
+          },
+          500
+        );
+      }
+
+      return jsonResponse({
+        success: true,
+        message: 'Senha redefinida para a senha temporária institucional. O usuário deverá definir nova senha no próximo acesso.'
       });
     }
 

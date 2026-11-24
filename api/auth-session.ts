@@ -78,7 +78,8 @@ export default async function handler(
       perfilProfissional: auth.perfilProfissional || '',
       setor: auth.setor || '',
       papel: auth.role,
-      situacao: auth.situacao || 'Ativo'
+      situacao: auth.situacao || 'Ativo',
+      forcePasswordChange: Boolean(auth.forcePasswordChange)
     }
   });
 }
