@@ -890,7 +890,8 @@ export function createAuthService(getDeps?: () => AuthServiceDeps) {
         if (authErr) {
           return {
             success: false,
-            error: authErr.message || 'Não foi possível definir a nova senha de recuperação.'
+            error:
+              'Não foi possível definir a nova senha. Verifique os requisitos de segurança ou solicite um novo link de recuperação.'
           };
         }
 
