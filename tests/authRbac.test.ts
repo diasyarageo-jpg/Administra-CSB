@@ -35,7 +35,8 @@ import { UserProfileMenu } from '../src/components/UserProfileMenu';
 import { resolveAuthorizedAppView } from '../src/utils/appRoutes';
 import {
   buildDefaultOwnResetPassword,
-  handleAdminManageUserRequest
+  handleAdminManageUserRequest,
+  MIN_PASSWORD_LENGTH as HANDLER_MIN_PASSWORD_LENGTH
 } from '../supabase/functions/admin-manage-user/handler.ts';
 
 const YARA_AUTH_UID = '52f8280d-cc4c-4aad-98f6-7446da912dd1';
@@ -3058,8 +3059,8 @@ test('Troca obrigatória no primeiro acesso: auth-session, authService, ForcePas
     else delete process.env.SUPABASE_SERVICE_ROLE_KEY;
   }
 
-  // 2. authService: política mínima temporária de 6 caracteres, policy do Auth, confirmação no servidor e re-validação
-  assert.equal(MIN_PASSWORD_LENGTH, 6);
+  // 2. authService: política mínima de 8 caracteres, policy do Auth, confirmação no servidor e re-validação
+  assert.equal(MIN_PASSWORD_LENGTH, 8);
   let forceFlagInDb = true;
   let rejectWeakPassword = true;
   let failServerComplete = false;
@@ -3153,26 +3154,26 @@ test('Troca obrigatória no primeiro acesso: auth-session, authService, ForcePas
   assert.equal(loginRes.success, true);
   assert.equal(loginRes.profile?.forcePasswordChange, true);
 
-  // Senhas com menos de 6 caracteres são recusadas antes de chamar Auth ou Edge Function
-  for (const shortPwd of ['Ab1!x', '12345']) {
+  // Senhas com menos de 8 caracteres (6 ou 7) são recusadas antes de chamar Auth ou Edge Function
+  for (const shortPwd of ['Ab1!xy', 'Ab1!xyz']) {
     const uiErr = validateForcePasswordChangeInput(shortPwd, shortPwd);
-    assert.match(String(uiErr), /6 caracteres/);
+    assert.match(String(uiErr), /8 caracteres/);
 
     const svcShortErr = await svc.completeFirstAccessPasswordChange(shortPwd, shortPwd);
     assert.equal(svcShortErr.success, false);
-    assert.match(String(svcShortErr.error), /6 caracteres/);
+    assert.match(String(svcShortErr.error), /8 caracteres/);
 
     const updShortErr = await svc.updatePassword(shortPwd);
     assert.equal(updShortErr.success, false);
-    assert.match(String(updShortErr.error), /6 caracteres/);
+    assert.match(String(updShortErr.error), /8 caracteres/);
   }
   assert.equal(updateUserCalls.length, 0);
   assert.equal(invokeCalls.length, 0);
   assert.equal(forceFlagInDb, true);
 
-  // Senha com 6 caracteres sem atender complexidade do Auth é recusada pelo Auth sem destravar
-  assert.equal(validateForcePasswordChangeInput('fraca1', 'fraca1'), null);
-  const policyFail = await svc.completeFirstAccessPasswordChange('fraca1', 'fraca1');
+  // Senha com 8 caracteres sem atender complexidade do Auth é recusada pelo Auth sem destravar
+  assert.equal(validateForcePasswordChangeInput('fraca123', 'fraca123'), null);
+  const policyFail = await svc.completeFirstAccessPasswordChange('fraca123', 'fraca123');
   assert.equal(policyFail.success, false);
   assert.match(String(policyFail.error), /uppercase/i);
   assert.equal(updateUserCalls.length, 1);
@@ -3182,15 +3183,15 @@ test('Troca obrigatória no primeiro acesso: auth-session, authService, ForcePas
   // Falha de confirmação no backend mantém bloqueio
   rejectWeakPassword = false;
   failServerComplete = true;
-  const serverFail = await svc.completeFirstAccessPasswordChange('Ab1!xy', 'Ab1!xy');
+  const serverFail = await svc.completeFirstAccessPasswordChange('Ab1!wxyz', 'Ab1!wxyz');
   assert.equal(serverFail.success, false);
   assert.equal(serverFail.passwordUpdatedInAuth, true);
   assert.equal(forceFlagInDb, true);
 
-  // Senha com 6 caracteres válida no Auth conclui e atualiza forcePasswordChange=false
+  // Senha com 8 caracteres válida no Auth conclui e atualiza forcePasswordChange=false
   failServerComplete = false;
-  assert.equal(validateForcePasswordChangeInput('Ab1!xy', 'Ab1!xy'), null);
-  const completeOk = await svc.completeFirstAccessPasswordChange('Ab1!xy', 'Ab1!xy');
+  assert.equal(validateForcePasswordChangeInput('Ab1!wxyz', 'Ab1!wxyz'), null);
+  const completeOk = await svc.completeFirstAccessPasswordChange('Ab1!wxyz', 'Ab1!wxyz');
   assert.equal(completeOk.success, true);
   assert.equal(completeOk.profile?.forcePasswordChange, false);
 
@@ -3217,7 +3218,7 @@ test('Troca obrigatória no primeiro acesso: auth-session, authService, ForcePas
   assert.equal(resetCall?.body?.usuarioId, 'usr_first_71');
   assert.equal(resetCall?.body?.authUserId, synthUid);
 
-  // 3. Renderização da tela ForcePasswordChangePage e inspeção estática da constante única e comentário temporário
+  // 3. Renderização da tela ForcePasswordChangePage e inspeção estática da constante única
   const html = renderToStaticMarkup(
     React.createElement(ForcePasswordChangePage, {
       profile: {
@@ -3239,7 +3240,7 @@ test('Troca obrigatória no primeiro acesso: auth-session, authService, ForcePas
     })
   );
   assert.ok(html.includes('Definição de Nova Senha'));
-  assert.ok(html.includes('mínimo de 6 caracteres'));
+  assert.ok(html.includes('mínimo de 8 caracteres'));
   assert.ok(html.includes('force-new-password-input'));
   assert.ok(html.includes('force-confirm-password-input'));
 
@@ -3250,7 +3251,6 @@ test('Troca obrigatória no primeiro acesso: auth-session, authService, ForcePas
   const loginModalSrc = fs.readFileSync(path.join(root, 'src/components/LoginModal.tsx'), 'utf8');
   const changeOwnModalSrc = fs.readFileSync(path.join(root, 'src/components/ChangeOwnPasswordModal.tsx'), 'utf8');
   const authServiceSrc = fs.readFileSync(path.join(root, 'src/services/authService.ts'), 'utf8');
-  const policySrc = fs.readFileSync(path.join(root, 'supabase/functions/_shared/passwordPolicy.ts'), 'utf8');
   const handlerSrc = fs.readFileSync(path.join(root, 'supabase/functions/admin-manage-user/handler.ts'), 'utf8');
   const envExample = fs.readFileSync(path.join(root, '.env.example'), 'utf8');
   const docSrc = fs.readFileSync(path.join(root, 'docs/EDGE_FUNCTION_ADMIN_MANAGE_USER.md'), 'utf8');
@@ -3262,8 +3262,12 @@ test('Troca obrigatória no primeiro acesso: auth-session, authService, ForcePas
   assert.equal(modalSrc.includes('DEFAULT_TEMP_PASSWORD'), false);
   assert.equal(envExample.includes('DEFAULT_TEMP_PASSWORD'), false);
   assert.equal(docSrc.includes('DEFAULT_TEMP_PASSWORD'), true);
-  assert.equal(policySrc.includes('TEMPORÁRIO: voltar para 8 quando o Auth for ajustado'), true);
-  assert.equal(authServiceSrc.includes('TEMPORÁRIO: voltar para 8 quando o Auth for ajustado'), true);
+  assert.equal(MIN_PASSWORD_LENGTH, 8);
+  assert.equal(HANDLER_MIN_PASSWORD_LENGTH, MIN_PASSWORD_LENGTH);
+  assert.equal(authServiceSrc.includes('supabase/functions'), false);
+  assert.equal(handlerSrc.includes('_shared'), false);
+  assert.equal(/TEMPOR[AÁ]RIO|voltar para 8/i.test(handlerSrc), false);
+  assert.equal(/TEMPOR[AÁ]RIO:|voltar para 8/i.test(authServiceSrc), false);
   assert.equal(handlerSrc.includes('MIN_PASSWORD_LENGTH'), true);
   for (const pwdSrc of [forcePageSrc, loginModalSrc, changeOwnModalSrc, authServiceSrc, handlerSrc]) {
     assert.equal(/length\s*<\s*[68]|minLength=\{?[68]\}?|[68]\s+caracteres/i.test(pwdSrc), false);
@@ -3355,34 +3359,34 @@ test('Autoatendimento de senha (changeOwnPassword, ChangeOwnPasswordModal) e vis
 
   const svc = createAuthService(() => ({ client: mockClient, configured: true }));
 
-  // 1. Validações de UI e serviço (< 6 caracteres, igual à atual, confirmação diferente)
-  assert.match(String(validateChangeOwnPasswordInput('SenhaAtual@1', 'Ab1!x', 'Ab1!x')), /6 caracteres/);
+  // 1. Validações de UI e serviço (< 8 caracteres, igual à atual, confirmação diferente)
+  assert.match(String(validateChangeOwnPasswordInput('SenhaAtual@1', 'Ab1!xyz', 'Ab1!xyz')), /8 caracteres/);
   assert.match(String(validateChangeOwnPasswordInput('SenhaAtual@1', 'SenhaAtual@1', 'SenhaAtual@1')), /diferente/);
-  assert.match(String(validateChangeOwnPasswordInput('SenhaAtual@1', 'Nova@6', 'Outra@6')), /não confere/);
-  assert.equal(validateChangeOwnPasswordInput('SenhaAtual@1', 'Nova@6', 'Nova@6'), null);
+  assert.match(String(validateChangeOwnPasswordInput('SenhaAtual@1', 'Nova@8ab', 'Outra@8b')), /não confere/);
+  assert.equal(validateChangeOwnPasswordInput('SenhaAtual@1', 'Nova@8ab', 'Nova@8ab'), null);
 
-  const shortRes = await svc.changeOwnPassword('SenhaAtual@1', '12345', '12345');
+  const shortRes = await svc.changeOwnPassword('SenhaAtual@1', '1234567', '1234567');
   assert.equal(shortRes.success, false);
-  assert.match(String(shortRes.error), /6 caracteres/);
+  assert.match(String(shortRes.error), /8 caracteres/);
   assert.equal(updateUserCalls.length, 0);
 
   // 2. Senha atual incorreta -> retorna exatamente "Senha atual incorreta" sem detalhes e não atualiza senha
-  const wrongCurrentRes = await svc.changeOwnPassword('Errada@1', 'Nova@6', 'Nova@6');
+  const wrongCurrentRes = await svc.changeOwnPassword('Errada@1', 'Nova@8ab', 'Nova@8ab');
   assert.equal(wrongCurrentRes.success, false);
   assert.equal(wrongCurrentRes.error, 'Senha atual incorreta');
   assert.equal(updateUserCalls.length, 0);
   assert.equal(completeInvokeCalls, 0);
 
   // 3. Troca bem-sucedida com forcePasswordChange=false não precisa chamar complete-password-change
-  const okNormalRes = await svc.changeOwnPassword('SenhaAtual@1', 'Nova@6', 'Nova@6');
+  const okNormalRes = await svc.changeOwnPassword('SenhaAtual@1', 'Nova@8ab', 'Nova@8ab');
   assert.equal(okNormalRes.success, true);
-  assert.deepEqual(updateUserCalls, ['Nova@6']);
+  assert.deepEqual(updateUserCalls, ['Nova@8ab']);
   assert.equal(completeInvokeCalls, 0);
   assert.equal(okNormalRes.profile?.papel, 'Analista');
 
   // 4. Troca bem-sucedida com forcePasswordChange=true chama complete-password-change e limpa flag
   forceFlag = true;
-  const okForceRes = await svc.changeOwnPassword('SenhaAtual@1', 'Nova2@6', 'Nova2@6');
+  const okForceRes = await svc.changeOwnPassword('SenhaAtual@1', 'Nova2@8x', 'Nova2@8x');
   assert.equal(okForceRes.success, true);
   assert.equal(completeInvokeCalls, 1);
   assert.equal(forceFlag, false);
@@ -3454,6 +3458,7 @@ test('Edge Function reset-own-password: JWT obrigatório, alvo estrito auth.uid(
   const synthOtherUid = '00000000-0000-4000-8000-000000000092';
   const synthNoMatUid = '00000000-0000-4000-8000-000000000093';
   const synthInactiveUid = '00000000-0000-4000-8000-000000000094';
+  const synthUnlinkedUid = '00000000-0000-4000-8000-000000000095';
 
   assert.equal(buildDefaultOwnResetPassword('12345', 'Géssika Almeida'), 'Csb@12345Gessika');
   assert.equal(buildDefaultOwnResetPassword('9876', '  joão da silva  '), 'Csb@9876Joao');
@@ -3535,6 +3540,7 @@ test('Edge Function reset-own-password: JWT obrigatório, alvo estrito auth.uid(
             if (jwt === 'jwt-gessika') return { data: { user: { id: synthAnalystUid } }, error: null };
             if (jwt === 'jwt-nomat') return { data: { user: { id: synthNoMatUid } }, error: null };
             if (jwt === 'jwt-inativo') return { data: { user: { id: synthInactiveUid } }, error: null };
+            if (jwt === 'jwt-sem-vinculo') return { data: { user: { id: synthUnlinkedUid } }, error: null };
             return { data: { user: null }, error: { message: 'Invalid JWT' } };
           },
           admin: {
@@ -3620,7 +3626,7 @@ test('Edge Function reset-own-password: JWT obrigatório, alvo estrito auth.uid(
   assert.equal(clientPwdRes.status, 400);
   assert.equal(authUpdateCalls.length, 0);
 
-  // 3. Sem matrícula (409) e usuário inativo (403) recebem erro genérico
+  // 3. Sem matrícula, sem vínculo e usuário inativo recebem o mesmo HTTP 403 e erro genérico idêntico
   const noMatRes = await handleAdminManageUserRequest(
     new Request('https://example.invalid/admin-manage-user', {
       method: 'POST',
@@ -3629,7 +3635,7 @@ test('Edge Function reset-own-password: JWT obrigatório, alvo estrito auth.uid(
     }),
     deps
   );
-  assert.equal(noMatRes.status, 409);
+  assert.equal(noMatRes.status, 403);
   const noMatText = await noMatRes.text();
   assert.equal(/matr[ií]cula/i.test(noMatText), false);
 
@@ -3642,6 +3648,21 @@ test('Edge Function reset-own-password: JWT obrigatório, alvo estrito auth.uid(
     deps
   );
   assert.equal(inactiveRes.status, 403);
+  const inactiveText = await inactiveRes.text();
+
+  const unlinkedRes = await handleAdminManageUserRequest(
+    new Request('https://example.invalid/admin-manage-user', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer jwt-sem-vinculo' },
+      body: JSON.stringify({ action: 'reset-own-password' })
+    }),
+    deps
+  );
+  assert.equal(unlinkedRes.status, 403);
+  const unlinkedText = await unlinkedRes.text();
+
+  assert.equal(noMatText, inactiveText);
+  assert.equal(noMatText, unlinkedText);
   assert.equal(authUpdateCalls.length, 0);
 
   // 4. Analista executa reset-own-password mesmo tentando apontar outro usuarioId/email ->
@@ -3760,6 +3781,203 @@ test('Edge Function reset-own-password: JWT obrigatório, alvo estrito auth.uid(
   assert.equal(clientResetRes.message, 'Senha redefinida. Entre com a senha padrão e crie uma nova.');
 });
 
+test('Edge Function reset-own-password: rate limit persistente em public.password_reset_rate_limits (3/hora, 429, falha fechada se consulta falhar)', async () => {
+  const synthUid = '00000000-0000-4000-8000-000000000097';
+  let currentNow = Date.UTC(2026, 10, 24, 18, 0, 0);
+  let failRateQuery = true;
+  const rateLimitRows: Array<{
+    id: string;
+    auth_user_id: string;
+    usuario_id: string;
+    action: string;
+    created_at: string;
+  }> = [];
+  const authUpdates: Array<{ id: string; password?: string }> = [];
+  const userRow = {
+    id: 'usr_persist_97',
+    auth_user_id: synthUid,
+    nome: 'Ana Paula',
+    matricula: '77777',
+    login: 'ana.paula',
+    email: 'ana@example.invalid',
+    papel: 'Analista',
+    situacao: 'Ativo',
+    status: 'Ativo',
+    force_password_change: false
+  };
+
+  const deps = {
+    envGet(name: string) {
+      if (name === 'SUPABASE_URL') return 'https://example.invalid';
+      if (name === 'SUPABASE_SERVICE_ROLE_KEY') return 'synth-service-role-key-97';
+      return undefined;
+    },
+    now: () => currentNow,
+    createSupabaseClient() {
+      return {
+        auth: {
+          async getUser(jwt: string) {
+            if (jwt === 'jwt-persist') return { data: { user: { id: synthUid } }, error: null };
+            return { data: { user: null }, error: { message: 'Invalid JWT' } };
+          },
+          admin: {
+            async updateUserById(id: string, patch: any) {
+              authUpdates.push({ id, password: patch?.password });
+              return { error: null };
+            }
+          }
+        },
+        from(table: string) {
+          if (table === 'historico_alteracoes_dados') {
+            return { async insert() { return { error: null }; } };
+          }
+          if (table === 'password_reset_rate_limits') {
+            return {
+              select() {
+                const eqFilters: Record<string, any> = {};
+                let gteCreatedAt = '';
+                const chain: any = {
+                  eq(col: string, val: any) {
+                    eqFilters[col] = val;
+                    return chain;
+                  },
+                  gte(col: string, val: string) {
+                    if (col === 'created_at') gteCreatedAt = val;
+                    return chain;
+                  },
+                  then(resolve: any) {
+                    if (failRateQuery) {
+                      resolve({ count: null, error: { message: 'relation error' } });
+                      return;
+                    }
+                    const matched = rateLimitRows.filter(
+                      row =>
+                        Object.entries(eqFilters).every(([k, v]) => (row as any)[k] === v) &&
+                        (!gteCreatedAt || row.created_at >= gteCreatedAt)
+                    );
+                    resolve({ count: matched.length, error: null });
+                  }
+                };
+                return chain;
+              },
+              async insert(row: any) {
+                rateLimitRows.push({
+                  id: `rl_${rateLimitRows.length + 1}`,
+                  auth_user_id: row.auth_user_id,
+                  usuario_id: row.usuario_id,
+                  action: row.action,
+                  created_at: row.created_at
+                });
+                return { error: null };
+              }
+            };
+          }
+          assert.equal(table, 'usuarios');
+          return {
+            select() {
+              const filters: Record<string, any> = {};
+              const chain: any = {
+                eq(col: string, val: any) {
+                  filters[col] = val;
+                  return chain;
+                },
+                async maybeSingle() {
+                  const ok = Object.entries(filters).every(([k, v]) => (userRow as any)[k] === v);
+                  return { data: ok ? { ...userRow } : null, error: null };
+                }
+              };
+              return chain;
+            },
+            update(payload: Record<string, any>) {
+              const filters: Record<string, any> = {};
+              const chain: any = {
+                eq(col: string, val: any) {
+                  filters[col] = val;
+                  return chain;
+                },
+                select() {
+                  return {
+                    async maybeSingle() {
+                      const ok = Object.entries(filters).every(([k, v]) => (userRow as any)[k] === v);
+                      if (!ok) return { data: null, error: null };
+                      Object.assign(userRow, payload);
+                      return { data: { ...userRow }, error: null };
+                    }
+                  };
+                }
+              };
+              return chain;
+            }
+          };
+        }
+      };
+    }
+  };
+
+  // 1. Falha fechada: erro ao consultar password_reset_rate_limits bloqueia o reset sem chamar updateUserById
+  const dbFailRes = await handleAdminManageUserRequest(
+    new Request('https://example.invalid/admin-manage-user', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer jwt-persist' },
+      body: JSON.stringify({ action: 'reset-own-password' })
+    }),
+    deps
+  );
+  assert.equal(dbFailRes.status, 500);
+  const dbFailJson = await dbFailRes.json();
+  assert.equal(dbFailJson.success, false);
+  assert.equal(authUpdates.length, 0);
+  assert.equal(rateLimitRows.length, 0);
+
+  // 2. Primeiros 3 resets bem-sucedidos gravam registros em password_reset_rate_limits
+  failRateQuery = false;
+  for (let i = 0; i < 3; i += 1) {
+    currentNow += 5 * 60 * 1000;
+    const res = await handleAdminManageUserRequest(
+      new Request('https://example.invalid/admin-manage-user', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json', Authorization: 'Bearer jwt-persist' },
+        body: JSON.stringify({ action: 'reset-own-password' })
+      }),
+      deps
+    );
+    assert.equal(res.status, 200);
+  }
+  assert.equal(authUpdates.length, 3);
+  assert.equal(rateLimitRows.length, 3);
+  assert.equal(rateLimitRows[0].auth_user_id, synthUid);
+  assert.equal(rateLimitRows[0].usuario_id, 'usr_persist_97');
+  assert.equal(rateLimitRows[0].action, 'reset-own-password');
+
+  // 3. 4ª tentativa dentro de 60 minutos retorna 429 genérico sem redefinir
+  currentNow += 60 * 1000;
+  const blockedRes = await handleAdminManageUserRequest(
+    new Request('https://example.invalid/admin-manage-user', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer jwt-persist' },
+      body: JSON.stringify({ action: 'reset-own-password' })
+    }),
+    deps
+  );
+  assert.equal(blockedRes.status, 429);
+  assert.equal(authUpdates.length, 3);
+  assert.equal(rateLimitRows.length, 3);
+
+  // 4. Após expirar a janela de 60 minutos desde os registros anteriores, volta a permitir
+  currentNow += 61 * 60 * 1000;
+  const afterWindowRes = await handleAdminManageUserRequest(
+    new Request('https://example.invalid/admin-manage-user', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: 'Bearer jwt-persist' },
+      body: JSON.stringify({ action: 'reset-own-password' })
+    }),
+    deps
+  );
+  assert.equal(afterWindowRes.status, 200);
+  assert.equal(authUpdates.length, 4);
+  assert.equal(rateLimitRows.length, 4);
+});
+
 test('Recuperação de senha por e-mail: redirectTo com origin dinâmico, detecção/limpeza do hash recovery e completeRecoveryPasswordChange', async () => {
   const synthUid = '00000000-0000-4000-8000-000000000099';
   const originalWindow = (globalThis as any).window;
@@ -3862,13 +4080,14 @@ test('Recuperação de senha por e-mail: redirectTo com origin dinâmico, detec�
     assert.equal(capturedRedirectTo, 'https://administra.sema.example.invalid');
     assert.equal(capturedRedirectTo.includes('localhost'), false);
 
-    const shortRecovery = await svc.completeRecoveryPasswordChange('12345', '12345');
+    const shortRecovery = await svc.completeRecoveryPasswordChange('1234567', '1234567');
     assert.equal(shortRecovery.success, false);
+    assert.match(String(shortRecovery.error), /8 caracteres/);
     assert.equal(updatedPasswords.length, 0);
 
-    const okRecovery = await svc.completeRecoveryPasswordChange('NovaRec@6', 'NovaRec@6');
+    const okRecovery = await svc.completeRecoveryPasswordChange('NovaRec@8', 'NovaRec@8');
     assert.equal(okRecovery.success, true);
-    assert.deepEqual(updatedPasswords, ['NovaRec@6']);
+    assert.deepEqual(updatedPasswords, ['NovaRec@8']);
     assert.equal(okRecovery.profile?.forcePasswordChange, false);
 
     const recPageHtml = renderToStaticMarkup(

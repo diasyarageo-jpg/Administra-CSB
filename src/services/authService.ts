@@ -4,8 +4,6 @@
  */
 
 import { supabase, isSupabaseConfigured, ensureSupabaseInitialized } from './supabaseClient';
-// TEMPORÁRIO: voltar para 8 quando o Auth for ajustado
-import { MIN_PASSWORD_LENGTH } from '../../supabase/functions/_shared/passwordPolicy.ts';
 import {
   ALLOWED_USER_ROLES,
   AuthErrorCode,
@@ -14,7 +12,7 @@ import {
   AccessRequestPayload
 } from '../types/auth';
 
-export { MIN_PASSWORD_LENGTH };
+export const MIN_PASSWORD_LENGTH = 8;
 
 export interface LoginResult {
   success: boolean;

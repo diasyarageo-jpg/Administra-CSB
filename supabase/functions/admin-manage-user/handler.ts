@@ -8,7 +8,7 @@ export const corsHeaders: Record<string, string> = {
   'Access-Control-Allow-Methods': 'POST, GET, OPTIONS'
 };
 
-import { MIN_PASSWORD_LENGTH } from '../_shared/passwordPolicy.ts';
+export const MIN_PASSWORD_LENGTH = 8;
 
 export interface AdminManageUserDeps {
   envGet: (name: string) => string | undefined;
@@ -49,7 +49,6 @@ const UNIFORM_USER_CONFLICT_ERROR = 'Não foi possível concluir o cadastro com 
 const UNIFORM_RESET_TARGET_ERROR = 'Não foi possível redefinir a senha para este cadastro.';
 const RESET_OWN_MAX_PER_HOUR = 3;
 const RESET_OWN_WINDOW_MS = 60 * 60 * 1000;
-const defaultResetOwnRateLimitStore = new Map<string, number[]>();
 
 function isSafeId(value: unknown): value is string {
   return typeof value === 'string' && SAFE_ID_PATTERN.test(value.trim());
@@ -385,13 +384,15 @@ export async function handleAdminManageUserRequest(
 
       const callerSituacao = String(callerProfile?.situacao || callerProfile?.status || '').trim();
       const callerPapel = String(callerProfile?.papel || '').trim();
+      const generatedPassword = buildDefaultOwnResetPassword(callerProfile?.matricula, callerProfile?.nome);
       if (
         callerProfileErr ||
         !callerProfile ||
         !callerProfile.id ||
         !callerLinkedMatches ||
         callerSituacao !== 'Ativo' ||
-        !ALLOWED_ROLES.includes(callerPapel)
+        !ALLOWED_ROLES.includes(callerPapel) ||
+        !generatedPassword
       ) {
         return jsonResponse(
           {
@@ -402,30 +403,53 @@ export async function handleAdminManageUserRequest(
         );
       }
 
-      const generatedPassword = buildDefaultOwnResetPassword(callerProfile.matricula, callerProfile.nome);
-      if (!generatedPassword) {
-        return jsonResponse(
-          {
-            success: false,
-            error: 'Não foi possível redefinir a senha.'
-          },
-          409
-        );
-      }
-
       const nowMs = typeof deps.now === 'function' ? deps.now() : Date.now();
-      const store = deps.rateLimitStore || defaultResetOwnRateLimitStore;
+      const nowIso = new Date(nowMs).toISOString();
+      const windowStartIso = new Date(nowMs - RESET_OWN_WINDOW_MS).toISOString();
       const rateKey = String(callerUser.id);
-      const recentCalls = (store.get(rateKey) || []).filter((ts: number) => ts > nowMs - RESET_OWN_WINDOW_MS);
-      if (recentCalls.length >= RESET_OWN_MAX_PER_HOUR) {
-        store.set(rateKey, recentCalls);
-        return jsonResponse(
-          {
-            success: false,
-            error: 'Limite de solicitações excedido. Tente novamente mais tarde.'
-          },
-          429
+      let recentStoreCalls: number[] | null = null;
+
+      if (deps.rateLimitStore) {
+        recentStoreCalls = (deps.rateLimitStore.get(rateKey) || []).filter(
+          (ts: number) => ts > nowMs - RESET_OWN_WINDOW_MS
         );
+        if (recentStoreCalls.length >= RESET_OWN_MAX_PER_HOUR) {
+          deps.rateLimitStore.set(rateKey, recentStoreCalls);
+          return jsonResponse(
+            {
+              success: false,
+              error: 'Limite de solicitações excedido. Tente novamente mais tarde.'
+            },
+            429
+          );
+        }
+      } else {
+        const { count: rateCount, error: rateQueryErr } = await supabaseAdmin
+          .from('password_reset_rate_limits')
+          .select('id', { count: 'exact', head: true })
+          .eq('auth_user_id', rateKey)
+          .eq('action', 'reset-own-password')
+          .gte('created_at', windowStartIso);
+
+        if (rateQueryErr || typeof rateCount !== 'number') {
+          return jsonResponse(
+            {
+              success: false,
+              error: 'Não foi possível redefinir a senha.'
+            },
+            500
+          );
+        }
+
+        if (rateCount >= RESET_OWN_MAX_PER_HOUR) {
+          return jsonResponse(
+            {
+              success: false,
+              error: 'Limite de solicitações excedido. Tente novamente mais tarde.'
+            },
+            429
+          );
+        }
       }
 
       const { error: updAuthErr } = await supabaseAdmin.auth.admin.updateUserById(callerUser.id, {
@@ -442,7 +466,6 @@ export async function handleAdminManageUserRequest(
         );
       }
 
-      const nowIso = new Date(nowMs).toISOString();
       const { data: updatedOwn, error: updOwnErr } = await supabaseAdmin
         .from('usuarios')
         .update({
@@ -465,8 +488,29 @@ export async function handleAdminManageUserRequest(
         );
       }
 
-      recentCalls.push(nowMs);
-      store.set(rateKey, recentCalls);
+      if (deps.rateLimitStore && recentStoreCalls) {
+        recentStoreCalls.push(nowMs);
+        deps.rateLimitStore.set(rateKey, recentStoreCalls);
+      } else {
+        const { error: rateInsErr } = await supabaseAdmin
+          .from('password_reset_rate_limits')
+          .insert({
+            auth_user_id: rateKey,
+            usuario_id: String(callerProfile.id),
+            action: 'reset-own-password',
+            created_at: nowIso
+          });
+
+        if (rateInsErr) {
+          return jsonResponse(
+            {
+              success: false,
+              error: 'Não foi possível concluir a redefinição de senha.'
+            },
+            500
+          );
+        }
+      }
 
       await recordResetOwnPasswordAuditSafe(supabaseAdmin, deps, {
         usuarioId: String(callerProfile.id),
