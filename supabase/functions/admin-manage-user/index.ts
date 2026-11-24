@@ -27,4 +27,5 @@ const productionDeps: ProductionAdminManageUserDeps = {
   createSupabaseClient: createClient
 };
 
+// Entrypoint único de produção: utiliza exclusivamente productionDeps (sem rateLimitStore nem now).
 serve((req: Request) => handleAdminManageUserRequest(req, productionDeps));
