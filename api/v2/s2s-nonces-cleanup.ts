@@ -105,6 +105,32 @@ function sendJson(res: VercelLikeResponse, statusCode: number, data: Record<stri
   res.end(JSON.stringify(data));
 }
 
+type CleanupRunStatus = 'success' | 'failure';
+type CleanupRunErrorCode = 'supabase_unavailable' | 'cleanup_rpc_failed' | 'unexpected_error';
+
+interface CleanupRunAuditRecord {
+  started_at: string;
+  finished_at: string;
+  status: CleanupRunStatus;
+  deleted_count: number;
+  batches_executed: number;
+  batch_limit: number;
+  duration_ms: number;
+  error_code: CleanupRunErrorCode | null;
+}
+
+async function recordCleanupRunAudit(
+  supabaseAdmin: NonNullable<ReturnType<typeof getServerSupabaseAdminClient>>,
+  record: CleanupRunAuditRecord
+): Promise<void> {
+  try {
+    const result = await supabaseAdmin.from('s2s_nonce_cleanup_runs').insert(record);
+    void result?.error;
+  } catch {
+    // Registro de auditoria é best-effort e nunca deve alterar ou mascarar a resposta da limpeza.
+  }
+}
+
 export default async function handler(
   req: VercelLikeRequest,
   res: VercelLikeResponse
@@ -140,6 +166,9 @@ export default async function handler(
     return;
   }
 
+  const startedAtMs = Date.now();
+  const startedAtIso = new Date(startedAtMs).toISOString();
+
   const supabaseAdmin = getServerSupabaseAdminClient();
   if (!supabaseAdmin) {
     sendJson(res, 503, {
@@ -152,6 +181,8 @@ export default async function handler(
 
   let totalDeleted = 0;
   let batchesExecuted = 0;
+  let runStatus: CleanupRunStatus = 'success';
+  let errorCode: CleanupRunErrorCode | null = null;
 
   try {
     for (let i = 0; i < MAX_BATCHES_PER_RUN; i++) {
@@ -160,12 +191,9 @@ export default async function handler(
       });
 
       if (error) {
-        sendJson(res, 503, {
-          success: false,
-          status: 'unavailable',
-          retryable: true
-        });
-        return;
+        runStatus = 'failure';
+        errorCode = 'cleanup_rpc_failed';
+        break;
       }
 
       const deletedInBatch =
@@ -178,19 +206,40 @@ export default async function handler(
         break;
       }
     }
+  } catch {
+    runStatus = 'failure';
+    errorCode = 'unexpected_error';
+  }
 
+  const finishedAtMs = Math.max(startedAtMs, Date.now());
+  const finishedAtIso = new Date(finishedAtMs).toISOString();
+  const durationMs = Math.max(0, Math.trunc(finishedAtMs - startedAtMs));
+
+  await recordCleanupRunAudit(supabaseAdmin, {
+    started_at: startedAtIso,
+    finished_at: finishedAtIso,
+    status: runStatus,
+    deleted_count: totalDeleted,
+    batches_executed: batchesExecuted,
+    batch_limit: limitCheck.limit,
+    duration_ms: durationMs,
+    error_code: runStatus === 'success' ? null : errorCode ?? 'unexpected_error'
+  });
+
+  if (runStatus === 'success') {
     sendJson(res, 200, {
       success: true,
       deletedCount: totalDeleted,
       batchesExecuted,
       batchLimit: limitCheck.limit,
-      executedAt: new Date().toISOString()
+      executedAt: finishedAtIso
     });
-  } catch {
-    sendJson(res, 503, {
-      success: false,
-      status: 'unavailable',
-      retryable: true
-    });
+    return;
   }
+
+  sendJson(res, 503, {
+    success: false,
+    status: 'unavailable',
+    retryable: true
+  });
 }

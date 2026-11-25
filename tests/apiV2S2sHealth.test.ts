@@ -185,6 +185,10 @@ function createMockSupabaseAdmin(options: {
   failHealthQuery?: boolean;
   failNonceRpc?: boolean;
   failCleanupRpc?: boolean;
+  failCleanupAfterBatches?: number;
+  throwOnCleanupRpc?: boolean;
+  failAuditInsert?: boolean;
+  throwAuditInsert?: boolean;
   nonceDelayMs?: number;
   initialNonces?: MockNonceEntry[];
 }) {
@@ -194,17 +198,55 @@ function createMockSupabaseAdmin(options: {
   }
   const rpcCalls: Array<{ fn: string; params: any }> = [];
   const queryCalls: string[] = [];
+  const cleanupAuditInserts: Array<Record<string, any>> = [];
+  let cleanupRpcCalls = 0;
+  let auditSelectCalled = false;
 
   const mock: any = {
     _reservedNonces: reservedNonces,
     _rpcCalls: rpcCalls,
     _queryCalls: queryCalls,
+    _cleanupAuditInserts: cleanupAuditInserts,
+    get _auditSelectCalled() {
+      return auditSelectCalled;
+    },
     from(table: string) {
       queryCalls.push(table);
       const filters: Record<string, any> = {};
       const builder: any = {
         select() {
+          if (table === 's2s_nonce_cleanup_runs') {
+            auditSelectCalled = true;
+          }
           return builder;
+        },
+        insert(payload: Record<string, any>) {
+          if (table === 's2s_nonce_cleanup_runs') {
+            cleanupAuditInserts.push(structuredClone(payload));
+          }
+          const runInsert = async () => {
+            if (table === 's2s_nonce_cleanup_runs') {
+              if (options.throwAuditInsert) {
+                throw new Error('postgres://audit-insert-exception password=secret-token');
+              }
+              if (options.failAuditInsert) {
+                return {
+                  data: null,
+                  error: { message: 'insert failed postgres://audit-internal-host:5432 secret' }
+                };
+              }
+            }
+            return { data: null, error: null };
+          };
+          const promise: any = runInsert();
+          promise.select = () => {
+            auditSelectCalled = true;
+            return Promise.resolve({
+              data: null,
+              error: { message: 'permission denied for SELECT on s2s_nonce_cleanup_runs' }
+            });
+          };
+          return promise;
         },
         eq(col: string, val: any) {
           filters[col] = val;
@@ -273,7 +315,15 @@ function createMockSupabaseAdmin(options: {
       }
 
       if (fn === 'limpar_nonces_s2s_expirados') {
-        if (options.failCleanupRpc) {
+        cleanupRpcCalls += 1;
+        if (options.throwOnCleanupRpc) {
+          throw new Error('unexpected rpc crash postgres://secret-host:5432');
+        }
+        if (
+          options.failCleanupRpc ||
+          (options.failCleanupAfterBatches !== undefined &&
+            cleanupRpcCalls > options.failCleanupAfterBatches)
+        ) {
           return { data: null, error: { message: 'cleanup failed postgres://internal' } };
         }
         const limit = Number(params?.p_limit || 5000);
@@ -1093,7 +1143,20 @@ test('5) Rotina de limpeza de nonces exige CRON_SECRET, rejeita ausência/erro/s
     );
     assert.equal(wrongMethodRes.getStatus(), 405);
 
-    // 4. CRON_SECRET correto com limit=2 executa em múltiplos lotes, remove somente os 3 vencidos e preserva os 2 ativos
+    // 3b. Parâmetro limit inválido -> 400 sem gravar execução
+    const badLimitRes = createMockRes();
+    await noncesCleanupHandler(
+      {
+        method: 'GET',
+        url: '/api/v2/s2s-nonces-cleanup?limit=abc',
+        headers: { authorization: `Bearer ${syntheticCronSecret}` }
+      } as any,
+      badLimitRes
+    );
+    assert.equal(badLimitRes.getStatus(), 400);
+    assert.equal(mockDb._cleanupAuditInserts.length, 0);
+
+    // 4. CRON_SECRET correto com limit=2 executa em múltiplos lotes, remove somente os 3 vencidos, preserva ativos e registra 1 resumo
     const okRes = createMockRes();
     await noncesCleanupHandler(
       {
@@ -1110,6 +1173,7 @@ test('5) Rotina de limpeza de nonces exige CRON_SECRET, rejeita ausência/erro/s
     assert.equal(body.batchesExecuted, 2);
     assert.equal(body.batchLimit, 2);
     assert.equal(JSON.stringify(body).includes(syntheticCronSecret), false);
+    assert.equal(JSON.stringify(body).includes(syntheticServiceRole), false);
 
     assert.equal(mockDb._reservedNonces.has(`notifica::${expiredJti1}`), false);
     assert.equal(mockDb._reservedNonces.has(`classifica::${expiredJti2}`), false);
@@ -1117,13 +1181,38 @@ test('5) Rotina de limpeza de nonces exige CRON_SECRET, rejeita ausência/erro/s
     assert.equal(mockDb._reservedNonces.has(`notifica::${activeJti1}`), true);
     assert.equal(mockDb._reservedNonces.has(`fiscaliza::${activeJti2}`), true);
 
-    // 5. Falha de banco retorna 503 sem vazar detalhes ou segredo
-    setTestSupabaseAdminForSemaAudit(
-      createMockSupabaseAdmin({
-        clients: [],
-        failCleanupRpc: true
-      })
-    );
+    assert.equal(mockDb._cleanupAuditInserts.length, 1);
+    assert.equal(mockDb._auditSelectCalled, false);
+    const successAudit = mockDb._cleanupAuditInserts[0];
+    assert.deepEqual(Object.keys(successAudit).sort(), [
+      'batch_limit',
+      'batches_executed',
+      'deleted_count',
+      'duration_ms',
+      'error_code',
+      'finished_at',
+      'started_at',
+      'status'
+    ]);
+    assert.equal(successAudit.status, 'success');
+    assert.equal(successAudit.error_code, null);
+    assert.equal(successAudit.deleted_count, 3);
+    assert.equal(successAudit.batches_executed, 2);
+    assert.equal(successAudit.batch_limit, 2);
+    assert.equal(Number.isInteger(successAudit.duration_ms), true);
+    assert.equal(successAudit.duration_ms >= 0, true);
+    assert.equal(Number.isNaN(Date.parse(successAudit.started_at)), false);
+    assert.equal(Number.isNaN(Date.parse(successAudit.finished_at)), false);
+    assert.equal(Date.parse(successAudit.finished_at) >= Date.parse(successAudit.started_at), true);
+    assert.equal(JSON.stringify(successAudit).includes(syntheticCronSecret), false);
+    assert.equal(JSON.stringify(successAudit).includes(syntheticServiceRole), false);
+
+    // 5. Falha de banco retorna 503 sem vazar detalhes ou segredo e grava erro genérico 'cleanup_rpc_failed'
+    const failDb = createMockSupabaseAdmin({
+      clients: [],
+      failCleanupRpc: true
+    });
+    setTestSupabaseAdminForSemaAudit(failDb);
     const failRes = createMockRes();
     await noncesCleanupHandler(
       {
@@ -1140,6 +1229,114 @@ test('5) Rotina de limpeza de nonces exige CRON_SECRET, rejeita ausência/erro/s
       retryable: true
     });
     assert.equal(JSON.stringify(failRes.getBody()).includes(syntheticCronSecret), false);
+    assert.equal(failDb._cleanupAuditInserts.length, 1);
+    assert.equal(failDb._auditSelectCalled, false);
+    assert.equal(failDb._cleanupAuditInserts[0].status, 'failure');
+    assert.equal(failDb._cleanupAuditInserts[0].error_code, 'cleanup_rpc_failed');
+    assert.equal(failDb._cleanupAuditInserts[0].deleted_count, 0);
+    assert.equal(failDb._cleanupAuditInserts[0].batches_executed, 0);
+    assert.equal(failDb._cleanupAuditInserts[0].batch_limit, 5000);
+    assert.equal(JSON.stringify(failDb._cleanupAuditInserts[0]).includes('postgres://'), false);
+    assert.equal(JSON.stringify(failDb._cleanupAuditInserts[0]).includes(syntheticCronSecret), false);
+    assert.equal(JSON.stringify(failDb._cleanupAuditInserts[0]).includes(syntheticServiceRole), false);
+
+    // 6. Falha parcial após 1 lote preserva deleted_count e batches_executed acumulados
+    const partialFailDb = createMockSupabaseAdmin({
+      clients: [],
+      failCleanupAfterBatches: 1,
+      initialNonces: [
+        { sistema: 'notifica', jti: expiredJti1, expiresAtMs: now - 120_000, consumidoEmIso: new Date(now - 720_000).toISOString() },
+        { sistema: 'classifica', jti: expiredJti2, expiresAtMs: now - 5_000, consumidoEmIso: new Date(now - 605_000).toISOString() },
+        { sistema: 'fiscaliza', jti: expiredJti3, expiresAtMs: now - 1_000, consumidoEmIso: new Date(now - 601_000).toISOString() }
+      ]
+    });
+    setTestSupabaseAdminForSemaAudit(partialFailDb);
+    const partialFailRes = createMockRes();
+    await noncesCleanupHandler(
+      {
+        method: 'POST',
+        url: '/api/v2/s2s-nonces-cleanup?limit=2',
+        headers: { authorization: `Bearer ${syntheticCronSecret}` }
+      } as any,
+      partialFailRes
+    );
+    assert.equal(partialFailRes.getStatus(), 503);
+    assert.equal(partialFailDb._cleanupAuditInserts.length, 1);
+    assert.equal(partialFailDb._cleanupAuditInserts[0].status, 'failure');
+    assert.equal(partialFailDb._cleanupAuditInserts[0].error_code, 'cleanup_rpc_failed');
+    assert.equal(partialFailDb._cleanupAuditInserts[0].deleted_count, 2);
+    assert.equal(partialFailDb._cleanupAuditInserts[0].batches_executed, 1);
+    assert.equal(partialFailDb._cleanupAuditInserts[0].batch_limit, 2);
+
+    // 7. Exceção inesperada grava 'unexpected_error' e mantém 503 sem vazar erro bruto
+    const throwRpcDb = createMockSupabaseAdmin({
+      clients: [],
+      throwOnCleanupRpc: true
+    });
+    setTestSupabaseAdminForSemaAudit(throwRpcDb);
+    const throwRpcRes = createMockRes();
+    await noncesCleanupHandler(
+      {
+        method: 'GET',
+        url: '/api/v2/s2s-nonces-cleanup',
+        headers: { authorization: `Bearer ${syntheticCronSecret}` }
+      } as any,
+      throwRpcRes
+    );
+    assert.equal(throwRpcRes.getStatus(), 503);
+    assert.equal(throwRpcDb._cleanupAuditInserts.length, 1);
+    assert.equal(throwRpcDb._cleanupAuditInserts[0].status, 'failure');
+    assert.equal(throwRpcDb._cleanupAuditInserts[0].error_code, 'unexpected_error');
+    assert.equal(JSON.stringify(throwRpcDb._cleanupAuditInserts[0]).includes('postgres://'), false);
+    assert.equal(JSON.stringify(throwRpcRes.getBody()).includes('postgres://'), false);
+
+    // 8. Falha (error ou exceção) ao inserir resumo de auditoria não altera resposta 200 ou 503
+    const auditErrorDb = createMockSupabaseAdmin({
+      clients: [],
+      failAuditInsert: true,
+      initialNonces: [
+        { sistema: 'notifica', jti: expiredJti1, expiresAtMs: now - 60_000, consumidoEmIso: new Date(now - 600_000).toISOString() }
+      ]
+    });
+    setTestSupabaseAdminForSemaAudit(auditErrorDb);
+    const auditErrorOkRes = createMockRes();
+    await noncesCleanupHandler(
+      {
+        method: 'GET',
+        url: '/api/v2/s2s-nonces-cleanup?limit=10',
+        headers: { authorization: `Bearer ${syntheticCronSecret}` }
+      } as any,
+      auditErrorOkRes
+    );
+    assert.equal(auditErrorOkRes.getStatus(), 200);
+    assert.equal(auditErrorOkRes.getBody().success, true);
+    assert.equal(auditErrorOkRes.getBody().deletedCount, 1);
+    assert.equal(auditErrorDb._cleanupAuditInserts.length, 1);
+    assert.equal(JSON.stringify(auditErrorOkRes.getBody()).includes('postgres://'), false);
+
+    const auditThrowDb = createMockSupabaseAdmin({
+      clients: [],
+      failCleanupRpc: true,
+      throwAuditInsert: true
+    });
+    setTestSupabaseAdminForSemaAudit(auditThrowDb);
+    const auditThrowFailRes = createMockRes();
+    await noncesCleanupHandler(
+      {
+        method: 'GET',
+        url: '/api/v2/s2s-nonces-cleanup',
+        headers: { authorization: `Bearer ${syntheticCronSecret}` }
+      } as any,
+      auditThrowFailRes
+    );
+    assert.equal(auditThrowFailRes.getStatus(), 503);
+    assert.deepEqual(auditThrowFailRes.getBody(), {
+      success: false,
+      status: 'unavailable',
+      retryable: true
+    });
+    assert.equal(auditThrowDb._cleanupAuditInserts.length, 1);
+    assert.equal(JSON.stringify(auditThrowFailRes.getBody()).includes('secret-token'), false);
   } finally {
     setTestSupabaseAdminForSemaAudit(null);
     if (prevCron === undefined) delete process.env.CRON_SECRET;
