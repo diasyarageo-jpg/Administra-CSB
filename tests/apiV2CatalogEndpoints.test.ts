@@ -1101,9 +1101,11 @@ test('Falha ou indisponibilidade do banco central retorna 503 retryable:true e n
 
 function createSignedRequestWithCustomSignedUrl(opts: {
   requestUrl: string;
+  originalUrl?: string;
   signedUrl: string;
   kid: string;
   privateKey: crypto.KeyObject;
+  query?: Record<string, string | string[] | undefined>;
 }) {
   const method = 'GET';
   const rawBody = Buffer.alloc(0);
@@ -1135,6 +1137,12 @@ function createSignedRequestWithCustomSignedUrl(opts: {
   const stream = new PassThrough() as any;
   stream.method = method;
   stream.url = opts.requestUrl;
+  if (opts.originalUrl !== undefined) {
+    stream.originalUrl = opts.originalUrl;
+  }
+  if (opts.query !== undefined) {
+    stream.query = opts.query;
+  }
   stream.headers = {
     'x-s2s-key-id': opts.kid,
     'x-s2s-timestamp': timestamp,
@@ -1142,25 +1150,38 @@ function createSignedRequestWithCustomSignedUrl(opts: {
     'x-s2s-body-sha256': bodySha,
     'x-s2s-signature': signature
   };
+  Object.defineProperty(stream, 'body', {
+    configurable: true,
+    enumerable: true,
+    get() {
+      throw new Error('req.body nunca deve ser acessado em rotas S2S');
+    }
+  });
   stream.end(rawBody);
   return stream;
 }
 
-test('Diagnóstico temporário em GET /api/v2/barragens diferencia assinatura válida sem único resource=barragens de signature_invalid comum sem autenticar', async () => {
+test('Rota dinâmica trata resource interno da Vercel fora da assinatura mantendo limit, cursor e rejeições', async () => {
   const validKeys = createKeyPair();
   const wrongKeys = createKeyPair();
   const mockDb = createCatalogMockSupabase({
     clients: [
       {
         sistema: 'classifica',
-        kid: 'classifica-diag-kid',
+        kid: 'classifica-vercel-route-kid',
         public_key_pem: validKeys.publicKeyPem,
         escopos: ['barragens:read', 'empreendedores:read'],
         ativo: true
       }
     ],
-    barragens: [{ id: 'bar_001', nome: 'Barragem 1' }],
-    empreendedores: [{ id: 'emp_001', nome: 'Empreendedor 1' }]
+    barragens: [
+      { id: 'bar_001', nome: 'Barragem 1', uf: 'MT', municipio: 'Cuiabá', situacao: 'Ativa' },
+      { id: 'bar_002', nome: 'Barragem 2', uf: 'MT', municipio: 'Sinop', situacao: 'Ativa' }
+    ],
+    empreendedores: [
+      { id: 'emp_001', nome: 'Empreendedor 1', uf: 'MT', situacao: 'Ativo' },
+      { id: 'emp_002', nome: 'Empreendedor 2', uf: 'MT', situacao: 'Ativo' }
+    ]
   });
   setTestSupabaseAdminForSemaAudit(mockDb);
 
@@ -1171,71 +1192,208 @@ test('Diagnóstico temporário em GET /api/v2/barragens diferencia assinatura v�
   };
 
   try {
-    // 1. Positivo diagnóstico: request tem resource=barragens único, assinatura válida sem ele -> ainda retorna 401 e registra motivo fixo diagnóstico
-    const candidateRes = createMockRes();
+    // 1. GET /api/v2/barragens?limit=1 com resource=barragens injetado pela Vercel autentica com sucesso (200)
+    const barLimit1Res = createMockRes();
     await resourceHandler(
       createSignedRequestWithCustomSignedUrl({
         requestUrl: '/api/v2/barragens?limit=1&resource=barragens',
+        originalUrl: '/api/v2/barragens?limit=1&resource=barragens',
         signedUrl: '/api/v2/barragens?limit=1',
-        kid: 'classifica-diag-kid',
+        kid: 'classifica-vercel-route-kid',
+        privateKey: validKeys.privateKey,
+        query: { limit: '1', resource: 'barragens' }
+      }),
+      barLimit1Res
+    );
+    assert.equal(barLimit1Res.getStatus(), 200);
+    assertSecurityHeaders(barLimit1Res);
+    const page1Body = barLimit1Res.getBody();
+    assert.equal(page1Body.success, true);
+    assert.equal(page1Body.apiVersion, '2.0');
+    assert.equal(page1Body.maskingPolicy, 'masked');
+    assert.equal(page1Body.items.length, 1);
+    assert.equal(page1Body.items[0].id, 'bar_001');
+    assert.equal(page1Body.pagination.limit, 1);
+    assert.equal(page1Body.pagination.hasMore, true);
+    assert.ok(typeof page1Body.pagination.nextCursor === 'string' && page1Body.pagination.nextCursor.length > 0);
+
+    // 2. Paginação com cursor + limit=1 e resource=barragens injetado antes de cursor/limit preserva ambos
+    const cursor = page1Body.pagination.nextCursor;
+    const barPage2Res = createMockRes();
+    await resourceHandler(
+      createSignedRequestWithCustomSignedUrl({
+        requestUrl: `/api/v2/barragens?resource=barragens&limit=1&cursor=${encodeURIComponent(cursor)}`,
+        signedUrl: `/api/v2/barragens?cursor=${encodeURIComponent(cursor)}&limit=1`,
+        kid: 'classifica-vercel-route-kid',
         privateKey: validKeys.privateKey
       }),
-      candidateRes
+      barPage2Res
     );
-    assert.equal(candidateRes.getStatus(), 401);
-    assertSecurityHeaders(candidateRes);
-    assert.equal(
-      warnMessages[warnMessages.length - 1],
-      '[s2s-v2] auth_denied reason=signature_invalid_resource_query_candidate_valid sistema=classifica'
-    );
+    assert.equal(barPage2Res.getStatus(), 200);
+    const page2Body = barPage2Res.getBody();
+    assert.equal(page2Body.items.length, 1);
+    assert.equal(page2Body.items[0].id, 'bar_002');
+    assert.equal(page2Body.pagination.hasMore, false);
+    assert.equal(page2Body.pagination.nextCursor, null);
 
-    // 2. Negativos: mantém reason=signature_invalid (chave errada, resource duplicado, resource diferente da rota, e outra rota)
-    const negativeCases: Array<{ requestUrl: string; signedUrl: string; privateKey: crypto.KeyObject }> = [
+    // 3. Query sem parâmetros públicos com apenas resource interno injetado (barragens e empreendedores) -> 200
+    const barNoPublicQueryRes = createMockRes();
+    await resourceHandler(
+      createSignedRequestWithCustomSignedUrl({
+        requestUrl: '/api/v2/barragens?resource=barragens',
+        signedUrl: '/api/v2/barragens',
+        kid: 'classifica-vercel-route-kid',
+        privateKey: validKeys.privateKey
+      }),
+      barNoPublicQueryRes
+    );
+    assert.equal(barNoPublicQueryRes.getStatus(), 200);
+    assert.equal(barNoPublicQueryRes.getBody().pagination.limit, 100);
+    assert.equal(barNoPublicQueryRes.getBody().items.length, 2);
+
+    const empInjectedRes = createMockRes();
+    await resourceHandler(
+      createSignedRequestWithCustomSignedUrl({
+        requestUrl: '/api/v2/empreendedores?limit=1&resource=empreendedores',
+        signedUrl: '/api/v2/empreendedores?limit=1',
+        kid: 'classifica-vercel-route-kid',
+        privateKey: validKeys.privateKey
+      }),
+      empInjectedRes
+    );
+    assert.equal(empInjectedRes.getStatus(), 200);
+    assert.equal(empInjectedRes.getBody().pagination.limit, 1);
+    assert.equal(empInjectedRes.getBody().items.length, 1);
+    assert.equal(empInjectedRes.getBody().items[0].id, 'emp_001');
+
+    const queriesBeforeRejections = mockDb._tableQueries.length;
+    assert.equal(queriesBeforeRejections, 4);
+
+    // 4. Parâmetros públicos não suportados ou sintaxe inválida com resource interno injetado -> 400
+    for (const badCase of [
       {
-        requestUrl: '/api/v2/barragens?limit=1&resource=barragens',
+        requestUrl: '/api/v2/barragens?limit=1&foo=bar&resource=barragens',
+        signedUrl: '/api/v2/barragens?limit=1&foo=bar'
+      },
+      {
+        requestUrl: '/api/v2/barragens?limit=1&situacao=Ativa&resource=barragens',
+        signedUrl: '/api/v2/barragens?limit=1&situacao=Ativa'
+      },
+      {
+        requestUrl: '/api/v2/barragens?limit=1&&resource=barragens',
+        signedUrl: '/api/v2/barragens?limit=1'
+      },
+      {
+        requestUrl: '/api/v2/barragens?limit&resource=barragens',
+        signedUrl: '/api/v2/barragens?limit'
+      }
+    ]) {
+      const res = createMockRes();
+      await resourceHandler(
+        createSignedRequestWithCustomSignedUrl({
+          requestUrl: badCase.requestUrl,
+          signedUrl: badCase.signedUrl,
+          kid: 'classifica-vercel-route-kid',
+          privateKey: validKeys.privateKey
+        }),
+        res
+      );
+      assert.equal(res.getStatus(), 400, `Esperava 400 para ${badCase.requestUrl}`);
+      assertSecurityHeaders(res);
+      assert.equal(res.getBody().success, false);
+    }
+
+    // 5. Tentativa de resource incompatível, duplicado, vazio ou codificado continua rejeitada (401/400)
+    const rejectedResourceCases: Array<{
+      requestUrl: string;
+      signedUrl: string;
+      expectedStatus: number;
+      privateKey?: crypto.KeyObject;
+    }> = [
+      {
+        requestUrl: '/api/v2/barragens?limit=1&resource=empreendedores',
         signedUrl: '/api/v2/barragens?limit=1',
-        privateKey: wrongKeys.privateKey
+        expectedStatus: 401
+      },
+      {
+        requestUrl: '/api/v2/barragens?limit=1&resource=empreendedores',
+        signedUrl: '/api/v2/barragens?limit=1&resource=empreendedores',
+        expectedStatus: 400
+      },
+      {
+        requestUrl: '/api/v2/barragens?limit=1&resource=empreendedores&resource=barragens',
+        signedUrl: '/api/v2/barragens?limit=1',
+        expectedStatus: 401
+      },
+      {
+        requestUrl: '/api/v2/barragens?limit=1&resource=empreendedores&resource=barragens',
+        signedUrl: '/api/v2/barragens?limit=1&resource=empreendedores',
+        expectedStatus: 401
+      },
+      {
+        requestUrl: '/api/v2/barragens?limit=1&resource=empreendedores&resource=barragens',
+        signedUrl: '/api/v2/barragens?limit=1&resource=empreendedores&resource=barragens',
+        expectedStatus: 400
       },
       {
         requestUrl: '/api/v2/barragens?limit=1&resource=barragens&resource=barragens',
         signedUrl: '/api/v2/barragens?limit=1',
-        privateKey: validKeys.privateKey
+        expectedStatus: 401
       },
       {
-        requestUrl: '/api/v2/barragens?limit=1&resource=empreendedores',
+        requestUrl: '/api/v2/barragens?limit=1&resource=barragens&resource=barragens',
+        signedUrl: '/api/v2/barragens?limit=1&resource=barragens&resource=barragens',
+        expectedStatus: 400
+      },
+      {
+        requestUrl: '/api/v2/barragens?limit=1&%72esource=barragens',
         signedUrl: '/api/v2/barragens?limit=1',
-        privateKey: validKeys.privateKey
+        expectedStatus: 401
       },
       {
-        requestUrl: '/api/v2/empreendedores?limit=1&resource=empreendedores',
-        signedUrl: '/api/v2/empreendedores?limit=1',
-        privateKey: validKeys.privateKey
+        requestUrl: '/api/v2/barragens?limit=1&resource=',
+        signedUrl: '/api/v2/barragens?limit=1',
+        expectedStatus: 401
+      },
+      {
+        requestUrl: '/api/v2/barragens?limit=1&resource=barragens',
+        signedUrl: '/api/v2/barragens?limit=1',
+        expectedStatus: 401,
+        privateKey: wrongKeys.privateKey
       }
     ];
 
-    for (const testCase of negativeCases) {
+    for (const testCase of rejectedResourceCases) {
       const res = createMockRes();
       await resourceHandler(
         createSignedRequestWithCustomSignedUrl({
           requestUrl: testCase.requestUrl,
           signedUrl: testCase.signedUrl,
-          kid: 'classifica-diag-kid',
-          privateKey: testCase.privateKey
+          kid: 'classifica-vercel-route-kid',
+          privateKey: testCase.privateKey ?? validKeys.privateKey
         }),
         res
       );
-      assert.equal(res.getStatus(), 401);
       assert.equal(
-        warnMessages[warnMessages.length - 1],
-        '[s2s-v2] auth_denied reason=signature_invalid sistema=classifica'
+        res.getStatus(),
+        testCase.expectedStatus,
+        `Esperava ${testCase.expectedStatus} para ${testCase.requestUrl}`
       );
+      assertSecurityHeaders(res);
+      assert.equal(res.getBody().success, false);
     }
 
-    // Nenhuma entrada de log deve conter URL, query ou dados de cabeçalho/chave
+    // Diagnóstico temporário removido: log de assinatura inválida usa sempre reason=signature_invalid
+    assert.equal(
+      warnMessages[warnMessages.length - 1],
+      '[s2s-v2] auth_denied reason=signature_invalid sistema=classifica'
+    );
     for (const msg of warnMessages) {
-      assert.doesNotMatch(msg, /limit=1|barragens\?|classifica-diag-kid/);
+      assert.doesNotMatch(msg, /candidate_valid|limit=1|barragens\?|classifica-vercel-route-kid/);
     }
-    assert.equal(mockDb._tableQueries.length, 0);
+
+    // Nenhuma consulta extra ao catálogo foi executada nos casos rejeitados
+    assert.equal(mockDb._tableQueries.length, queriesBeforeRejections);
   } finally {
     console.warn = origWarn;
     setTestSupabaseAdminForSemaAudit(null);

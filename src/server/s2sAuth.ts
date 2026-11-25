@@ -66,7 +66,6 @@ export interface AuthenticateS2sOptions {
   maxBodyBytes?: number;
   bodyTimeoutMs?: number;
   nowMs?: () => number;
-  diagnosticRouteResource?: 'barragens';
 }
 
 export type AuthenticateS2sResult =
@@ -377,22 +376,6 @@ export function buildS2sCanonicalMessage(parts: S2sCanonicalParts): string {
     `${parts.consumerUserId}|${parts.consumerRole}`
   ];
   return lines.join('\n');
-}
-
-function stripSingleCanonicalResourceParam(
-  canonicalQuery: string,
-  routeResource: string
-): string | null {
-  if (!canonicalQuery || !routeResource) return null;
-  const parts = canonicalQuery.split('&').filter(Boolean);
-  const resourcePairs = parts.filter(part => part.startsWith('resource='));
-  if (
-    resourcePairs.length !== 1 ||
-    resourcePairs[0] !== `resource=${rfc3986Encode(routeResource)}`
-  ) {
-    return null;
-  }
-  return parts.filter(part => part !== resourcePairs[0]).join('&');
 }
 
 function decodeEd25519Signature(rawSignature: string): Buffer | null {
@@ -806,44 +789,7 @@ export async function authenticateS2sRequest(
   }
 
   if (!signatureValid) {
-    let failureReason = 'signature_invalid';
-    if (
-      options.diagnosticRouteResource === 'barragens' &&
-      method === 'GET' &&
-      normalizedPath === '/api/v2/barragens'
-    ) {
-      const candidateQuery = stripSingleCanonicalResourceParam(canonicalQuery, 'barragens');
-      if (candidateQuery !== null) {
-        const candidateMessage = buildS2sCanonicalMessage({
-          method,
-          normalizedPath,
-          canonicalQuery: candidateQuery,
-          contentTypeNormalized,
-          bodySha256HexLower: actualBodyShaHex,
-          kid: kidHdr.value,
-          timestamp: tsHdr.value,
-          jti: jtiHdr.value,
-          consumerUserId: consumerUserIdHdr.value,
-          consumerRole: consumerRoleHdr.value
-        });
-        let candidateValid = false;
-        try {
-          candidateValid = crypto.verify(
-            null,
-            Buffer.from(candidateMessage, 'utf8'),
-            publicKey,
-            signatureBuf
-          );
-        } catch {
-          candidateValid = false;
-        }
-        if (candidateValid) {
-          failureReason = 'signature_invalid_resource_query_candidate_valid';
-        }
-      }
-    }
-
-    safeLogS2sFailure(failureReason, clientSistemaRaw);
+    safeLogS2sFailure('signature_invalid', clientSistemaRaw);
     return {
       ok: false,
       httpStatus: 401,
