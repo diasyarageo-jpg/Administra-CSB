@@ -1098,3 +1098,146 @@ test('Falha ou indisponibilidade do banco central retorna 503 retryable:true e n
     else process.env.SUPABASE_SERVICE_ROLE_KEY = prevKey;
   }
 });
+
+function createSignedRequestWithCustomSignedUrl(opts: {
+  requestUrl: string;
+  signedUrl: string;
+  kid: string;
+  privateKey: crypto.KeyObject;
+}) {
+  const method = 'GET';
+  const rawBody = Buffer.alloc(0);
+  const timestamp = String(Math.floor(Date.now() / 1000));
+  const jti = crypto.randomUUID();
+  const bodySha = sha256BodyHexLower(rawBody);
+
+  const qIdx = opts.signedUrl.indexOf('?');
+  const rawPath = qIdx === -1 ? opts.signedUrl : opts.signedUrl.slice(0, qIdx);
+  const rawQuery = qIdx === -1 ? '' : opts.signedUrl.slice(qIdx + 1);
+
+  const canonicalMessage = buildS2sCanonicalMessage({
+    method,
+    normalizedPath: normalizePublicPath(rawPath),
+    canonicalQuery: canonicalizeQueryString(rawQuery),
+    contentTypeNormalized: normalizeContentType(''),
+    bodySha256HexLower: bodySha,
+    kid: opts.kid,
+    timestamp,
+    jti,
+    consumerUserId: '',
+    consumerRole: ''
+  });
+
+  const signature = crypto
+    .sign(null, Buffer.from(canonicalMessage, 'utf8'), opts.privateKey)
+    .toString('base64url');
+
+  const stream = new PassThrough() as any;
+  stream.method = method;
+  stream.url = opts.requestUrl;
+  stream.headers = {
+    'x-s2s-key-id': opts.kid,
+    'x-s2s-timestamp': timestamp,
+    'x-s2s-jti': jti,
+    'x-s2s-body-sha256': bodySha,
+    'x-s2s-signature': signature
+  };
+  stream.end(rawBody);
+  return stream;
+}
+
+test('Diagnóstico temporário em GET /api/v2/barragens diferencia assinatura válida sem único resource=barragens de signature_invalid comum sem autenticar', async () => {
+  const validKeys = createKeyPair();
+  const wrongKeys = createKeyPair();
+  const mockDb = createCatalogMockSupabase({
+    clients: [
+      {
+        sistema: 'classifica',
+        kid: 'classifica-diag-kid',
+        public_key_pem: validKeys.publicKeyPem,
+        escopos: ['barragens:read', 'empreendedores:read'],
+        ativo: true
+      }
+    ],
+    barragens: [{ id: 'bar_001', nome: 'Barragem 1' }],
+    empreendedores: [{ id: 'emp_001', nome: 'Empreendedor 1' }]
+  });
+  setTestSupabaseAdminForSemaAudit(mockDb);
+
+  const warnMessages: string[] = [];
+  const origWarn = console.warn;
+  console.warn = (...args: any[]) => {
+    warnMessages.push(args.map(a => String(a)).join(' '));
+  };
+
+  try {
+    // 1. Positivo diagnóstico: request tem resource=barragens único, assinatura válida sem ele -> ainda retorna 401 e registra motivo fixo diagnóstico
+    const candidateRes = createMockRes();
+    await resourceHandler(
+      createSignedRequestWithCustomSignedUrl({
+        requestUrl: '/api/v2/barragens?limit=1&resource=barragens',
+        signedUrl: '/api/v2/barragens?limit=1',
+        kid: 'classifica-diag-kid',
+        privateKey: validKeys.privateKey
+      }),
+      candidateRes
+    );
+    assert.equal(candidateRes.getStatus(), 401);
+    assertSecurityHeaders(candidateRes);
+    assert.equal(
+      warnMessages[warnMessages.length - 1],
+      '[s2s-v2] auth_denied reason=signature_invalid_resource_query_candidate_valid sistema=classifica'
+    );
+
+    // 2. Negativos: mantém reason=signature_invalid (chave errada, resource duplicado, resource diferente da rota, e outra rota)
+    const negativeCases: Array<{ requestUrl: string; signedUrl: string; privateKey: crypto.KeyObject }> = [
+      {
+        requestUrl: '/api/v2/barragens?limit=1&resource=barragens',
+        signedUrl: '/api/v2/barragens?limit=1',
+        privateKey: wrongKeys.privateKey
+      },
+      {
+        requestUrl: '/api/v2/barragens?limit=1&resource=barragens&resource=barragens',
+        signedUrl: '/api/v2/barragens?limit=1',
+        privateKey: validKeys.privateKey
+      },
+      {
+        requestUrl: '/api/v2/barragens?limit=1&resource=empreendedores',
+        signedUrl: '/api/v2/barragens?limit=1',
+        privateKey: validKeys.privateKey
+      },
+      {
+        requestUrl: '/api/v2/empreendedores?limit=1&resource=empreendedores',
+        signedUrl: '/api/v2/empreendedores?limit=1',
+        privateKey: validKeys.privateKey
+      }
+    ];
+
+    for (const testCase of negativeCases) {
+      const res = createMockRes();
+      await resourceHandler(
+        createSignedRequestWithCustomSignedUrl({
+          requestUrl: testCase.requestUrl,
+          signedUrl: testCase.signedUrl,
+          kid: 'classifica-diag-kid',
+          privateKey: testCase.privateKey
+        }),
+        res
+      );
+      assert.equal(res.getStatus(), 401);
+      assert.equal(
+        warnMessages[warnMessages.length - 1],
+        '[s2s-v2] auth_denied reason=signature_invalid sistema=classifica'
+      );
+    }
+
+    // Nenhuma entrada de log deve conter URL, query ou dados de cabeçalho/chave
+    for (const msg of warnMessages) {
+      assert.doesNotMatch(msg, /limit=1|barragens\?|classifica-diag-kid/);
+    }
+    assert.equal(mockDb._tableQueries.length, 0);
+  } finally {
+    console.warn = origWarn;
+    setTestSupabaseAdminForSemaAudit(null);
+  }
+});

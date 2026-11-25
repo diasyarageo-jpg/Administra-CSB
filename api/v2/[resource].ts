@@ -128,7 +128,8 @@ export default async function handler(
   }
 
   const auth = await authenticateS2sRequest(req, {
-    requiredScope: spec.requiredScope
+    requiredScope: spec.requiredScope,
+    ...(resource === 'barragens' ? { diagnosticRouteResource: 'barragens' as const } : {})
   });
 
   if (auth.ok === false) {
