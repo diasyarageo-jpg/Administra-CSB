@@ -3,6 +3,8 @@ export type JsonBodyReaderErrorCode =
   | 'INVALID_CONTENT_LENGTH'
   | 'PAYLOAD_TOO_LARGE'
   | 'INVALID_STREAM'
+  | 'INVALID_CHUNK'
+  | 'INVALID_UTF8'
   | 'STREAM_ABORTED'
   | 'STREAM_ERROR'
   | 'BODY_TIMEOUT'
@@ -27,6 +29,18 @@ export interface StreamReadableLike {
   on?: (event: string, listener: (...args: any[]) => void) => any;
   off?: (event: string, listener: (...args: any[]) => void) => any;
   removeListener?: (event: string, listener: (...args: any[]) => void) => any;
+}
+
+export interface ReadRawBodyOptions {
+  maxBytes?: number;
+  timeoutMs?: number;
+  payloadTooLargeMessage?: string;
+  invalidChunkMessage?: string;
+  invalidContentLengthMessage?: string;
+  timeoutMessage?: string;
+  abortedMessage?: string;
+  streamErrorMessage?: string;
+  streamUnavailableMessage?: string;
 }
 
 export interface ReadJsonObjectBodyOptions {
@@ -107,10 +121,10 @@ function validateDeclaredContentLength(
   }
 }
 
-export async function readJsonObjectBody(
+export async function readRawBodyBuffer(
   req: StreamReadableLike,
-  options: ReadJsonObjectBodyOptions = {}
-): Promise<Record<string, any>> {
+  options: ReadRawBodyOptions = {}
+): Promise<Buffer> {
   const maxBytes =
     typeof options.maxBytes === 'number' && Number.isFinite(options.maxBytes) && options.maxBytes > 0
       ? Math.floor(options.maxBytes)
@@ -119,13 +133,10 @@ export async function readJsonObjectBody(
     typeof options.timeoutMs === 'number' && Number.isFinite(options.timeoutMs) && options.timeoutMs > 0
       ? Math.floor(options.timeoutMs)
       : DEFAULT_JSON_BODY_TIMEOUT_MS;
-  const allowEmpty = options.allowEmpty ?? true;
 
   const payloadTooLargeMessage =
     options.payloadTooLargeMessage || 'Requisição excede o tamanho máximo permitido.';
-  const invalidJsonMessage = options.invalidJsonMessage || 'Corpo JSON inválido.';
-  const invalidObjectMessage =
-    options.invalidObjectMessage || 'O corpo da requisição deve ser um objeto JSON válido.';
+  const invalidChunkMessage = options.invalidChunkMessage || 'Corpo JSON inválido.';
   const invalidContentLengthMessage =
     options.invalidContentLengthMessage || 'Cabeçalho Content-Length inválido.';
   const timeoutMessage =
@@ -150,7 +161,7 @@ export async function readJsonObjectBody(
 
   const on = req.on.bind(req);
 
-  return await new Promise<Record<string, any>>((resolve, reject) => {
+  return await new Promise<Buffer>((resolve, reject) => {
     const chunks: Buffer[] = [];
     let totalBytes = 0;
     let settled = false;
@@ -186,16 +197,17 @@ export async function readJsonObjectBody(
       }
     };
 
-    const finish = (err?: Error, value?: Record<string, any>) => {
+    const finish = (err?: Error, value?: Buffer) => {
       if (settled) return;
       settled = true;
       cleanup();
+      const result = err ? undefined : value ?? Buffer.concat(chunks, totalBytes);
       chunks.length = 0;
       if (err) {
         reject(err);
         return;
       }
-      resolve(value ?? {});
+      resolve(result as Buffer);
     };
 
     const onData = (chunk: unknown) => {
@@ -205,10 +217,8 @@ export async function readJsonObjectBody(
         buf = chunk;
       } else if (chunk instanceof Uint8Array) {
         buf = Buffer.from(chunk.buffer, chunk.byteOffset, chunk.byteLength);
-      } else if (typeof chunk === 'string') {
-        buf = Buffer.from(chunk, 'utf8');
       } else {
-        finish(new JsonBodyReaderError(400, invalidJsonMessage, 'INVALID_JSON'));
+        finish(new JsonBodyReaderError(400, invalidChunkMessage, 'INVALID_CHUNK'));
         return;
       }
 
@@ -225,37 +235,11 @@ export async function readJsonObjectBody(
 
     const onEnd = () => {
       if (settled) return;
-      let raw = '';
       try {
-        raw = Buffer.concat(chunks, totalBytes).toString('utf8').trim();
+        finish(undefined, Buffer.concat(chunks, totalBytes));
       } catch {
-        finish(new JsonBodyReaderError(400, invalidJsonMessage, 'INVALID_JSON'));
-        return;
+        finish(new JsonBodyReaderError(400, invalidChunkMessage, 'INVALID_JSON'));
       }
-
-      if (!raw) {
-        if (allowEmpty) {
-          finish(undefined, {});
-        } else {
-          finish(new JsonBodyReaderError(400, invalidObjectMessage, 'INVALID_JSON_OBJECT'));
-        }
-        return;
-      }
-
-      let parsed: unknown;
-      try {
-        parsed = JSON.parse(raw);
-      } catch {
-        finish(new JsonBodyReaderError(400, invalidJsonMessage, 'INVALID_JSON'));
-        return;
-      }
-
-      if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
-        finish(new JsonBodyReaderError(400, invalidObjectMessage, 'INVALID_JSON_OBJECT'));
-        return;
-      }
-
-      finish(undefined, parsed as Record<string, any>);
     };
 
     const onError = () => {
@@ -279,5 +263,88 @@ export async function readJsonObjectBody(
     on('end', onEnd);
     if (settled) return;
     on('data', onData);
+  });
+}
+
+const STRICT_UTF8_DECODER = new TextDecoder('utf-8', { fatal: true });
+
+export function decodeStrictUtf8(
+  rawBuffer: Buffer | Uint8Array,
+  invalidUtf8Message = 'Codificação UTF-8 inválida no corpo da requisição.'
+): string {
+  try {
+    return STRICT_UTF8_DECODER.decode(rawBuffer);
+  } catch {
+    throw new JsonBodyReaderError(400, invalidUtf8Message, 'INVALID_UTF8');
+  }
+}
+
+export function parseStrictUtf8JsonObject(
+  rawBuffer: Buffer | Uint8Array,
+  options: {
+    allowEmpty?: boolean;
+    invalidUtf8Message?: string;
+    invalidJsonMessage?: string;
+    invalidObjectMessage?: string;
+  } = {}
+): Record<string, any> {
+  const allowEmpty = options.allowEmpty ?? true;
+  const invalidJsonMessage = options.invalidJsonMessage || 'Corpo JSON inválido.';
+  const invalidObjectMessage =
+    options.invalidObjectMessage || 'O corpo da requisição deve ser um objeto JSON válido.';
+
+  const decoded = decodeStrictUtf8(
+    rawBuffer,
+    options.invalidUtf8Message || invalidJsonMessage
+  );
+  const raw = decoded.trim();
+
+  if (!raw) {
+    if (allowEmpty) {
+      return {};
+    }
+    throw new JsonBodyReaderError(400, invalidObjectMessage, 'INVALID_JSON_OBJECT');
+  }
+
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(raw);
+  } catch {
+    throw new JsonBodyReaderError(400, invalidJsonMessage, 'INVALID_JSON');
+  }
+
+  if (!parsed || typeof parsed !== 'object' || Array.isArray(parsed)) {
+    throw new JsonBodyReaderError(400, invalidObjectMessage, 'INVALID_JSON_OBJECT');
+  }
+
+  return parsed as Record<string, any>;
+}
+
+export async function readJsonObjectBody(
+  req: StreamReadableLike,
+  options: ReadJsonObjectBodyOptions = {}
+): Promise<Record<string, any>> {
+  const allowEmpty = options.allowEmpty ?? true;
+  const invalidJsonMessage = options.invalidJsonMessage || 'Corpo JSON inválido.';
+  const invalidObjectMessage =
+    options.invalidObjectMessage || 'O corpo da requisição deve ser um objeto JSON válido.';
+
+  const rawBuffer = await readRawBodyBuffer(req, {
+    maxBytes: options.maxBytes,
+    timeoutMs: options.timeoutMs,
+    payloadTooLargeMessage: options.payloadTooLargeMessage,
+    invalidChunkMessage: invalidJsonMessage,
+    invalidContentLengthMessage: options.invalidContentLengthMessage,
+    timeoutMessage: options.timeoutMessage,
+    abortedMessage: options.abortedMessage,
+    streamErrorMessage: options.streamErrorMessage,
+    streamUnavailableMessage: options.streamUnavailableMessage
+  });
+
+  return parseStrictUtf8JsonObject(rawBuffer, {
+    allowEmpty,
+    invalidUtf8Message: invalidJsonMessage,
+    invalidJsonMessage,
+    invalidObjectMessage
   });
 }

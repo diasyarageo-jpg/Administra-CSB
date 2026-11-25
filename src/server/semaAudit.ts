@@ -85,7 +85,7 @@ function cleanServerEnvValue(raw: unknown): string {
     .trim();
 }
 
-function getServerSupabaseAdminClient(): SupabaseClient<any, any, any> | null {
+export function getServerSupabaseAdminClient(): SupabaseClient<any, any, any> | null {
   if (testSupabaseAdminOverride) return testSupabaseAdminOverride;
   const supabaseUrl = cleanServerEnvValue(
     process.env.SUPABASE_URL ||

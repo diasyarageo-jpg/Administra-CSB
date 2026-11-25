@@ -14,10 +14,14 @@
     {
       "path": "/api/car-sync",
       "schedule": "0 8 * * *"
+    },
+    {
+      "path": "/api/v2/s2s-nonces-cleanup",
+      "schedule": "0 3 * * *"
     }
   ],
   "functions": {
-    "api/*.ts": {
+    "api/**/*.ts": {
       "includeFiles": "{src/server/**,src/config/**}"
     }
   },
