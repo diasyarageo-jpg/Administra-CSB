@@ -23,6 +23,7 @@ import {
   buildS2sCanonicalMessage,
   canonicalizeQueryString,
   deriveConsumerMaskingContext,
+  isValidS2sJtiUuidV4,
   normalizeContentType,
   normalizePublicPath,
   sha256BodyHexLower
@@ -41,6 +42,7 @@ interface MockNonceEntry {
   sistema: string;
   jti: string;
   expiresAtMs: number;
+  consumidoEmIso: string;
 }
 
 function createKeyPair() {
@@ -110,7 +112,7 @@ function createSignedRequest(opts: {
   const url = opts.url || '/api/v2/health';
   const rawBody = opts.rawBody ?? Buffer.alloc(0);
   const timestamp = String(opts.timestamp ?? Math.floor(Date.now() / 1000));
-  const jti = opts.jti ?? `jti-${crypto.randomUUID()}`;
+  const jti = opts.jti ?? crypto.randomUUID();
   const bodySha = sha256BodyHexLower(rawBody);
 
   const qIdx = url.indexOf('?');
@@ -240,17 +242,32 @@ function createMockSupabaseAdmin(options: {
         if (options.failNonceRpc) {
           return { data: null, error: { message: 'db write error password=secret' } };
         }
+        // Contrato SQL atualizado: p_sistema (text) + p_jti (uuid) -> colunas (sistema, jti, expires_at, consumido_em)
+        const expectedKeys = ['p_sistema', 'p_jti', 'p_expires_at'];
+        for (const k of expectedKeys) {
+          if (params?.[k] === undefined) {
+            return { data: null, error: { message: `missing parameter ${k}` } };
+          }
+        }
+        if (
+          typeof params.p_jti !== 'string' ||
+          !/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(params.p_jti)
+        ) {
+          return { data: null, error: { message: 'invalid input syntax for type uuid' } };
+        }
         if (options.nonceDelayMs) {
           await new Promise(resolve => setTimeout(resolve, options.nonceDelayMs));
         }
-        const key = `${params.p_sistema}::${params.p_jti}`;
+        const normalizedJti = params.p_jti.toLowerCase();
+        const key = `${params.p_sistema}::${normalizedJti}`;
         if (reservedNonces.has(key)) {
           return { data: false, error: null };
         }
         reservedNonces.set(key, {
           sistema: params.p_sistema,
-          jti: params.p_jti,
-          expiresAtMs: Date.parse(params.p_expires_at) || Date.now() + 600_000
+          jti: normalizedJti,
+          expiresAtMs: Date.parse(params.p_expires_at) || Date.now() + 600_000,
+          consumidoEmIso: new Date().toISOString()
         });
         return { data: true, error: null };
       }
@@ -316,6 +333,105 @@ test('Migração SQL impõe UNIQUE(kid), RLS fail-closed e vercel.json agenda li
   );
   assert.ok(cleanupCron);
   assert.equal(cleanupCron.schedule, '0 3 * * *');
+
+  const fixSqlPath = path.join(
+    process.cwd(),
+    'supabase',
+    'migrations',
+    '20261119_api_v2_s2s_alinhamento_esquema.sql'
+  );
+  const fixSql = fs.readFileSync(fixSqlPath, 'utf8');
+  assert.match(fixSql, /RENAME COLUMN sistema_origem TO sistema/i);
+  assert.match(fixSql, /DROP CONSTRAINT %I/i);
+  assert.match(fixSql, /ADD CONSTRAINT uq_integracao_clientes_s2s_kid UNIQUE \(kid\)/i);
+  assert.match(fixSql, /DROP FUNCTION IF EXISTS %s/i);
+  assert.match(fixSql, /CREATE FUNCTION public\.reservar_nonce_s2s\(\s*p_sistema text,\s*p_jti uuid,\s*p_expires_at timestamptz/i);
+  assert.match(fixSql, /INSERT INTO public\.integracao_s2s_nonces \(sistema, jti, expires_at, consumido_em\)/i);
+  assert.match(fixSql, /ON CONFLICT \(sistema, jti\) DO NOTHING/i);
+  assert.match(fixSql, /CREATE OR REPLACE FUNCTION public\.limpar_nonces_s2s_expirados/i);
+  assert.match(fixSql, /WHERE expires_at < now\(\)/i);
+  assert.match(fixSql, /ENABLE ROW LEVEL SECURITY/i);
+  assert.match(fixSql, /REVOKE ALL ON TABLE public\.integracao_clientes_s2s FROM PUBLIC, anon, authenticated/i);
+  assert.match(fixSql, /REVOKE ALL ON TABLE public\.integracao_s2s_nonces FROM PUBLIC, anon, authenticated/i);
+  assert.match(fixSql, /REVOKE ALL ON FUNCTION public\.reservar_nonce_s2s\(text, uuid, timestamptz\) FROM PUBLIC, anon, authenticated/i);
+  assert.match(fixSql, /GRANT EXECUTE ON FUNCTION public\.reservar_nonce_s2s\(text, uuid, timestamptz\) TO service_role/i);
+  assert.doesNotMatch(fixSql, /BEGIN PUBLIC KEY/i);
+});
+
+test('JTI exige UUID v4 estrito antes de consultar banco ou reservar nonce e registra colunas atuais (sistema, jti, consumido_em)', async () => {
+  const { publicKeyPem, privateKey } = createKeyPair();
+  const mockDb = createMockSupabaseAdmin({
+    clients: [
+      {
+        sistema: 'fiscaliza',
+        kid: 'fiscaliza-uuid-v4-test',
+        public_key_pem: publicKeyPem,
+        escopos: ['health:read'],
+        ativo: true
+      }
+    ]
+  });
+  setTestSupabaseAdminForSemaAudit(mockDb);
+
+  try {
+    const validLower = crypto.randomUUID();
+    const validUpper = crypto.randomUUID().toUpperCase();
+    assert.equal(isValidS2sJtiUuidV4(validLower), true);
+    assert.equal(isValidS2sJtiUuidV4(validUpper), true);
+
+    const invalidJtis = [
+      `jti-${crypto.randomUUID()}`,
+      'nonce-arbitrario-123456',
+      '12345678',
+      '550e8400-e29b-11d4-a716-446655440000', // UUID v1
+      '886313e1-3b8a-5372-9b90-0c9aee199e5d', // UUID v5
+      '550e8400-e29b-41d4-0716-446655440000', // variante inválida (0)
+      '550e8400-e29b-41d4-f716-446655440000', // variante inválida (f)
+      '00000000-0000-0000-0000-000000000000', // nil UUID
+      '550e8400e29b41d4a716446655440000' // sem hifens
+    ];
+
+    for (const badJti of invalidJtis) {
+      assert.equal(isValidS2sJtiUuidV4(badJti), false, `Esperava rejeição de ${badJti}`);
+      const res = createMockRes();
+      await healthHandler(
+        createSignedRequest({
+          kid: 'fiscaliza-uuid-v4-test',
+          privateKey,
+          jti: badJti
+        }),
+        res
+      );
+      assert.equal(res.getStatus(), 401, `Esperava 401 para JTI inválido ${badJti}`);
+    }
+
+    // Nenhuma consulta ou reserva deve acontecer antes de validar UUID v4
+    assert.equal(mockDb._queryCalls.length, 0);
+    assert.equal(mockDb._rpcCalls.length, 0);
+
+    // UUID v4 válido (inclusive hex maiúsculo na entrada, normalizado para uuid canonical lowercase no banco)
+    const okRes = createMockRes();
+    await healthHandler(
+      createSignedRequest({
+        kid: 'fiscaliza-uuid-v4-test',
+        privateKey,
+        jti: validUpper
+      }),
+      okRes
+    );
+    assert.equal(okRes.getStatus(), 200);
+    assert.equal(mockDb._rpcCalls.length, 1);
+    assert.equal(mockDb._rpcCalls[0].fn, 'reservar_nonce_s2s');
+    assert.equal(mockDb._rpcCalls[0].params.p_sistema, 'fiscaliza');
+    assert.equal(mockDb._rpcCalls[0].params.p_jti, validUpper.toLowerCase());
+    const stored = mockDb._reservedNonces.get(`fiscaliza::${validUpper.toLowerCase()}`);
+    assert.ok(stored);
+    assert.equal(stored.sistema, 'fiscaliza');
+    assert.equal(stored.jti, validUpper.toLowerCase());
+    assert.ok(typeof stored.consumidoEmIso === 'string' && stored.consumidoEmIso.includes('T'));
+  } finally {
+    setTestSupabaseAdminForSemaAudit(null);
+  }
 });
 
 test('GET /api/v2/health aceita assinatura Ed25519 válida e normaliza query RFC 3986 sem vazar segredos', async () => {
@@ -802,7 +918,7 @@ test('Replay concorrente do mesmo jti retorna exatamente um 200 e um 409', async
   setTestSupabaseAdminForSemaAudit(mockDb);
 
   try {
-    const fixedJti = `jti-concurrent-${crypto.randomUUID()}`;
+    const fixedJti = crypto.randomUUID();
     const fixedTs = Math.floor(Date.now() / 1000);
 
     const req1 = createSignedRequest({
@@ -900,15 +1016,20 @@ test('5) Rotina de limpeza de nonces exige CRON_SECRET, rejeita ausência/erro/s
   const syntheticCronSecret = 'test-vercel-cron-secret-value-02';
   const syntheticServiceRole = 'synthetic-service-role-should-not-authorize';
   const now = Date.now();
+  const expiredJti1 = '11111111-1111-4111-8111-111111111111';
+  const expiredJti2 = '22222222-2222-4222-8222-222222222222';
+  const expiredJti3 = '33333333-3333-4333-8333-333333333333';
+  const activeJti1 = '44444444-4444-4444-8444-444444444444';
+  const activeJti2 = '55555555-5555-4555-8555-555555555555';
 
   const mockDb = createMockSupabaseAdmin({
     clients: [],
     initialNonces: [
-      { sistema: 'notifica', jti: 'expired-jti-01', expiresAtMs: now - 120_000 },
-      { sistema: 'classifica', jti: 'expired-jti-02', expiresAtMs: now - 5_000 },
-      { sistema: 'fiscaliza', jti: 'expired-jti-03', expiresAtMs: now - 1_000 },
-      { sistema: 'notifica', jti: 'active-jti-01', expiresAtMs: now + 300_000 },
-      { sistema: 'fiscaliza', jti: 'active-jti-02', expiresAtMs: now + 600_000 }
+      { sistema: 'notifica', jti: expiredJti1, expiresAtMs: now - 120_000, consumidoEmIso: new Date(now - 720_000).toISOString() },
+      { sistema: 'classifica', jti: expiredJti2, expiresAtMs: now - 5_000, consumidoEmIso: new Date(now - 605_000).toISOString() },
+      { sistema: 'fiscaliza', jti: expiredJti3, expiresAtMs: now - 1_000, consumidoEmIso: new Date(now - 601_000).toISOString() },
+      { sistema: 'notifica', jti: activeJti1, expiresAtMs: now + 300_000, consumidoEmIso: new Date(now - 300_000).toISOString() },
+      { sistema: 'fiscaliza', jti: activeJti2, expiresAtMs: now + 600_000, consumidoEmIso: new Date(now).toISOString() }
     ]
   });
   setTestSupabaseAdminForSemaAudit(mockDb);
@@ -984,11 +1105,11 @@ test('5) Rotina de limpeza de nonces exige CRON_SECRET, rejeita ausência/erro/s
     assert.equal(body.batchLimit, 2);
     assert.equal(JSON.stringify(body).includes(syntheticCronSecret), false);
 
-    assert.equal(mockDb._reservedNonces.has('notifica::expired-jti-01'), false);
-    assert.equal(mockDb._reservedNonces.has('classifica::expired-jti-02'), false);
-    assert.equal(mockDb._reservedNonces.has('fiscaliza::expired-jti-03'), false);
-    assert.equal(mockDb._reservedNonces.has('notifica::active-jti-01'), true);
-    assert.equal(mockDb._reservedNonces.has('fiscaliza::active-jti-02'), true);
+    assert.equal(mockDb._reservedNonces.has(`notifica::${expiredJti1}`), false);
+    assert.equal(mockDb._reservedNonces.has(`classifica::${expiredJti2}`), false);
+    assert.equal(mockDb._reservedNonces.has(`fiscaliza::${expiredJti3}`), false);
+    assert.equal(mockDb._reservedNonces.has(`notifica::${activeJti1}`), true);
+    assert.equal(mockDb._reservedNonces.has(`fiscaliza::${activeJti2}`), true);
 
     // 5. Falha de banco retorna 503 sem vazar detalhes ou segredo
     setTestSupabaseAdminForSemaAudit(

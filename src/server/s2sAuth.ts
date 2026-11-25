@@ -114,11 +114,15 @@ interface S2sClientRow {
 const CONTROL_CHARS_REGEX = /[\u0000-\u001f\u007f]/;
 const HEADER_FORBIDDEN_DELIMITER_REGEX = /[\u0000-\u001f\u007f|]/;
 const KID_REGEX = /^[A-Za-z0-9._:-]{1,128}$/;
-const JTI_REGEX = /^[A-Za-z0-9._:-]{8,128}$/;
+const JTI_UUID_V4_REGEX = /^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/i;
 const TIMESTAMP_REGEX = /^\d{1,12}$/;
 const SHA256_LOWER_HEX_REGEX = /^[0-9a-f]{64}$/;
 const MEDIA_TYPE_REGEX = /^[a-z0-9!#$&^_.+-]+\/[a-z0-9!#$&^_.+-]+$/i;
 const SAFE_CONSUMER_USER_ID_REGEX = /^[A-Za-z0-9._:@/-]{1,128}$/;
+
+export function isValidS2sJtiUuidV4(raw: unknown): raw is string {
+  return typeof raw === 'string' && JTI_UUID_V4_REGEX.test(raw);
+}
 
 export function isAllowedS2sSistema(raw: unknown): raw is S2sSistema {
   return (
@@ -602,7 +606,7 @@ export async function authenticateS2sRequest(
     !TIMESTAMP_REGEX.test(tsHdr.value) ||
     !jtiHdr.valid ||
     !jtiHdr.present ||
-    !JTI_REGEX.test(jtiHdr.value) ||
+    !isValidS2sJtiUuidV4(jtiHdr.value) ||
     HEADER_FORBIDDEN_DELIMITER_REGEX.test(jtiHdr.value) ||
     !bodyShaHdr.valid ||
     !bodyShaHdr.present ||
@@ -810,11 +814,12 @@ export async function authenticateS2sRequest(
     };
   }
 
+  const normalizedJtiUuid = jtiHdr.value.toLowerCase();
   const expiresAtIso = new Date((nowSeconds + nonceTtlSeconds) * 1000).toISOString();
   try {
     const { data: reserved, error: nonceErr } = await supabaseAdmin.rpc('reservar_nonce_s2s', {
       p_sistema: clientSistemaRaw,
-      p_jti: jtiHdr.value,
+      p_jti: normalizedJtiUuid,
       p_expires_at: expiresAtIso
     });
 
@@ -866,7 +871,7 @@ export async function authenticateS2sRequest(
       sistema: clientSistemaRaw,
       kid: kidHdr.value,
       escopos,
-      jti: jtiHdr.value,
+      jti: normalizedJtiUuid,
       timestamp: timestampSec,
       consumer
     },
