@@ -4,10 +4,7 @@ import assert from 'node:assert/strict';
 import crypto from 'node:crypto';
 import { PassThrough } from 'node:stream';
 
-import barragensHandler, { config as barragensConfig } from '../api/v2/barragens';
-import empreendedoresHandler, {
-  config as empreendedoresConfig
-} from '../api/v2/empreendedores';
+import resourceHandler, { config as resourceConfig } from '../api/v2/[resource]';
 import {
   BARRAGENS_SELECT_COLUMNS,
   EMPREENDEDORES_SELECT_COLUMNS,
@@ -83,6 +80,7 @@ function createSignedRequest(opts: {
   jti?: string;
   consumerUserId?: string;
   consumerRole?: string;
+  query?: Record<string, string | string[] | undefined>;
 }) {
   const method = (opts.method || 'GET').toUpperCase();
   const rawBody = Buffer.alloc(0);
@@ -128,6 +126,9 @@ function createSignedRequest(opts: {
   const stream = new PassThrough() as any;
   stream.method = method;
   stream.url = opts.url;
+  if (opts.query !== undefined) {
+    stream.query = opts.query;
+  }
   stream.headers = headers;
   Object.defineProperty(stream, 'body', {
     configurable: true,
@@ -270,18 +271,17 @@ function assertSecurityHeaders(res: ReturnType<typeof createMockRes>) {
 }
 
 test('Etapa 2 configs e método HTTP: aceita somente GET e retorna 405 com Allow: GET nos demais', async () => {
-  assert.deepEqual(barragensConfig, { api: { bodyParser: false } });
-  assert.deepEqual(empreendedoresConfig, { api: { bodyParser: false } });
+  assert.deepEqual(resourceConfig, { api: { bodyParser: false } });
 
   for (const method of ['POST', 'PUT', 'PATCH', 'DELETE']) {
     const resBar = createMockRes();
-    await barragensHandler({ method, url: '/api/v2/barragens', headers: {} } as any, resBar);
+    await resourceHandler({ method, url: '/api/v2/barragens', headers: {} } as any, resBar);
     assert.equal(resBar.getStatus(), 405);
     assert.equal(resBar.getHeaders()['allow'], 'GET');
     assertSecurityHeaders(resBar);
 
     const resEmp = createMockRes();
-    await empreendedoresHandler(
+    await resourceHandler(
       { method, url: '/api/v2/empreendedores', headers: {} } as any,
       resEmp
     );
@@ -325,7 +325,7 @@ test('Autenticação S2S e política estrita de escopos (sem curingas) para barr
   try {
     // 1. Assinatura inválida -> 401 sem consultar catálogo
     const badSigRes = createMockRes();
-    await barragensHandler(
+    await resourceHandler(
       createSignedRequest({
         url: '/api/v2/barragens',
         kid: 'classifica-bar-only',
@@ -338,7 +338,7 @@ test('Autenticação S2S e política estrita de escopos (sem curingas) para barr
 
     // 2. Curingas '*' ou 'barragens:*' são rejeitados com 403
     const wildcardBarRes = createMockRes();
-    await barragensHandler(
+    await resourceHandler(
       createSignedRequest({
         url: '/api/v2/barragens',
         kid: 'notifica-wildcard-rejected',
@@ -349,7 +349,7 @@ test('Autenticação S2S e política estrita de escopos (sem curingas) para barr
     assert.equal(wildcardBarRes.getStatus(), 403);
 
     const wildcardEmpRes = createMockRes();
-    await empreendedoresHandler(
+    await resourceHandler(
       createSignedRequest({
         url: '/api/v2/empreendedores',
         kid: 'notifica-wildcard-rejected',
@@ -361,7 +361,7 @@ test('Autenticação S2S e política estrita de escopos (sem curingas) para barr
 
     // 3. Escopo cruzado rejeitado com 403
     const crossBarRes = createMockRes();
-    await empreendedoresHandler(
+    await resourceHandler(
       createSignedRequest({
         url: '/api/v2/empreendedores',
         kid: 'classifica-bar-only',
@@ -372,7 +372,7 @@ test('Autenticação S2S e política estrita de escopos (sem curingas) para barr
     assert.equal(crossBarRes.getStatus(), 403);
 
     const crossEmpRes = createMockRes();
-    await barragensHandler(
+    await resourceHandler(
       createSignedRequest({
         url: '/api/v2/barragens',
         kid: 'fiscaliza-emp-only',
@@ -386,7 +386,7 @@ test('Autenticação S2S e política estrita de escopos (sem curingas) para barr
     const fixedJti = crypto.randomUUID();
     const fixedTs = Math.floor(Date.now() / 1000);
     const firstRes = createMockRes();
-    await barragensHandler(
+    await resourceHandler(
       createSignedRequest({
         url: '/api/v2/barragens',
         kid: 'classifica-bar-only',
@@ -399,7 +399,7 @@ test('Autenticação S2S e política estrita de escopos (sem curingas) para barr
     assert.equal(firstRes.getStatus(), 200);
 
     const replayRes = createMockRes();
-    await barragensHandler(
+    await resourceHandler(
       createSignedRequest({
         url: '/api/v2/barragens',
         kid: 'classifica-bar-only',
@@ -583,13 +583,14 @@ test('GET /api/v2/barragens pagina por cursor sem lacunas nem duplicatas, usa ta
         : '/api/v2/barragens?limit=2';
 
       const res = createMockRes();
-      await barragensHandler(
+      await resourceHandler(
         createSignedRequest({
           url,
           kid: 'classifica-bar-read',
           privateKey,
           consumerUserId: 'usr-admin-1',
-          consumerRole: 'Administrador'
+          consumerRole: 'Administrador',
+          query: { resource: 'barragens', limit: '2' }
         }),
         res
       );
@@ -629,7 +630,7 @@ test('GET /api/v2/barragens pagina por cursor sem lacunas nem duplicatas, usa ta
 
     // Garante mascaramento de telefones em nome/empreendimento preservando dados não telefônicos
     const page1Res = createMockRes();
-    await barragensHandler(
+    await resourceHandler(
       createSignedRequest({
         url: '/api/v2/barragens?limit=1',
         kid: 'classifica-bar-read',
@@ -663,7 +664,7 @@ test('GET /api/v2/barragens pagina por cursor sem lacunas nem duplicatas, usa ta
 
     // Padrão sem limit usa limit=100 (consulta limit+1 = 101) e aceita limit=500 (limit+1 = 501)
     const defaultRes = createMockRes();
-    await barragensHandler(
+    await resourceHandler(
       createSignedRequest({ url: '/api/v2/barragens', kid: 'classifica-bar-read', privateKey }),
       defaultRes
     );
@@ -672,7 +673,7 @@ test('GET /api/v2/barragens pagina por cursor sem lacunas nem duplicatas, usa ta
     assert.equal(mockDb._tableQueries[4].limit, 101);
 
     const maxRes = createMockRes();
-    await barragensHandler(
+    await resourceHandler(
       createSignedRequest({
         url: '/api/v2/barragens?limit=500',
         kid: 'classifica-bar-read',
@@ -799,13 +800,14 @@ test('GET /api/v2/empreendedores aplica mascaramento fail-closed, pagina em múl
   try {
     // 4 registros com limit=2 -> exatamente 2 páginas sem página extra vazia
     const page1Res = createMockRes();
-    await empreendedoresHandler(
+    await resourceHandler(
       createSignedRequest({
         url: '/api/v2/empreendedores?limit=2',
         kid: 'notifica-emp-read',
         privateKey,
         consumerUserId: 'usr-admin-99',
-        consumerRole: 'Administrador'
+        consumerRole: 'Administrador',
+        query: { resource: 'empreendedores', limit: '2' }
       }),
       page1Res
     );
@@ -852,7 +854,7 @@ test('GET /api/v2/empreendedores aplica mascaramento fail-closed, pagina em múl
     assert.equal(emp2.telefone, '(65) ****-**00');
 
     const page2Res = createMockRes();
-    await empreendedoresHandler(
+    await resourceHandler(
       createSignedRequest({
         url: `/api/v2/empreendedores?limit=2&cursor=${encodeURIComponent(p1.pagination.nextCursor)}`,
         kid: 'notifica-emp-read',
@@ -942,6 +944,7 @@ test('Parâmetros inválidos, filtros não suportados e cursores adulterados ret
       '/api/v2/barragens?updatedSince=2026-01-01T00:00:00Z',
       '/api/v2/barragens?situacao=Ativa',
       '/api/v2/barragens?id=bar_001',
+      '/api/v2/barragens?resource=empreendedores',
       '/api/v2/barragens?limit',
       '/api/v2/barragens?limit=10&',
       '/api/v2/barragens?cursor=',
@@ -954,7 +957,7 @@ test('Parâmetros inválidos, filtros não suportados e cursores adulterados ret
 
     for (const url of badBarUrls) {
       const res = createMockRes();
-      await barragensHandler(
+      await resourceHandler(
         createSignedRequest({ url, kid: 'fiscaliza-validation-check', privateKey }),
         res
       );
@@ -965,7 +968,7 @@ test('Parâmetros inválidos, filtros não suportados e cursores adulterados ret
 
     const crossEmpCursor = encodeV2Cursor('barragens', 'bar_001');
     const empBadRes = createMockRes();
-    await empreendedoresHandler(
+    await resourceHandler(
       createSignedRequest({
         url: `/api/v2/empreendedores?cursor=${encodeURIComponent(crossEmpCursor)}`,
         kid: 'fiscaliza-validation-check',
@@ -974,6 +977,23 @@ test('Parâmetros inválidos, filtros não suportados e cursores adulterados ret
       empBadRes
     );
     assert.equal(empBadRes.getStatus(), 400);
+
+    // Recurso inexistente na rota dinâmica -> 404 com cabeçalhos de segurança e sem consultar banco
+    for (const unknownUrl of [
+      '/api/v2/desconhecido',
+      '/api/v2/Barragens',
+      '/api/v2/barragens/extra',
+      '/api/v2/desconhecido?resource=barragens'
+    ]) {
+      const notFoundRes = createMockRes();
+      await resourceHandler(
+        { method: 'GET', url: unknownUrl, headers: {}, query: { resource: 'barragens' } } as any,
+        notFoundRes
+      );
+      assert.equal(notFoundRes.getStatus(), 404, `Esperava 404 para ${unknownUrl}`);
+      assertSecurityHeaders(notFoundRes);
+      assert.equal(notFoundRes.getBody().success, false);
+    }
 
     // Zero consultas às tabelas de catálogo
     assert.equal(mockDb._tableQueries.length, 0);
@@ -1007,12 +1027,9 @@ test('Falha ou indisponibilidade do banco central retorna 503 retryable:true e n
       })
     );
 
-    for (const [handler, url] of [
-      [barragensHandler, '/api/v2/barragens'],
-      [empreendedoresHandler, '/api/v2/empreendedores']
-    ] as const) {
+    for (const url of ['/api/v2/barragens', '/api/v2/empreendedores'] as const) {
       const res = createMockRes();
-      await handler(createSignedRequest({ url, kid: 'notifica-db-fail', privateKey }), res);
+      await resourceHandler(createSignedRequest({ url, kid: 'notifica-db-fail', privateKey }), res);
       assert.equal(res.getStatus(), 503);
       assertSecurityHeaders(res);
       assert.deepEqual(res.getBody(), {
@@ -1038,12 +1055,9 @@ test('Falha ou indisponibilidade do banco central retorna 503 retryable:true e n
       })
     );
 
-    for (const [handler, url] of [
-      [barragensHandler, '/api/v2/barragens'],
-      [empreendedoresHandler, '/api/v2/empreendedores']
-    ] as const) {
+    for (const url of ['/api/v2/barragens', '/api/v2/empreendedores'] as const) {
       const res = createMockRes();
-      await handler(createSignedRequest({ url, kid: 'notifica-db-throw', privateKey }), res);
+      await resourceHandler(createSignedRequest({ url, kid: 'notifica-db-throw', privateKey }), res);
       assert.equal(res.getStatus(), 503);
       assert.deepEqual(res.getBody(), {
         success: false,
@@ -1060,12 +1074,9 @@ test('Falha ou indisponibilidade do banco central retorna 503 retryable:true e n
     delete process.env.VITE_PUBLIC_SUPABASE_URL;
     delete process.env.SUPABASE_SERVICE_ROLE_KEY;
 
-    for (const [handler, url] of [
-      [barragensHandler, '/api/v2/barragens'],
-      [empreendedoresHandler, '/api/v2/empreendedores']
-    ] as const) {
+    for (const url of ['/api/v2/barragens', '/api/v2/empreendedores'] as const) {
       const res = createMockRes();
-      await handler(createSignedRequest({ url, kid: 'notifica-db-fail', privateKey }), res);
+      await resourceHandler(createSignedRequest({ url, kid: 'notifica-db-fail', privateKey }), res);
       assert.equal(res.getStatus(), 503);
       assert.deepEqual(res.getBody(), {
         success: false,
