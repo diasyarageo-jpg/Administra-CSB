@@ -341,6 +341,12 @@ test('Migração SQL impõe UNIQUE(kid), RLS fail-closed e vercel.json agenda li
     '20261119_api_v2_s2s_alinhamento_esquema.sql'
   );
   const fixSql = fs.readFileSync(fixSqlPath, 'utf8');
+  assert.match(fixSql, /^(?:\s*--[^\n]*\r?\n|\s*\r?\n)*\s*BEGIN;/i);
+  assert.match(fixSql, /NOTIFY\s+pgrst\s*,\s*'reload schema'\s*;\s*COMMIT;\s*$/i);
+  const beginIdx = fixSql.search(/\bBEGIN;/i);
+  const notifyIdx = fixSql.search(/NOTIFY\s+pgrst\s*,\s*'reload schema'\s*;/i);
+  const commitIdx = fixSql.search(/\bCOMMIT;\s*$/i);
+  assert.ok(beginIdx >= 0 && notifyIdx > beginIdx && commitIdx > notifyIdx);
   assert.match(fixSql, /RENAME COLUMN sistema_origem TO sistema/i);
   assert.match(fixSql, /DROP CONSTRAINT %I/i);
   assert.match(fixSql, /ADD CONSTRAINT uq_integracao_clientes_s2s_kid UNIQUE \(kid\)/i);

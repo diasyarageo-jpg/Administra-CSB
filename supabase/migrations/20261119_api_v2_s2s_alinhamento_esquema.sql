@@ -8,6 +8,8 @@
 --   5. Preserva RLS e nega acesso a PUBLIC, anon e authenticated.
 -- ATENÇÃO: Migração preparada para execução controlada; NÃO executar automaticamente nem expor segredos.
 
+BEGIN;
+
 -- 1) integracao_clientes_s2s: garantir UNIQUE (kid) e remover UNIQUE (sistema, kid)
 DO $$
 DECLARE
@@ -219,3 +221,7 @@ REVOKE ALL ON FUNCTION public.limpar_nonces_s2s_expirados(integer) FROM PUBLIC, 
 
 GRANT EXECUTE ON FUNCTION public.reservar_nonce_s2s(text, uuid, timestamptz) TO service_role;
 GRANT EXECUTE ON FUNCTION public.limpar_nonces_s2s_expirados(integer) TO service_role;
+
+NOTIFY pgrst, 'reload schema';
+
+COMMIT;
