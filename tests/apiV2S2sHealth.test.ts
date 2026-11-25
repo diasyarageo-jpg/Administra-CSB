@@ -9,7 +9,8 @@ import { PassThrough } from 'node:stream';
 
 import healthHandler, { config as healthConfig } from '../api/v2/health';
 import noncesCleanupHandler, {
-  config as noncesCleanupConfig
+  config as noncesCleanupConfig,
+  handleNoncesCleanup
 } from '../api/v2/s2s-nonces-cleanup';
 import {
   JsonBodyReaderError,
@@ -1337,6 +1338,66 @@ test('5) Rotina de limpeza de nonces exige CRON_SECRET, rejeita ausência/erro/s
     });
     assert.equal(auditThrowDb._cleanupAuditInserts.length, 1);
     assert.equal(JSON.stringify(auditThrowFailRes.getBody()).includes('secret-token'), false);
+
+    // 9. Quando getServerSupabaseAdminClient() retorna null (sem cliente disponível), responde 503 sem tentar gravar auditoria
+    const prevSupabaseUrl = process.env.SUPABASE_URL;
+    const prevViteSupabaseUrl = process.env.VITE_SUPABASE_URL;
+    const prevNextSupabaseUrl = process.env.NEXT_PUBLIC_SUPABASE_URL;
+    const prevVitePubSupabaseUrl = process.env.VITE_PUBLIC_SUPABASE_URL;
+    setTestSupabaseAdminForSemaAudit(null);
+    delete process.env.SUPABASE_URL;
+    delete process.env.VITE_SUPABASE_URL;
+    delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+    delete process.env.VITE_PUBLIC_SUPABASE_URL;
+    delete process.env.SUPABASE_SERVICE_ROLE_KEY;
+    try {
+      const noClientRes = createMockRes();
+      await noncesCleanupHandler(
+        {
+          method: 'GET',
+          url: '/api/v2/s2s-nonces-cleanup',
+          headers: { authorization: `Bearer ${syntheticCronSecret}` }
+        } as any,
+        noClientRes
+      );
+      assert.equal(noClientRes.getStatus(), 503);
+      assert.deepEqual(noClientRes.getBody(), {
+        success: false,
+        status: 'unavailable',
+        retryable: true
+      });
+    } finally {
+      if (prevSupabaseUrl === undefined) delete process.env.SUPABASE_URL;
+      else process.env.SUPABASE_URL = prevSupabaseUrl;
+      if (prevViteSupabaseUrl === undefined) delete process.env.VITE_SUPABASE_URL;
+      else process.env.VITE_SUPABASE_URL = prevViteSupabaseUrl;
+      if (prevNextSupabaseUrl === undefined) delete process.env.NEXT_PUBLIC_SUPABASE_URL;
+      else process.env.NEXT_PUBLIC_SUPABASE_URL = prevNextSupabaseUrl;
+      if (prevVitePubSupabaseUrl === undefined) delete process.env.VITE_PUBLIC_SUPABASE_URL;
+      else process.env.VITE_PUBLIC_SUPABASE_URL = prevVitePubSupabaseUrl;
+    }
+
+    // 10. Se getServerSupabaseAdminClient() lançar exceção, responde o mesmo 503 genérico sem tentar auditoria nem expor detalhes
+    const throwingClientRes = createMockRes();
+    await handleNoncesCleanup(
+      {
+        method: 'GET',
+        url: '/api/v2/s2s-nonces-cleanup',
+        headers: { authorization: `Bearer ${syntheticCronSecret}` }
+      } as any,
+      throwingClientRes,
+      () => {
+        throw new Error('supabase admin init crash postgres://internal-secret:5432');
+      }
+    );
+    assert.equal(throwingClientRes.getStatus(), 503);
+    assert.deepEqual(throwingClientRes.getBody(), {
+      success: false,
+      status: 'unavailable',
+      retryable: true
+    });
+    assert.equal(JSON.stringify(throwingClientRes.getBody()).includes('postgres://'), false);
+    assert.equal(JSON.stringify(throwingClientRes.getBody()).includes('internal-secret'), false);
   } finally {
     setTestSupabaseAdminForSemaAudit(null);
     if (prevCron === undefined) delete process.env.CRON_SECRET;

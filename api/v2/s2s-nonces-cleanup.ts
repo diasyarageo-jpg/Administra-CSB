@@ -131,9 +131,10 @@ async function recordCleanupRunAudit(
   }
 }
 
-export default async function handler(
+export async function handleNoncesCleanup(
   req: VercelLikeRequest,
-  res: VercelLikeResponse
+  res: VercelLikeResponse,
+  getAdminClient: typeof getServerSupabaseAdminClient = getServerSupabaseAdminClient
 ): Promise<void> {
   const method = String(req?.method || 'GET').trim().toUpperCase();
 
@@ -169,7 +170,13 @@ export default async function handler(
   const startedAtMs = Date.now();
   const startedAtIso = new Date(startedAtMs).toISOString();
 
-  const supabaseAdmin = getServerSupabaseAdminClient();
+  let supabaseAdmin: ReturnType<typeof getServerSupabaseAdminClient> = null;
+  try {
+    supabaseAdmin = getAdminClient();
+  } catch {
+    supabaseAdmin = null;
+  }
+
   if (!supabaseAdmin) {
     sendJson(res, 503, {
       success: false,
@@ -242,4 +249,11 @@ export default async function handler(
     status: 'unavailable',
     retryable: true
   });
+}
+
+export default async function handler(
+  req: VercelLikeRequest,
+  res: VercelLikeResponse
+): Promise<void> {
+  return handleNoncesCleanup(req, res);
 }
