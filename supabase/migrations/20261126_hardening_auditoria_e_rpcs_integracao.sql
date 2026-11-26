@@ -36,32 +36,33 @@ BEGIN;
 --    remover políticas permissivas para não administradores.
 -- ----------------------------------------------------------------------------
 DO $$
+DECLARE
+  v_table_name text;
+  v_policy_name text;
 BEGIN
-  IF EXISTS (
-    SELECT 1
-    FROM pg_class c
-    JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE n.nspname = 'public'
-      AND c.relname = 'historico_alteracoes_dados'
-      AND c.relkind IN ('r', 'p')
-  ) THEN
-    EXECUTE 'ALTER TABLE public.historico_alteracoes_dados ENABLE ROW LEVEL SECURITY';
-    EXECUTE 'DROP POLICY IF EXISTS "historico_alteracoes_select_policy" ON public.historico_alteracoes_dados';
-    EXECUTE 'REVOKE ALL ON TABLE public.historico_alteracoes_dados FROM PUBLIC, anon, authenticated';
-  END IF;
+  FOREACH v_table_name IN ARRAY ARRAY['historico_alteracoes_dados', 'solicitacoes_alteracao_externa'] LOOP
+    IF EXISTS (
+      SELECT 1
+      FROM pg_class c
+      JOIN pg_namespace n ON n.oid = c.relnamespace
+      WHERE n.nspname = 'public'
+        AND c.relname = v_table_name
+        AND c.relkind IN ('r', 'p')
+    ) THEN
+      EXECUTE format('ALTER TABLE public.%I ENABLE ROW LEVEL SECURITY', v_table_name);
 
-  IF EXISTS (
-    SELECT 1
-    FROM pg_class c
-    JOIN pg_namespace n ON n.oid = c.relnamespace
-    WHERE n.nspname = 'public'
-      AND c.relname = 'solicitacoes_alteracao_externa'
-      AND c.relkind IN ('r', 'p')
-  ) THEN
-    EXECUTE 'ALTER TABLE public.solicitacoes_alteracao_externa ENABLE ROW LEVEL SECURITY';
-    EXECUTE 'DROP POLICY IF EXISTS "solicitacoes_alteracao_select_policy" ON public.solicitacoes_alteracao_externa';
-    EXECUTE 'REVOKE ALL ON TABLE public.solicitacoes_alteracao_externa FROM PUBLIC, anon, authenticated';
-  END IF;
+      FOR v_policy_name IN
+        SELECT p.policyname
+        FROM pg_policies p
+        WHERE p.schemaname = 'public'
+          AND p.tablename = v_table_name
+      LOOP
+        EXECUTE format('DROP POLICY IF EXISTS %I ON public.%I', v_policy_name, v_table_name);
+      END LOOP;
+
+      EXECUTE format('REVOKE ALL ON TABLE public.%I FROM PUBLIC, anon, authenticated', v_table_name);
+    END IF;
+  END LOOP;
 END
 $$;
 
