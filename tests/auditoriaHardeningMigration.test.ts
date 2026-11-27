@@ -38,12 +38,16 @@ test('migration de hardening segue padrão e ordem cronológica após migrations
   const idx20261119 = migrationFiles.indexOf('20261119_api_v2_s2s_alinhamento_esquema.sql');
   const idxCurrent = migrationFiles.indexOf(MIGRATION_FILENAME);
 
+  const idx20261127 = migrationFiles.indexOf('20261127_s2s_politicas_e_operacoes.sql');
+
   assert.notEqual(idx20261116, -1);
   assert.notEqual(idx20261119, -1);
   assert.notEqual(idxCurrent, -1);
   assert.ok(idxCurrent > idx20261116);
   assert.ok(idxCurrent > idx20261119);
-  assert.equal(idxCurrent, migrationFiles.length - 1);
+  if (idx20261127 !== -1) {
+    assert.ok(idxCurrent < idx20261127);
+  }
 
   const sql = readMigrationSql();
   assert.match(sql, /\bBEGIN;/);

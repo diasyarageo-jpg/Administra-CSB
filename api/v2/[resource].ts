@@ -17,6 +17,11 @@ import {
   authenticateS2sRequest,
   type S2sRequestLike
 } from '../../src/server/s2sAuth.js';
+import {
+  handleAdminPoliticasRequest,
+  handleAdminSolicitacoesRequest,
+  handleS2sOperacoesRequest
+} from '../../src/server/s2sOperacoes.js';
 
 export const config = {
   api: {
@@ -27,6 +32,12 @@ export const config = {
 export interface V2ResourceRequest extends S2sRequestLike {
   query?: Record<string, string | string[] | undefined>;
 }
+
+export type V2EndpointResource =
+  | V2CatalogResource
+  | 'operacoes'
+  | 'politicas'
+  | 'solicitacoes';
 
 interface CatalogResourceSpec {
   requiredScope: 'barragens:read' | 'empreendedores:read';
@@ -54,7 +65,16 @@ function isV2CatalogResource(value: unknown): value is V2CatalogResource {
   return value === 'barragens' || value === 'empreendedores';
 }
 
-export function resolveV2CatalogResource(req: V2ResourceRequest): V2CatalogResource | null {
+function isV2EndpointResource(value: unknown): value is V2EndpointResource {
+  return (
+    isV2CatalogResource(value) ||
+    value === 'operacoes' ||
+    value === 'politicas' ||
+    value === 'solicitacoes'
+  );
+}
+
+export function resolveV2EndpointResource(req: V2ResourceRequest): V2EndpointResource | null {
   const rawUrl = String(req?.originalUrl || req?.url || '').trim();
   if (rawUrl) {
     let pathAndQuery = rawUrl;
@@ -84,7 +104,7 @@ export function resolveV2CatalogResource(req: V2ResourceRequest): V2CatalogResou
     const match = /^\/api\/v2\/([^/]+)\/?$/.exec(rawPath);
     if (match) {
       const segment = match[1];
-      if (isV2CatalogResource(segment)) {
+      if (isV2EndpointResource(segment)) {
         return segment;
       }
       if (segment !== '[resource]' && segment !== '%5Bresource%5D') {
@@ -96,17 +116,22 @@ export function resolveV2CatalogResource(req: V2ResourceRequest): V2CatalogResou
   }
 
   const queryResource = req?.query?.resource;
-  if (isV2CatalogResource(queryResource)) {
+  if (isV2EndpointResource(queryResource)) {
     return queryResource;
   }
   return null;
+}
+
+export function resolveV2CatalogResource(req: V2ResourceRequest): V2CatalogResource | null {
+  const resource = resolveV2EndpointResource(req);
+  return isV2CatalogResource(resource) ? resource : null;
 }
 
 const CONTROL_CHARS_REGEX = /[\u0000-\u001f\u007f]/;
 
 export function stripInternalVercelResourceParam(
   rawTarget: string,
-  routeResource: V2CatalogResource
+  routeResource: V2EndpointResource
 ): string {
   const original = String(rawTarget || '/');
   const trimmed = original.trim();
@@ -184,7 +209,7 @@ export function stripInternalVercelResourceParam(
 
 function createPublicV2Request(
   req: V2ResourceRequest,
-  resource: V2CatalogResource
+  resource: V2EndpointResource
 ): V2ResourceRequest {
   const rawTarget = String(req?.originalUrl || req?.url || '/');
   const publicUrl = stripInternalVercelResourceParam(rawTarget, resource);
@@ -207,12 +232,29 @@ export default async function handler(
   req: V2ResourceRequest,
   res: VercelLikeResponse
 ): Promise<void> {
-  const resource = resolveV2CatalogResource(req);
+  const resource = resolveV2EndpointResource(req);
   if (!resource) {
     sendV2Json(res, 404, {
       success: false,
       error: 'Recurso não encontrado.'
     });
+    return;
+  }
+
+  const publicReq = createPublicV2Request(req, resource);
+
+  if (resource === 'operacoes') {
+    await handleS2sOperacoesRequest(publicReq, res);
+    return;
+  }
+
+  if (resource === 'politicas') {
+    await handleAdminPoliticasRequest(publicReq as any, res);
+    return;
+  }
+
+  if (resource === 'solicitacoes') {
+    await handleAdminSolicitacoesRequest(publicReq as any, res);
     return;
   }
 
@@ -227,8 +269,6 @@ export default async function handler(
     });
     return;
   }
-
-  const publicReq = createPublicV2Request(req, resource);
 
   const auth = await authenticateS2sRequest(publicReq, {
     requiredScope: spec.requiredScope

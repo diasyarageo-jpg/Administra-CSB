@@ -2,7 +2,7 @@
 
 Este documento registra a arquitetura acordada de governança cadastral e integração entre o **Administra** e os sistemas **Classifica**, **Notifica** e **Fiscaliza** no âmbito da Coordenadoria de Segurança de Barragens (CSB / SURH / SEMA-MT).
 
-> **Escopo desta entrega:** documentação arquitetural de referência. Nenhuma API de escrita/criação cadastral, sincronização automática de gravação, alteração de schema SQL ou migration foi implementada nesta etapa.
+> **Escopo desta entrega:** documentação arquitetural de referência e especificação da fundação S2S v2 versionada neste repositório. A migration corretiva incremental `supabase/migrations/20261128_fix_s2s_cadastro_novo_entidade_origens.sql` (que alinha exclusivamente `public.s2s_executar_cadastro_novo` ao schema real de `public.entidade_origens`) está preparada no repositório para revisão e execução controlada — **não** deve ser presumida como aplicada em produção.
 
 ---
 
@@ -29,31 +29,28 @@ Os sistemas **Classifica**, **Notifica** e **Fiscaliza**:
 
 ---
 
-## 3. Política Híbrida para Propostas Futuras de Cadastro
+## 3. Política Híbrida e Fundação S2S v2 (`default-deny`)
 
-Em etapa futura, os sistemas **Classifica**, **Notifica** e **Fiscaliza** poderão **propor** ao Administra o cadastro de uma entidade ausente identificada em seus fluxos operacionais, seguindo obrigatoriamente uma **política de migração híbrida**:
+As operações servidor-a-servidor (`/api/v2/operacoes`) seguem o princípio **default-deny**: tudo é proibido por padrão enquanto não existir política ativa na tabela `public.integracao_s2s_politicas` para `(sistema_origem, operacao)` **e** validação completa no backend (assinatura Ed25519 + nonce anti-replay + escopo `operacoes:write` + contrato de payload tipado + idempotência + auditoria sanitizada).
 
-### 3.1. Caminho Automático (Restrito)
+### 3.1. Operações Liberadas (Mediante Política Ativa)
 
-A criação automática no Administra só poderá ocorrer quando a proposta atender **simultaneamente** a todos os critérios abaixo:
+1. **Cadastro novo (`execucao_direta`, somente se inexistente):** `cadastrar_empreendedor`, `cadastrar_barragem`, `cadastrar_rt`. Não sobrescrevem registros existentes (`409 DUPLICATE_RECORD`) e registram origem (`sistema_origem`, usuário/matrícula) e auditoria transacional.
+2. **Proposta de alteração em cadastro existente (`proposta_aprovacao` obrigatório):** `propor_alteracao_empreendedor`, `propor_alteracao_barragem`, `propor_alteracao_rt`. Criam solicitação `Pendente` em `public.integracao_s2s_solicitacoes` e **nunca** aplicam alteração direta no cadastro mestre.
+3. **Cancelamento de solicitação ainda pendente (`execucao_direta` restrita):** `cancelar_solicitacao_pendente`, permitido apenas ao mesmo sistema de origem e ao solicitante/delegado autorizado em política, com motivo obrigatório e trilha de auditoria.
 
-1. **Validações cadastrais e estruturais aprovadas:** campos obrigatórios completos, formato válido (ex.: CPF/CNPJ completo e válido quando aplicável, registro profissional válido para RT, coordenadas e município consistentes) e ausência de dados mascarados/truncados.
-2. **Verificação determinística de duplicidade sem ambiguidade:** confirmação objetiva de que a entidade ainda não existe no cadastro mestre e de que não há múltiplos candidatos ou conflitos com registros vigentes.
-3. **Rastreabilidade registrada:** gravação obrigatória da **origem** (sistema proponente e referência de origem) e da **data** (carimbo temporal da proposta/criação) para auditoria e proveniência.
+### 3.2. Operações Bloqueadas por Padrão
 
-### 3.2. Revisão Humana Obrigatória
-
-Qualquer proposta que não satisfaça os critérios estritos de automação deve ser retida para **revisão humana** no Administra antes de gerar ou alterar um registro mestre, incluindo obrigatoriamente:
-
-- **Casos inválidos ou incompletos:** campos essenciais ausentes, documentos mascarados ou inválidos, coordenadas fora dos limites válidos ou inconsistentes.
-- **Casos ambíguos:** múltiplos candidatos no cadastro mestre, homônimos sem identificador forte, conflito de titularidade/papel (ex.: pessoa notificada ou responsável pela área versus empreendedor/proprietário) ou múltiplas barragens compartilhando o mesmo código CAR (já que o CAR não identifica uma barragem isoladamente).
-- **Registro de fila e proveniência:** toda ocorrência encaminhada à revisão humana preserva **origem**, **data**, evidências de comparação e decisão final do usuário responsável.
+- **Bloqueadas por lacuna de contrato no repositório (`ativo = false` por constraint e bloqueio no backend):**
+  - `cadastrar_empreendimento` e `propor_alteracao_empreendimento`: não há DDL/migration de tabela `public.empreendimentos` versionada neste repositório (apenas `empreendedores.empreendimentos` JSONB e `barragens.empreendimento` texto).
+  - `registrar_documento`: não há DDL/migration versionada para `public.documentos_catalogo` nem índice único de idempotência `(origem_sistema, origem_documento_id)` neste repositório.
+- **Bloqueadas nesta etapa até definição de fluxo específico:**
+  - `desativar_cadastro`, `cancelar_ato_aplicado`, `transferir_titularidade`, `reverter_ato`.
 
 ---
 
-## 4. Estado Atual e Restrições Vigentes
+## 4. Governança, Aprovação e Restrições Vigentes
 
-- **Sem endpoints de escrita externa:** não existem nesta fase rotas de criação ou atualização automática disparadas pelos sistemas satélites, nem rotinas de escrita ou migração automática de dados.
-- **Rota S2S bloqueada:** a integração servidor-a-servidor permanece bloqueada e inalterada.
-- **Leitura e conciliação assistida:** as rotinas atuais operam sem mesclagem ou criação automática unilateral, exigindo validação assistida para consolidação de vínculos e auditoria de proveniência.
-- **Desindexação preservada:** o domínio oficial e os deployments Preview mantêm `<meta name="robots" content="noindex, nofollow" />` em `index.html` e o cabeçalho `X-Robots-Tag: noindex, nofollow` em `vercel.json` (camada exclusiva de não indexação por buscadores, complementar e nunca substituta ao controle de acesso e autenticação).
+- **Gestão de políticas e aprovação exclusivas de Administrador:** apenas usuário com papel ativo `Administrador` autenticado no Administra (`/api/v2/politicas` e `/api/v2/solicitacoes`, validadas novamente no banco por `public._validar_admin_ativo_s2s`) pode criar/alterar políticas ou aprovar/rejeitar solicitações. Sistemas S2S e chamadas `service_role` sem contexto de Administrador ativo são bloqueados.
+- **Isolamento do navegador:** as tabelas `integracao_s2s_politicas`, `integracao_s2s_solicitacoes` e `integracao_s2s_operacoes_log` e as funções `SECURITY DEFINER` relacionadas têm acesso revogado para `PUBLIC`, `anon` e `authenticated`.
+- **Desindexação preservada:** o domínio oficial e os deployments Preview mantêm `<meta name="robots" content="noindex, nofollow" />` em `index.html` e o cabeçalho `X-Robots-Tag: noindex, nofollow` em `vercel.json`.
