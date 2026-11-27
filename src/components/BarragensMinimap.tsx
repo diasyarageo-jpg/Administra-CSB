@@ -18,6 +18,14 @@ import {
   normFilterText
 } from '../utils/databaseAdvancedFilters';
 
+import {
+  evaluateBarragemVinculoStatus,
+  evaluateDamCoordinates,
+  normVinculoText,
+  VinculoStatusInfo
+} from '../utils/vinculoStatus';
+import { ConferenciaDocumentosPanel } from './ConferenciaDocumentosModal';
+
 export interface BarragensMinimapProps {
   barragens: any[];
   empreendedores?: any[];
@@ -41,8 +49,9 @@ export interface DamDocumentItem {
   resumo?: string;
 }
 
-interface ParsedDam {
+export interface ParsedDam {
   raw: any;
+  id: string;
   lat: number;
   lon: number;
   nome: string;
@@ -50,10 +59,24 @@ interface ParsedDam {
   empreendedorId?: string;
   municipio: string;
   car: string;
+  snisb: string;
   processo: string;
   situacao: string;
+  vinculo: VinculoStatusInfo;
   documentos: DamDocumentItem[];
   analistas: string[];
+}
+
+export interface UnmappedDamEntry {
+  raw: any;
+  id: string;
+  nome: string;
+  municipio: string;
+  car: string;
+  snisb: string;
+  empreendedorNome: string;
+  vinculo: VinculoStatusInfo;
+  coordenadasStatus: 'Coordenadas indisponíveis';
 }
 
 /**
@@ -200,12 +223,14 @@ function getTipoColor(tipo: string): string {
   return '#64748b'; // Cinza neutro
 }
 
-const SISTEMAS_DEFAULT = {
+export const MINIMAP_SISTEMAS_DEFAULT = {
   sisb: true,
-  classifica: true,
-  notifica: true,
-  fiscaliza: true
+  classifica: false,
+  notifica: false,
+  fiscaliza: false
 };
+
+const SISTEMAS_DEFAULT = MINIMAP_SISTEMAS_DEFAULT;
 
 /**
  * Calcula distância euclidiana aproximada em km entre dois pontos geográficos
@@ -225,27 +250,26 @@ function calculateDistanceKm(lat1: number, lon1: number, lat2: number, lon2: num
 }
 
 /**
- * Identifica e consolida todos os documentos vinculados a uma barragem
- * (Parecer de Classificação, Notificação, Ofício, etc.) e ordena do mais recente ao mais novo.
+ * Identifica e consolida os documentos vinculados a uma barragem usando
+ * exclusivamente identificadores estáveis (`barragemId` ou `processo`).
+ * NUNCA gera documentos sintéticos nem infere vínculo oficial apenas por nome ou CAR.
  */
-function resolveDamDocuments(
+export function resolveDamDocuments(
   dam: any,
   catalogoDocs: DocumentoCatalogoItem[] = []
 ): DamDocumentItem[] {
   const docs: DamDocumentItem[] = [];
-  const damIdStr = String(dam.id || '').trim();
-  const damNomeStr = String(dam.nome || dam.name || '').trim().toLowerCase();
-  const damCarStr = String(dam.car || '').trim().toLowerCase();
-  const damProcStr = String(dam.processo || dam.processNumber || '').trim().toLowerCase();
+  const damIdStr = String(dam?.id || '').trim();
+  const damProcStr = normVinculoText(dam?.processo || dam?.processNumber || '');
 
-  // 1. Busca no catálogo central de documentos (Classifica, Notifica, Fiscaliza)
+  // 1. Busca no catálogo central somente por ID estável da barragem ou processo confirmado
   for (const c of catalogoDocs) {
-    const matchId = c.barragemId && String(c.barragemId).trim() === damIdStr;
-    const matchCar = damCarStr && c.carMt && String(c.carMt).trim().toLowerCase() === damCarStr;
-    const matchProc = damProcStr && c.processo && String(c.processo).trim().toLowerCase() === damProcStr;
-    const matchNome = damNomeStr && c.barragemNome && String(c.barragemNome).trim().toLowerCase() === damNomeStr;
+    const matchId = Boolean(damIdStr && c.barragemId && String(c.barragemId).trim() === damIdStr);
+    const matchProc = Boolean(
+      damProcStr && c.processo && normVinculoText(c.processo) === damProcStr
+    );
 
-    if (matchId || matchCar || matchProc || matchNome) {
+    if (matchId || matchProc) {
       const ts = Date.parse(c.dataEmissao || c.criadoEm || '') || 0;
       docs.push({
         id: c.id,
@@ -259,18 +283,21 @@ function resolveDamDocuments(
         situacao: c.situacao || 'Emitido',
         color: getTipoColor(c.tipoNome || ''),
         analistas: c.analistasElaboradores || [],
-        resumo: c.analistasElaboradores?.length ? `Elaborado por: ${c.analistasElaboradores.join(', ')}` : undefined
+        resumo: c.analistasElaboradores?.length
+          ? `Elaborado por: ${c.analistasElaboradores.join(', ')}`
+          : undefined
       });
     }
   }
 
-  // 2. Extrai documentos registrados diretamente no objeto da barragem (caso existam)
-  if (Array.isArray(dam.documentos)) {
+  // 2. Extrai documentos reais registrados no objeto da barragem (quando existirem)
+  if (Array.isArray(dam?.documentos)) {
     for (const d of dam.documentos) {
+      if (!d) continue;
       const tipo = d.tipo || d.tipoNome || 'Documento';
       const ts = Date.parse(d.data || d.dataEmissao || '') || 0;
       docs.push({
-        id: String(d.id || `doc_${dam.id || 'dam'}_${docs.length}`),
+        id: String(d.id || `doc_${damIdStr || 'dam'}_${docs.length}`),
         tipo,
         tipoCodigo: d.tipoCodigo || 'OUTRO',
         titulo: d.titulo || `${tipo} da Barragem`,
@@ -280,121 +307,72 @@ function resolveDamDocuments(
         origemSistema: d.origem || d.origemSistema || 'SISB-MT',
         situacao: d.situacao || 'Emitido',
         color: getTipoColor(tipo),
-        analistas: d.analistas || (d.analista ? [d.analista] : [])
+        analistas: d.analistas || (d.analista ? [String(d.analista)] : [])
       });
     }
   }
 
-  // 3. Documentos individuais em campos específicos do cadastro
-  if (dam.parecerClassificacao || dam.parecer) {
-    const num = dam.parecerNumero || (typeof dam.parecer === 'string' && dam.parecer.length < 30 ? dam.parecer : undefined);
-    const ts = Date.parse(dam.dataParecer || dam.updatedAt || '2024-04-12') || Date.now();
+  if (dam?.parecerClassificacao || dam?.parecer) {
+    const num =
+      dam.parecerNumero ||
+      (typeof dam.parecer === 'string' && dam.parecer.length < 30 ? dam.parecer : undefined);
+    const ts = Date.parse(dam.dataParecer || dam.updatedAt || '') || 0;
     docs.push({
-      id: `parecer_${dam.id}`,
+      id: `parecer_${damIdStr}`,
       tipo: 'Parecer de Classificação',
       tipoCodigo: 'PARECER_CLASSIFICACAO',
-      titulo: `Parecer de Classificação - DPA/CRI`,
-      numero: num || '042/2024/CSB',
-      data: dam.dataParecer || '2024-04-12',
+      titulo: 'Parecer de Classificação - DPA/CRI',
+      numero: num,
+      data: dam.dataParecer || '—',
       dataTimestamp: ts,
       origemSistema: 'Classifica',
       situacao: 'Vigente',
       color: getTipoColor('Parecer de Classificação'),
-      analistas: ['Equipe de Classificação CSB']
+      analistas: []
     });
   }
 
-  if (dam.notificacao || dam.notificacaoNumero) {
-    const num = dam.notificacaoNumero || (typeof dam.notificacao === 'string' && dam.notificacao.length < 30 ? dam.notificacao : undefined);
-    const ts = Date.parse(dam.dataNotificacao || dam.updatedAt || '2023-10-18') || Date.now() - 500000;
+  if (dam?.notificacao || dam?.notificacaoNumero) {
+    const num =
+      dam.notificacaoNumero ||
+      (typeof dam.notificacao === 'string' && dam.notificacao.length < 30 ? dam.notificacao : undefined);
+    const ts = Date.parse(dam.dataNotificacao || dam.updatedAt || '') || 0;
     docs.push({
-      id: `notif_${dam.id}`,
+      id: `notif_${damIdStr}`,
       tipo: 'Notificação',
       tipoCodigo: 'NOTIFICACAO',
       titulo: 'Notificação de Regularização de Segurança',
-      numero: num || '108/2023',
-      data: dam.dataNotificacao || '2023-10-18',
+      numero: num,
+      data: dam.dataNotificacao || '—',
       dataTimestamp: ts,
       origemSistema: 'Notifica',
       situacao: 'Emitido',
       color: getTipoColor('Notificação'),
-      analistas: ['Fiscalização SEMA/CSB']
+      analistas: []
     });
   }
 
-  if (dam.oficio || dam.oficioNumero) {
-    const num = dam.oficioNumero || (typeof dam.oficio === 'string' && dam.oficio.length < 30 ? dam.oficio : undefined);
-    const ts = Date.parse(dam.dataOficio || dam.updatedAt || '2023-06-25') || Date.now() - 1000000;
+  if (dam?.oficio || dam?.oficioNumero) {
+    const num =
+      dam.oficioNumero ||
+      (typeof dam.oficio === 'string' && dam.oficio.length < 30 ? dam.oficio : undefined);
+    const ts = Date.parse(dam.dataOficio || dam.updatedAt || '') || 0;
     docs.push({
-      id: `oficio_${dam.id}`,
+      id: `oficio_${damIdStr}`,
       tipo: 'Ofício',
-      tipoCodigo: 'Ofício',
+      tipoCodigo: 'OFICIO',
       titulo: 'Ofício de Convocação e Instrução Cadastral',
-      numero: num || '075/2023',
-      data: dam.dataOficio || '2023-06-25',
+      numero: num,
+      data: dam.dataOficio || '—',
       dataTimestamp: ts,
       origemSistema: 'Fiscaliza',
       situacao: 'Emitido',
       color: getTipoColor('Ofício'),
-      analistas: ['Coordenação CSB/SURH']
+      analistas: []
     });
   }
 
-  // 4. Caso a barragem não possua documentos registrados, cria um histórico técnico verossímil
-  // baseado em seu nome e identificação cadastral para demonstração interativa imediata
-  if (docs.length === 0) {
-    const seed = (damIdStr + damNomeStr).split('').reduce((acc, c) => acc + c.charCodeAt(0), 0);
-    const anoAtual = 2024;
-    const anoAnterior = 2023;
-
-    docs.push({
-      id: `pc_${dam.id || seed}`,
-      tipo: 'Parecer de Classificação',
-      tipoCodigo: 'PARECER_CLASSIFICACAO',
-      titulo: `Parecer Técnico de Classificação - Matriz de Risco e DPA`,
-      numero: `${(seed % 89 + 10).toString().padStart(3, '0')}/${anoAtual}/CSB`,
-      data: `${anoAtual}-05-${(seed % 20 + 1).toString().padStart(2, '0')}`,
-      dataTimestamp: new Date(`${anoAtual}-05-${(seed % 20 + 1).toString().padStart(2, '0')}`).getTime(),
-      origemSistema: 'Classifica',
-      situacao: 'Vigente',
-      color: getTipoColor('Parecer de Classificação'),
-      analistas: ['Eng. Tiago Silva (CSB)', 'Geól. Mariana Lopes']
-    });
-
-    if (seed % 2 === 0) {
-      docs.push({
-        id: `not_${dam.id || seed}`,
-        tipo: 'Notificação',
-        tipoCodigo: 'NOTIFICACAO',
-        titulo: `Notificação Técnica de Segurança de Barragem`,
-        numero: `${(seed % 140 + 20).toString().padStart(3, '0')}/${anoAnterior}`,
-        data: `${anoAnterior}-11-${(seed % 25 + 1).toString().padStart(2, '0')}`,
-        dataTimestamp: new Date(`${anoAnterior}-11-${(seed % 25 + 1).toString().padStart(2, '0')}`).getTime(),
-        origemSistema: 'Notifica',
-        situacao: 'Emitido',
-        color: getTipoColor('Notificação'),
-        analistas: ['Eng. Rafael Costa (CSB)']
-      });
-    }
-
-    if (seed % 3 === 0 || seed % 2 !== 0) {
-      docs.push({
-        id: `of_${dam.id || seed}`,
-        tipo: 'Ofício',
-        tipoCodigo: 'OFICIO',
-        titulo: `Ofício Circular SEMA/SURH/CSB - Atualização Cadastral e RT`,
-        numero: `${(seed % 75 + 15).toString().padStart(3, '0')}/${anoAnterior}`,
-        data: `${anoAnterior}-08-${(seed % 22 + 1).toString().padStart(2, '0')}`,
-        dataTimestamp: new Date(`${anoAnterior}-08-${(seed % 22 + 1).toString().padStart(2, '0')}`).getTime(),
-        origemSistema: 'Fiscaliza',
-        situacao: 'Emitido',
-        color: getTipoColor('Ofício'),
-        analistas: ['Equipe de Fiscalização CSB']
-      });
-    }
-  }
-
-  // Ordenação mandatória: do mais recente ao mais novo
+  // Ordenação: do mais recente ao mais antigo
   return docs.sort((a, b) => b.dataTimestamp - a.dataTimestamp);
 }
 
@@ -423,23 +401,25 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
   const [isExpanded, setIsExpanded] = useState<boolean>(true);
   const [mapZoom, setMapZoom] = useState<number>(6);
   const [catalogoDocs, setCatalogoDocs] = useState<DocumentoCatalogoItem[]>(propDocumentos || []);
+  const [externalCatalogLoaded, setExternalCatalogLoaded] = useState<boolean>(
+    Boolean(propDocumentos && propDocumentos.length > 0)
+  );
+  const [externalCatalogLoading, setExternalCatalogLoading] = useState<boolean>(false);
+  const [externalCatalogError, setExternalCatalogError] = useState<string | null>(null);
   const [showMunicipalities, setShowMunicipalities] = useState<boolean>(true);
   const [showOuterMask, setShowOuterMask] = useState<boolean>(true);
+  const [showUnmappedDrawer, setShowUnmappedDrawer] = useState<boolean>(false);
 
   // ============================================================================
-  // ESTADOS DOS NOVOS FILTROS E PESQUISA POR COORDENADAS GMS
+  // ESTADOS DOS FILTROS E PESQUISA POR COORDENADAS GMS
   // ============================================================================
   const [inputLat, setInputLat] = useState<string>('');
   const [inputLong, setInputLong] = useState<string>('');
   const [coordSearchFeedback, setCoordSearchFeedback] = useState<string | null>(null);
 
-  // Caixinhas de seleção para ativar e desativar informações de sistemas
-  const [activeSystems, setActiveSystems] = useState({
-    sisb: true,
-    classifica: true,
-    notifica: true,
-    fiscaliza: true
-  });
+  // Camadas externas (Classifica, Notifica, Fiscaliza) iniciam DESMARCADAS por padrão
+  // e só consultam dados externos sob demanda quando selecionadas.
+  const [activeSystems, setActiveSystems] = useState(MINIMAP_SISTEMAS_DEFAULT);
 
   // Filtros de pesquisa por analista, por município, por empreendedor, por nome
   const [searchNome, setSearchNome] = useState<string>('');
@@ -465,28 +445,62 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
   const [showAdvFilters, setShowAdvFilters] = useState<boolean>(false);
   const [advFilters, setAdvFilters] = useState(EMPTY_MINIMAP_ADV);
 
-  // Carrega catálogo central de documentos se não fornecido via prop
   useEffect(() => {
     if (propDocumentos && propDocumentos.length > 0) {
       setCatalogoDocs(propDocumentos);
+      setExternalCatalogLoaded(true);
+    }
+  }, [propDocumentos]);
+
+  const anyExternalSystemEnabled = Boolean(
+    activeSystems.classifica || activeSystems.notifica || activeSystems.fiscaliza
+  );
+
+  // Carregamento sob demanda de sistemas externos apenas quando alguma camada externa for marcada
+  useEffect(() => {
+    if (!anyExternalSystemEnabled || externalCatalogLoaded || externalCatalogLoading) {
       return;
     }
+    if (propDocumentos && propDocumentos.length > 0) return;
 
     let isMounted = true;
+    setExternalCatalogLoading(true);
+    setExternalCatalogError(null);
+
     carregarCatalogoDocumentos({ empreendedores, barragens, rts: [] })
       .then(res => {
-        if (isMounted && res.documentos?.length > 0) {
-          setCatalogoDocs(res.documentos);
+        if (!isMounted) return;
+        setCatalogoDocs(res.documentos || []);
+        setExternalCatalogLoaded(true);
+        const failed = (res.origensStatus || []).filter(s => !s.conectado && s.erro);
+        if (failed.length > 0 && (!res.documentos || res.documentos.length === 0)) {
+          setExternalCatalogError(
+            'Camadas externas aguardando configuração de integração no servidor; nenhum documento externo disponível.'
+          );
         }
       })
-      .catch(() => {});
+      .catch(() => {
+        if (isMounted) {
+          setExternalCatalogError('Não foi possível consultar o catálogo externo sob demanda.');
+        }
+      })
+      .finally(() => {
+        if (isMounted) setExternalCatalogLoading(false);
+      });
 
     return () => {
       isMounted = false;
     };
-  }, [propDocumentos, empreendedores, barragens]);
+  }, [
+    anyExternalSystemEnabled,
+    externalCatalogLoaded,
+    externalCatalogLoading,
+    propDocumentos,
+    empreendedores,
+    barragens
+  ]);
 
-  // Lista única de analistas, municípios e empreendedores para os dropdowns
+  // Lista única de analistas reais, municípios e empreendedores para os dropdowns
   const { allMunicipios, allEmpreendedores, allAnalistas } = useMemo(() => {
     const munSet = new Set<string>();
     const empSet = new Set<string>();
@@ -495,11 +509,9 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
     for (const b of barragens) {
       if (b.municipio) munSet.add(String(b.municipio).trim());
       if (b.municipality) munSet.add(String(b.municipality).trim());
-      const emp = resolveDamEntrepreneur(b.empreendedor || b.entrepreneurId, empreendedores);
-      if (emp.displayName && emp.displayName !== '—') {
-        empSet.add(emp.displayName.trim());
-      } else if (b.entrepreneurName) {
-        empSet.add(String(b.entrepreneurName).trim());
+      const vinculo = evaluateBarragemVinculoStatus(b, empreendedores);
+      if (vinculo.officialEmpreendedorNome) {
+        empSet.add(vinculo.officialEmpreendedorNome);
       }
     }
 
@@ -515,13 +527,6 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
       if (d.responsavelTecnicoNome) anaSet.add(String(d.responsavelTecnicoNome).trim());
     }
 
-    // Analistas padrão de segurança de barragens da CSB / SEMA-MT
-    anaSet.add('Eng. Tiago Silva (CSB)');
-    anaSet.add('Geól. Mariana Lopes');
-    anaSet.add('Eng. Rafael Costa (CSB)');
-    anaSet.add('Fiscalização SEMA/CSB');
-    anaSet.add('Coordenação CSB/SURH');
-
     return {
       allMunicipios: Array.from(munSet).sort((a, b) => a.localeCompare(b, 'pt-BR')),
       allEmpreendedores: Array.from(empSet).sort((a, b) => a.localeCompare(b, 'pt-BR')),
@@ -529,52 +534,61 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
     };
   }, [barragens, empreendedores, catalogoDocs]);
 
-  // Filtra e converte coordenadas válidas das barragens com documentos vinculados
-  const { mappedDams, unmappedCount } = useMemo(() => {
+  // Classifica barragens em mapeadas (com coordenadas válidas) e com coordenadas indisponíveis
+  const { mappedDams, unmappedDams, unmappedCount } = useMemo(() => {
     const mapped: ParsedDam[] = [];
-    let unmapped = 0;
+    const unmappedList: UnmappedDamEntry[] = [];
 
     for (const b of barragens) {
-      const lat = parseCoord(b.latitude, false);
-      const lon = parseCoord(b.longitude, true);
+      const coords = evaluateDamCoordinates(b);
+      const vinculo = evaluateBarragemVinculoStatus(b, empreendedores);
+      const empFallback = resolveDamEntrepreneur(b.empreendedor || b.entrepreneurId, empreendedores);
+      const empNome =
+        vinculo.officialEmpreendedorNome ||
+        (empFallback.displayName !== '—' ? empFallback.displayName : b.entrepreneurName || '—');
 
-      if (
-        lat !== null &&
-        lon !== null &&
-        lat >= -20 &&
-        lat <= -6 &&
-        lon >= -64 &&
-        lon <= -49
-      ) {
-        const emp = resolveDamEntrepreneur(b.empreendedor || b.entrepreneurId, empreendedores);
-        const empNome = emp.displayName !== '—' ? emp.displayName : (b.entrepreneurName || '—');
+      if (coords.available && coords.lat !== null && coords.lon !== null) {
         const damDocs = resolveDamDocuments(b, catalogoDocs);
-
-        // Agrega analistas de todos os documentos vinculados
         const analistasDam = Array.from(
           new Set(damDocs.flatMap(d => d.analistas || []))
         );
 
         mapped.push({
           raw: b,
-          lat,
-          lon,
+          id: String(b.id || `${coords.lat}_${coords.lon}`),
+          lat: coords.lat,
+          lon: coords.lon,
           nome: b.nome || b.name || 'Barragem sem identificação',
           empreendedorNome: empNome,
-          empreendedorId: b.empreendedor || b.entrepreneurId,
+          empreendedorId: vinculo.officialEmpreendedorId,
           municipio: b.municipio || b.municipality || 'Mato Grosso',
           car: b.car || b.codeSnisb || '—',
+          snisb: String(b.snisb || b.codeSnisb || '—'),
           processo: b.processo || b.processNumber || '—',
           situacao: b.situacao || (b.alertLevel ? `Alerta: ${b.alertLevel}` : 'Ativa'),
+          vinculo,
           documentos: damDocs,
           analistas: analistasDam
         });
       } else {
-        unmapped++;
+        unmappedList.push({
+          raw: b,
+          id: String(b.id || b.nome || Math.random()),
+          nome: b.nome || b.name || 'Barragem sem identificação',
+          municipio: b.municipio || b.municipality || 'Não informado',
+          car: b.car || '—',
+          snisb: String(b.snisb || b.codeSnisb || '—'),
+          empreendedorNome: empNome,
+          vinculo,
+          coordenadasStatus: 'Coordenadas indisponíveis'
+        });
       }
     }
 
-    return { mappedDams: mapped, unmappedCount: unmapped };
+    mapped.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR', { sensitivity: 'base' }));
+    unmappedList.sort((a, b) => a.nome.localeCompare(b.nome, 'pt-BR', { sensitivity: 'base' }));
+
+    return { mappedDams: mapped, unmappedDams: unmappedList, unmappedCount: unmappedList.length };
   }, [barragens, empreendedores, catalogoDocs]);
 
   const advActiveCount = useMemo(
@@ -917,7 +931,7 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
     }
   }, [activeLayer]);
 
-  // Atualiza marcadores das barragens no mapa com pontos cartográficos limpos e proporcionais ao zoom
+  // Atualiza marcadores numerados das barragens no mapa em sincronia com a lista hierárquica
   useEffect(() => {
     const map = mapInstanceRef.current;
     const group = markersLayerRef.current;
@@ -926,53 +940,53 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
     isRebuildingLayersRef.current = true;
     group.clearLayers();
 
-    const baseRadius =
-      mapZoom <= 5
-        ? 3.5
-        : mapZoom === 6
-        ? 4.5
-        : mapZoom === 7
-        ? 5.5
-        : mapZoom <= 9
-        ? 6.5
-        : 7.5;
-
+    const markerSize = mapZoom <= 6 ? 22 : mapZoom <= 8 ? 25 : 28;
     const bounds = L.latLngBounds([]);
-    const selectedMarkers: L.CircleMarker[] = [];
+    const selectedMarkers: L.Marker[] = [];
 
-    filteredMappedDams.forEach(dam => {
+    filteredMappedDams.forEach((dam, idx) => {
+      const orderNumber = idx + 1;
       const damIdKey = String(dam.raw.id ?? `${dam.lat}_${dam.lon}`);
       const isSelected =
         (selectedDam && String(selectedDam.raw.id ?? `${selectedDam.lat}_${selectedDam.lon}`) === damIdKey) ||
         (selectedDamId !== undefined && String(selectedDamId) === String(dam.raw.id));
       const color =
         dam.situacao === 'Ativa'
-          ? '#10b981'
+          ? '#059669'
           : dam.situacao === 'Inativa'
           ? '#64748b'
-          : '#f59e0b';
+          : '#d97706';
 
-      const markerRadius = isSelected ? baseRadius + 2.5 : baseRadius;
+      const size = isSelected ? markerSize + 6 : markerSize;
+      const iconHtml = `
+        <div style="
+          width:${size}px;
+          height:${size}px;
+          border-radius:999px;
+          background:${color};
+          color:#ffffff;
+          border:${isSelected ? '3px solid #0f172a' : '2px solid #ffffff'};
+          box-shadow:${isSelected ? '0 0 0 3px rgba(16,185,129,0.35), 0 4px 12px rgba(15,23,42,0.4)' : '0 2px 6px rgba(15,23,42,0.35)'};
+          display:flex;
+          align-items:center;
+          justify-content:center;
+          font-family:'Plus Jakarta Sans', Inter, system-ui, sans-serif;
+          font-size:${isSelected ? 11 : 10}px;
+          font-weight:800;
+          line-height:1;
+        ">${orderNumber}</div>
+      `;
 
-      if (isSelected) {
-        L.circleMarker([dam.lat, dam.lon], {
-          radius: markerRadius + 5,
-          color: '#ffffff',
-          weight: 1.5,
-          opacity: 0.85,
-          fillColor: color,
-          fillOpacity: 0.25,
-          interactive: false
-        }).addTo(group);
-      }
+      const numberedIcon = L.divIcon({
+        className: 'minimap-numbered-marker',
+        html: iconHtml,
+        iconSize: [size, size],
+        iconAnchor: [size / 2, size / 2]
+      });
 
-      const marker = L.circleMarker([dam.lat, dam.lon], {
-        radius: markerRadius,
-        color: '#ffffff',
-        weight: isSelected ? 2.25 : 1.25,
-        opacity: isSelected ? 1 : 0.92,
-        fillColor: color,
-        fillOpacity: isSelected ? 1 : 0.88
+      const marker = L.marker([dam.lat, dam.lon], {
+        icon: numberedIcon,
+        zIndexOffset: isSelected ? 900 : 100
       });
 
       // Filtra documentos pelos sistemas ativos
@@ -1007,21 +1021,17 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
               `
               )
               .join('')
-          : '<div style="font-size: 10px; color: #94a3b8; font-style: italic; margin-top: 4px;">Nenhum documento ativo pelos sistemas selecionados</div>';
+          : '<div style="font-size: 10px; color: #94a3b8; font-style: italic; margin-top: 4px;">Nenhum documento carregado para as camadas ativas</div>';
 
       const infoCardHtml = `
         <div style="font-family: 'Plus Jakarta Sans', Inter, system-ui, sans-serif; font-size: 11px; padding: 2px 3px; line-height: 1.35; max-width: 265px;">
           <strong style="color: #0f172a; font-size: 12px; display: block; border-bottom: 1px solid #e2e8f0; padding-bottom: 3px; margin-bottom: 4px; padding-right: 16px;">
-            ${dam.nome}
+            #${orderNumber} · ${dam.nome}
           </strong>
           <span style="color: #475569; display: block;">${dam.municipio} / MT</span>
           <span style="color: #64748b; font-size: 10px; display: block;">Empreendedor: <b>${dam.empreendedorNome}</b></span>
+          <span style="color: #64748b; font-size: 10px; display: block;">Vínculo: <b>${dam.vinculo.shortLabel}</b></span>
           <span style="color: #64748b; font-size: 10px; display: block;">GMS: <code>${decimalToGMS(dam.lat, false)} · ${decimalToGMS(dam.lon, true)}</code></span>
-          <div style="margin-top: 3px;">
-            <span style="display: inline-block; padding: 1px 6px; border-radius: 99px; background: ${color}1f; color: ${color}; font-weight: 700; font-size: 9px;">
-              ${dam.situacao}
-            </span>
-          </div>
           <div style="margin-top: 6px; border-top: 1px dashed #cbd5e1; padding-top: 5px;">
             <span style="font-weight: 800; font-size: 10px; color: #0284c7; display: block; margin-bottom: 2px;">
               Documentos (${visibleDocs.length})
@@ -1038,31 +1048,18 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
         autoPan: false,
         maxWidth: 290,
         minWidth: 220,
-        offset: [0, -(markerRadius + 2)],
+        offset: [0, -(size / 2 + 2)],
         className: 'minimap-clean-popup'
       });
 
       if (!isSelected) {
         marker.bindTooltip(infoCardHtml, {
           direction: 'top',
-          offset: [0, -(markerRadius + 4)],
+          offset: [0, -(size / 2 + 4)],
           opacity: 0.98,
           className: 'minimap-clean-tooltip'
         });
       }
-
-      marker.on('mouseover', () => {
-        if (marker.isPopupOpen()) {
-          marker.closeTooltip();
-        }
-        marker.setRadius(markerRadius + 2.5);
-        marker.setStyle({ weight: 2.25, fillOpacity: 1 });
-      });
-
-      marker.on('mouseout', () => {
-        marker.setRadius(markerRadius);
-        marker.setStyle({ weight: isSelected ? 2.25 : 1.25, fillOpacity: isSelected ? 1 : 0.88 });
-      });
 
       marker.on('popupopen', () => {
         marker.closeTooltip();
@@ -1096,7 +1093,6 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
     });
 
     selectedMarkers.forEach(m => {
-      m.bringToFront();
       m.openPopup();
     });
     isRebuildingLayersRef.current = false;
@@ -1260,9 +1256,9 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
     filterAnalista !== 'TODOS' ||
     advActiveCount > 0 ||
     !activeSystems.sisb ||
-    !activeSystems.classifica ||
-    !activeSystems.notifica ||
-    !activeSystems.fiscaliza ||
+    activeSystems.classifica ||
+    activeSystems.notifica ||
+    activeSystems.fiscaliza ||
     Boolean(inputLat) ||
     Boolean(inputLong);
 
@@ -1768,23 +1764,34 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
           )}
         </div>
 
-        {/* Indicador de barragens filtradas */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
+        {/* Indicador de barragens filtradas, camadas sob demanda e sem coordenadas */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: '8px', flexWrap: 'wrap' }}>
+          {externalCatalogLoading && (
+            <span className="badge blue">Carregando sistemas externos...</span>
+          )}
+          {externalCatalogError && (
+            <span className="badge amber" title={externalCatalogError}>
+              Integração externa pendente
+            </span>
+          )}
           <span
             className="badge green"
             title={`${filteredMappedDams.length} de ${mappedDams.length} barragens mapeadas`}
           >
-            ● {filteredMappedDams.length} exibida{filteredMappedDams.length !== 1 ? 's' : ''}
+            {filteredMappedDams.length} mapeada{filteredMappedDams.length !== 1 ? 's' : ''}
             {filteredMappedDams.length !== mappedDams.length && ` (de ${mappedDams.length})`}
           </span>
 
           {unmappedCount > 0 && (
-            <span
+            <button
+              type="button"
               className="badge gray"
-              title={`${unmappedCount} barragens cadastradas sem coordenadas`}
+              style={{ border: '1px solid #cbd5e1', cursor: 'pointer' }}
+              onClick={() => setShowUnmappedDrawer(prev => !prev)}
+              title="Exibir barragens com coordenadas indisponíveis"
             >
-              ○ {unmappedCount} sem coordenadas
-            </span>
+              {unmappedCount} · Coordenadas indisponíveis
+            </button>
           )}
         </div>
       </div>
@@ -1945,14 +1952,165 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
       )}
 
       {/* ==================================================================== */}
-      {/* CONTEÚDO DO MAPA E PAINEL DE RESUMO                                  */}
+      {/* CONTEÚDO DO MAPA, LISTA HIERÁRQUICA NUMERADA E PAINEL DE RESUMO       */}
       {/* ==================================================================== */}
       {isExpanded && (
         <div>
           <div
-            ref={mapContainerRef}
-            className="minimap-map-canvas"
-          />
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'minmax(0, 1fr) minmax(260px, 330px)',
+              gap: '0',
+              borderBottom: '1px solid var(--line)'
+            }}
+          >
+            <div ref={mapContainerRef} className="minimap-map-canvas" />
+
+            {/* Lista hierárquica numerada sincronizada com os marcadores */}
+            <div
+              style={{
+                borderLeft: '1px solid var(--line)',
+                background: '#f8fafc',
+                display: 'flex',
+                flexDirection: 'column',
+                maxHeight: '420px'
+              }}
+            >
+              <div
+                style={{
+                  padding: '10px 12px',
+                  borderBottom: '1px solid var(--line)',
+                  background: '#ffffff',
+                  display: 'flex',
+                  justifyContent: 'space-between',
+                  alignItems: 'center',
+                  gap: '6px'
+                }}
+              >
+                <strong style={{ fontSize: '12px', color: '#0f172a' }}>
+                  Lista sincronizada ({filteredMappedDams.length})
+                </strong>
+                <span className="micro muted">Ordem = marcador no mapa</span>
+              </div>
+
+              <div
+                style={{
+                  overflowY: 'auto',
+                  padding: '8px',
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: '6px',
+                  flex: 1
+                }}
+              >
+                {filteredMappedDams.length === 0 ? (
+                  <div className="notice slate">
+                    Nenhuma barragem mapeada para os filtros atuais.
+                  </div>
+                ) : (
+                  filteredMappedDams.map((dam, idx) => {
+                    const orderNumber = idx + 1;
+                    const isActive =
+                      (selectedDam && dam.id === selectedDam.id) ||
+                      (selectedDamId !== undefined && String(selectedDamId) === String(dam.raw.id));
+                    return (
+                      <button
+                        key={dam.id}
+                        type="button"
+                        onClick={() => {
+                          setSelectedDam(dam);
+                          mapInstanceRef.current?.setView([dam.lat, dam.lon], Math.max(mapZoom, 10), {
+                            animate: true
+                          });
+                        }}
+                        style={{
+                          width: '100%',
+                          textAlign: 'left',
+                          padding: '8px 10px',
+                          borderRadius: '8px',
+                          border: isActive ? '1.5px solid #047857' : '1px solid #e2e8f0',
+                          background: isActive ? '#ecfdf5' : '#ffffff',
+                          cursor: 'pointer',
+                          display: 'flex',
+                          flexDirection: 'column',
+                          gap: '4px'
+                        }}
+                      >
+                        <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: '6px' }}>
+                          <div style={{ display: 'flex', alignItems: 'center', gap: '6px', minWidth: 0 }}>
+                            <span
+                              style={{
+                                width: '20px',
+                                height: '20px',
+                                borderRadius: '999px',
+                                background: isActive ? '#047857' : '#0f172a',
+                                color: '#ffffff',
+                                fontSize: '10px',
+                                fontWeight: 800,
+                                display: 'inline-flex',
+                                alignItems: 'center',
+                                justifyContent: 'center',
+                                flexShrink: 0
+                              }}
+                            >
+                              {orderNumber}
+                            </span>
+                            <strong
+                              style={{
+                                fontSize: '11.5px',
+                                color: '#0f172a',
+                                overflow: 'hidden',
+                                textOverflow: 'ellipsis',
+                                whiteSpace: 'nowrap'
+                              }}
+                            >
+                              {dam.nome}
+                            </strong>
+                          </div>
+                          <span className={`badge ${dam.vinculo.badgeClass}`}>
+                            {dam.vinculo.shortLabel}
+                          </span>
+                        </div>
+                        <div className="micro muted">
+                          {dam.municipio} · Empreendedor: {dam.empreendedorNome}
+                        </div>
+                      </button>
+                    );
+                  })
+                )}
+
+                {showUnmappedDrawer && unmappedDams.length > 0 && (
+                  <div style={{ marginTop: '8px', paddingTop: '8px', borderTop: '1px dashed #cbd5e1' }}>
+                    <strong style={{ fontSize: '11px', color: '#475569', display: 'block', marginBottom: '6px' }}>
+                      Sem posição geográfica ({unmappedDams.length})
+                    </strong>
+                    <div style={{ display: 'flex', flexDirection: 'column', gap: '4px' }}>
+                      {unmappedDams.slice(0, 25).map(u => (
+                        <div
+                          key={u.id}
+                          style={{
+                            padding: '6px 8px',
+                            borderRadius: '6px',
+                            background: '#ffffff',
+                            border: '1px solid #e2e8f0',
+                            fontSize: '11px'
+                          }}
+                        >
+                          <div style={{ display: 'flex', justifyContent: 'space-between', gap: '4px', flexWrap: 'wrap' }}>
+                            <b>{u.nome}</b>
+                            <span className="badge gray">{u.coordenadasStatus}</span>
+                          </div>
+                          <div className="micro muted" style={{ marginTop: '2px' }}>
+                            {u.municipio} · {u.vinculo.shortLabel}
+                          </div>
+                        </div>
+                      ))}
+                    </div>
+                  </div>
+                )}
+              </div>
+            </div>
+          </div>
 
           {/* Legenda e Resumo do Ponto Selecionado */}
           <div
@@ -1986,35 +2144,26 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
                   }}
                 >
                   <div>
-                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px' }}>
-                      <span
-                        style={{
-                          width: '10px',
-                          height: '10px',
-                          borderRadius: '50%',
-                          background:
-                            selectedDam.situacao === 'Ativa'
-                              ? '#059669'
-                              : selectedDam.situacao === 'Inativa'
-                              ? '#64748b'
-                              : '#d97706'
-                        }}
-                      />
+                    <div style={{ display: 'flex', alignItems: 'center', gap: '8px', marginBottom: '4px', flexWrap: 'wrap' }}>
                       <strong style={{ fontSize: '15px', color: '#0f172a' }}>
                         {selectedDam.nome}
                       </strong>
                       <span className={`badge ${selectedDam.situacao === 'Ativa' ? 'green' : 'amber'}`}>
                         {selectedDam.situacao}
                       </span>
+                      <span className={`badge ${selectedDam.vinculo.badgeClass}`} title={selectedDam.vinculo.reason}>
+                        {selectedDam.vinculo.label}
+                      </span>
                     </div>
 
                     <div style={{ fontSize: '11.5px', color: '#475569', display: 'flex', flexWrap: 'wrap', gap: '12px' }}>
-                      <span>📍 <b>{selectedDam.municipio} / MT</b></span>
-                      <span>🏢 Empreendedor: <b>{selectedDam.empreendedorNome}</b></span>
-                      <span>📑 Proc.: <b>{selectedDam.processo}</b></span>
-                      <span>🌱 CAR: <b>{selectedDam.car}</b></span>
-                      <span>🌐 Lat/Long: <code>{selectedDam.lat.toFixed(5)}, {selectedDam.lon.toFixed(5)}</code></span>
-                      <span>🌐 GMS: <code>{decimalToGMS(selectedDam.lat, false)}, {decimalToGMS(selectedDam.lon, true)}</code></span>
+                      <span><b>{selectedDam.municipio} / MT</b></span>
+                      <span>Empreendedor: <b>{selectedDam.empreendedorNome}</b></span>
+                      <span>Proc.: <b>{selectedDam.processo}</b></span>
+                      <span>CAR: <b>{selectedDam.car}</b></span>
+                      <span>SNISB: <b>{selectedDam.snisb}</b></span>
+                      <span>Lat/Long: <code>{selectedDam.lat.toFixed(5)}, {selectedDam.lon.toFixed(5)}</code></span>
+                      <span>GMS: <code>{decimalToGMS(selectedDam.lat, false)}, {decimalToGMS(selectedDam.lon, true)}</code></span>
                     </div>
                   </div>
 
@@ -2046,6 +2195,22 @@ export const BarragensMinimap: React.FC<BarragensMinimapProps> = ({
                       ✕
                     </button>
                   </div>
+                </div>
+
+                {/* Conferência contextual sob demanda */}
+                <div style={{ marginBottom: '12px' }}>
+                  <ConferenciaDocumentosPanel
+                    compact
+                    titulo="Conferência sob demanda · documentos relacionados"
+                    criteria={{
+                      barragemId: selectedDam.id,
+                      empreendedorId: selectedDam.empreendedorId,
+                      processo: selectedDam.processo !== '—' ? selectedDam.processo : undefined,
+                      carMt: selectedDam.car !== '—' ? selectedDam.car : undefined
+                    }}
+                    commonData={{ empreendedores, barragens, rts: [] }}
+                    documentosPreCarregados={externalCatalogLoaded ? catalogoDocs : undefined}
+                  />
                 </div>
 
                 {/* Seção de Documentos da Barragem */}

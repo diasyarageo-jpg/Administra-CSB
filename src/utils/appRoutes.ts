@@ -10,6 +10,7 @@ export const APP_ROUTE_PATHS = {
   pendencias: '/pendencias',
   solicitacoes_vistoria: '/solicitacoes-vistoria',
   documentos: '/documentos',
+  mesa_virtual: '/mesa-virtual',
   usuarios: '/usuarios',
   integracao: '/integracao',
   referencias: '/referencias'
@@ -33,6 +34,7 @@ const PATH_TO_VIEW: Record<string, AppViewKey> = {
   '/solicitacoes-vistoria': 'solicitacoes_vistoria',
   '/solicitacoes_vistoria': 'solicitacoes_vistoria',
   '/documentos': 'documentos',
+  '/mesa-virtual': 'mesa_virtual',
   '/usuarios': 'usuarios',
   '/integracao': 'integracao',
   '/referencias': 'referencias'
@@ -49,6 +51,7 @@ export const SPA_FALLBACK_ROUTE_PATHS: readonly string[] = [
   '/pendencias',
   '/solicitacoes-vistoria',
   '/documentos',
+  '/mesa-virtual',
   '/usuarios',
   '/integracao',
   '/referencias'

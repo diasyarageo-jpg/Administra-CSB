@@ -26,6 +26,7 @@ import {
   BarragemSemaVinculoPanel,
   ConfirmVinculoPayload
 } from './BarragemSemaVinculoPanel';
+import { BarragemSelectorField } from './BarragemSelectorField';
 import {
   checkDuplicateEmpreendedorByCpfCnpj,
   extractCarNumberFromSemaItem
@@ -2031,6 +2032,7 @@ export function RtModal({
   record,
   isNew,
   barragens,
+  empreendedores = [],
   existingRts = [],
   onClose,
   onSave
@@ -2038,6 +2040,7 @@ export function RtModal({
   record: any;
   isNew: boolean;
   barragens: any[];
+  empreendedores?: any[];
   existingRts?: any[];
   onClose: () => void;
   onSave: (savedRecord: any) => void;
@@ -2578,28 +2581,15 @@ export function RtModal({
                   />
                 </div>
 
-                <div className="form-field">
-                  <label style={{ fontSize: '11px' }}>Barragem vinculada · obrigatório</label>
-                  <select
-                    className="select"
+                <div className="form-field full">
+                  <BarragemSelectorField
+                    label="Barragem vinculada · obrigatório"
+                    barragens={barragens}
+                    empreendedores={empreendedores}
                     value={vincBarragem}
-                    onChange={e => setVincBarragem(e.target.value)}
-                  >
-                    <option value="">Selecione a estrutura...</option>
-                    {barragens
-                      .slice()
-                      .sort((a, b) => String(a.nome || '').localeCompare(String(b.nome || ''), 'pt-BR', { sensitivity: 'base' }))
-                      .map(b => (
-                        <option key={b.id} value={b.id}>
-                          {b.nome}{b.municipio ? ` — ${b.municipio}` : ''}
-                        </option>
-                      ))}
-                    {vincBarragem && !barragens.some(b => String(b.id) === vincBarragem) && (
-                      <option value={vincBarragem}>
-                        {vincBarragem} (Identificação mantida)
-                      </option>
-                    )}
-                  </select>
+                    onChange={id => setVincBarragem(id)}
+                    emptyOptionLabel="Selecione a estrutura..."
+                  />
                 </div>
 
                 <div className="form-field">

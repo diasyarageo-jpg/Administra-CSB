@@ -3,6 +3,8 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import type { BarragemRecord, EmpreendedorRecord } from '../services/notificaDataService';
 import type { UserRole } from '../types/auth';
 import { PaginationBar, PageSizeOption, paginateList } from './PaginationBar';
+import { BarragemSelectorField } from './BarragemSelectorField';
+import { ConferenciaDocumentosPanel } from './ConferenciaDocumentosModal';
 import {
   PENDENCIA_CAMPO_LABELS,
   PENDENCIA_HISTORICO_ACAO_LABELS,
@@ -899,21 +901,16 @@ export const PendenciasView: React.FC<PendenciasViewProps> = ({
                   />
                 </div>
 
-                <div className="form-field">
-                  <label>Barragem referenciada</label>
-                  <select
-                    className="select"
+                <div className="form-field full">
+                  <BarragemSelectorField
+                    label="Barragem referenciada"
+                    barragens={barragens || []}
+                    empreendedores={empreendedores || []}
+                    prioritizeEmpreendedorId={createEmpreendedorId}
                     value={createBarragemId}
-                    onChange={e => setCreateBarragemId(e.target.value)}
-                  >
-                    <option value="">Sem vínculo direto</option>
-                    {(barragens || []).map(b => (
-                      <option key={b.id} value={b.id}>
-                        {b.nome || b.id}
-                        {b.municipio ? ` · ${b.municipio}` : ''}
-                      </option>
-                    ))}
-                  </select>
+                    onChange={id => setCreateBarragemId(id)}
+                    emptyOptionLabel="Sem vínculo direto"
+                  />
                 </div>
 
                 <div className="form-field">
@@ -931,6 +928,23 @@ export const PendenciasView: React.FC<PendenciasViewProps> = ({
                     ))}
                   </select>
                 </div>
+
+                {(createBarragemId || createEmpreendedorId) && (
+                  <div className="form-field full">
+                    <ConferenciaDocumentosPanel
+                      compact
+                      criteria={{
+                        barragemId: createBarragemId || undefined,
+                        empreendedorId: createEmpreendedorId || undefined
+                      }}
+                      commonData={{
+                        empreendedores: empreendedores || [],
+                        barragens: barragens || [],
+                        rts: []
+                      }}
+                    />
+                  </div>
+                )}
 
                 <div className="form-field">
                   <label>Tipo de referência adicional</label>
@@ -1395,20 +1409,16 @@ export const PendenciasView: React.FC<PendenciasViewProps> = ({
                         onChange={e => setEditDescricao(e.target.value)}
                       />
                     </div>
-                    <div className="form-field">
-                      <label>Barragem referenciada</label>
-                      <select
-                        className="select"
+                    <div className="form-field full">
+                      <BarragemSelectorField
+                        label="Barragem referenciada"
+                        barragens={barragens || []}
+                        empreendedores={empreendedores || []}
+                        prioritizeEmpreendedorId={editEmpreendedorId}
                         value={editBarragemId}
-                        onChange={e => setEditBarragemId(e.target.value)}
-                      >
-                        <option value="">Sem vínculo</option>
-                        {(barragens || []).map(b => (
-                          <option key={b.id} value={b.id}>
-                            {b.nome || b.id}
-                          </option>
-                        ))}
-                      </select>
+                        onChange={id => setEditBarragemId(id)}
+                        emptyOptionLabel="Sem vínculo"
+                      />
                     </div>
                     <div className="form-field">
                       <label>Empreendedor referenciado</label>

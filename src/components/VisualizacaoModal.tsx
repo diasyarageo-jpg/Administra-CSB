@@ -7,6 +7,7 @@ import {
   BarragemDocumentoEmitidoItem,
   carregarDocumentosEmitidosPorBarragens
 } from '../services/documentosService';
+import { ConferenciaDocumentosPanel } from './ConferenciaDocumentosModal';
 
 interface VisualizacaoModalProps {
   moduleKey: string;
@@ -122,14 +123,12 @@ export function VisualizacaoModal({
     }
   };
 
-  // Documentos vinculados à barragem
-  const getDocumentosDaBarragem = (barragemId: any, barragemNome: string) => {
+  // Documentos vinculados à barragem apenas por ID estável (sem inferência por nome)
+  const getDocumentosDaBarragem = (barragemId: any, _barragemNome: string) => {
     const docs = db.documentos || [];
-    return docs.filter((d: any) => {
-      const matchId = barragemId && String(d.barragemId) === String(barragemId);
-      const matchNome = barragemNome && String(d.barragemNome || d.barragem || '').toLowerCase() === barragemNome.toLowerCase();
-      return matchId || matchNome;
-    });
+    const targetId = String(barragemId || '').trim();
+    if (!targetId) return [];
+    return docs.filter((d: any) => String(d?.barragemId || '').trim() === targetId);
   };
 
   // Título e Ícone conforme o módulo
@@ -1010,8 +1009,22 @@ export function VisualizacaoModal({
               )}
 
               {activeTab === 'documentos' && (
-                <div>
-                  <h4 style={{ fontSize: '13px', margin: '0 0 10px', color: '#334155' }}>
+                <div style={{ display: 'flex', flexDirection: 'column', gap: '12px' }}>
+                  <ConferenciaDocumentosPanel
+                    compact
+                    criteria={{
+                      barragemId: record.id ? String(record.id) : undefined,
+                      empreendedorId: linkedEmpObj?.id ? String(linkedEmpObj.id) : undefined,
+                      processo: record.processo ? String(record.processo) : undefined,
+                      carMt: record.car ? String(record.car) : undefined
+                    }}
+                    commonData={{
+                      empreendedores: db.empreendedores || [],
+                      barragens: db.barragens || [],
+                      rts: db.rts || []
+                    }}
+                  />
+                  <h4 style={{ fontSize: '13px', margin: '0 0 4px', color: '#334155' }}>
                     Documentos Oficiais Vinculados a esta Barragem ({docsBarragem.length})
                   </h4>
                   {docsBarragem.length === 0 ? (

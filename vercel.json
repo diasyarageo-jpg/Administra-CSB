@@ -87,6 +87,10 @@
       "destination": "/index.html"
     },
     {
+      "source": "/mesa-virtual",
+      "destination": "/index.html"
+    },
+    {
       "source": "/usuarios",
       "destination": "/index.html"
     },

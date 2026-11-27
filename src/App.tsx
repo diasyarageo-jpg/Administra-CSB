@@ -43,6 +43,7 @@ import {
   SETORES
 } from './types/auth';
 import { DocumentosView } from './components/DocumentosView';
+import { MesaVirtualView } from './components/MesaVirtualView';
 import { PaginationBar, PageSizeOption, paginateList } from './components/PaginationBar';
 import { LoginModal } from './components/LoginModal';
 import { LoginPage } from './components/LoginPage';
@@ -292,6 +293,7 @@ const viewNames: Record<string, string> = {
   pendencias: 'Pendências',
   solicitacoes_vistoria: 'Solicitações de Vistoria',
   documentos: 'Documentos',
+  mesa_virtual: 'Mesa Virtual',
   usuarios: 'Gerenciar usuários',
   integracao: 'Estrutura de integração',
   referencias: 'Referências centrais'
@@ -1804,6 +1806,12 @@ export default function App() {
             onClick={() => navigateToView('documentos')}
           >
             <span className="nav-ico">▤</span>Documentos
+          </button>
+          <button
+            className={`navbtn ${activeView === 'mesa_virtual' ? 'active' : ''}`}
+            onClick={() => navigateToView('mesa_virtual')}
+          >
+            <span className="nav-ico">❖</span>Mesa Virtual
           </button>
 
           <div className="nav-label">Administração</div>
@@ -3387,6 +3395,28 @@ export default function App() {
             />
           )}
 
+          {/* MESA VIRTUAL */}
+          {activeView === 'mesa_virtual' && (
+            <MesaVirtualView
+              userRole={userRole}
+              currentActor={{
+                id: currentAuthUser?.id || currentUserProfile?.authUserId || currentUserProfile?.id || undefined,
+                nome: currentUserProfile?.nome || currentAuthUser?.email || 'Usuário autenticado',
+                login: currentUserProfile?.login || undefined,
+                email: currentAuthUser?.email || currentUserProfile?.email || undefined,
+                papel: userRole
+              }}
+              commonData={{
+                empreendedores: Array.isArray(db?.empreendedores) ? db.empreendedores : [],
+                barragens: Array.isArray(db?.barragens) ? db.barragens : [],
+                rts: Array.isArray(db?.rts) ? db.rts : []
+              }}
+              portarias={Array.isArray(db?.portarias) ? db.portarias : []}
+              usuarios={Array.isArray(db?.usuarios) ? db.usuarios : []}
+              onNotify={showToast}
+            />
+          )}
+
           {/* ESTRUTURA DE INTEGRAÇÃO */}
           {activeView === 'integracao' && (
             <div>
@@ -3859,6 +3889,7 @@ export default function App() {
               record={modalConfig.record}
               isNew={modalConfig.index === null}
               barragens={db.barragens}
+              empreendedores={db.empreendedores}
               existingRts={db.rts}
               onClose={() => setModalConfig(null)}
               onSave={handleSaveCustomRecord}

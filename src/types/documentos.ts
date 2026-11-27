@@ -7,6 +7,16 @@
 
 export type DocumentoOrigem = 'Classifica' | 'Notifica' | 'Fiscaliza';
 
+export type MesaVirtualSistemaOrigem = DocumentoOrigem | 'Administra';
+
+export type DocumentoSincronizacaoEstado =
+  | 'Sincronizado'
+  | 'Pendente'
+  | 'Local / Provisório'
+  | 'Indisponível';
+
+export type DocumentoVinculoStatus = 'oficial' | 'pendente_revisao' | 'nao_vinculado';
+
 export type DocumentoSituacao =
   | 'Emitido'
   | 'Vigente'
@@ -34,7 +44,7 @@ export const DOCUMENTO_TIPOS_PADRAO: DocumentoTipoConfig[] = [
 export interface DocumentoCatalogoItem {
   /** ID interno do catálogo no Administra */
   id: string;
-  /** Sistema de origem (Classifica, Notifica ou Fiscaliza) */
+  /** Sistema de origem (Classifica, Notifica ou Fiscaliza; Administra para visão panorâmica da Mesa Virtual) */
   origemSistema: DocumentoOrigem;
   /** Identificador estável do documento no sistema de origem */
   origemDocumentoId: string;
@@ -46,25 +56,37 @@ export interface DocumentoCatalogoItem {
   numero?: string;
   /** Data de emissão ou geração (ISO YYYY-MM-DD ou timestamptz) */
   dataEmissao: string;
+  /** Prazo de vencimento ou atendimento, quando aplicável (ISO YYYY-MM-DD) */
+  prazo?: string;
   /** Analista(s), elaborador(es) e responsável técnico, quando aplicável */
   analistasElaboradores: string[];
+  autorId?: string;
   responsavelTecnicoNome?: string;
   responsavelTecnicoId?: string;
   /** Empreendedor e CPF/CNPJ (resolvidos ou referenciados do Administra) */
   empreendedorId?: string;
   empreendedorNome?: string;
   empreendedorCpfCnpj?: string;
-  /** Processo, barragem e CAR/MT relacionados */
+  /** Empreendimento/propriedade relacionado por ID estável quando confirmado */
+  empreendimentoId?: string;
+  empreendimentoNome?: string;
+  /** Processo, barragem, município e CAR/MT relacionados */
   processo?: string;
+  municipio?: string;
   barragemId?: string;
   barragemNome?: string;
   carMt?: string;
+  /** Estado explícito de vínculo com entidades oficiais do Administra */
+  vinculoStatus?: DocumentoVinculoStatus;
+  vinculoObservacao?: string;
   /** Referência opaca/segura para localizar o original na origem (nunca URL pública direta) */
   referenciaSeguraOrigem?: string;
   /** Indica se o sistema de origem suporta download direto além da visualização */
   suportaDownload?: boolean;
   /** Situação do documento no catálogo */
   situacao: DocumentoSituacao;
+  /** Estado de sincronização do catálogo com o sistema de origem */
+  sincronizacaoEstado?: DocumentoSincronizacaoEstado;
   /** Metadados de auditoria e sincronização */
   criadoEm: string;
   sincronizadoEm: string;

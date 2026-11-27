@@ -156,63 +156,115 @@ export function enrichDocumentosWithAdministraData(
   const rts = commonData.rts || [];
 
   return docs.map(doc => {
-    const enriched = { ...doc };
+    const enriched: DocumentoCatalogoItem = { ...doc };
 
-    // 1. Resolver Empreendedor pelo ID ou CPF/CNPJ
-    const matchedEmp =
-      (doc.empreendedorId
-        ? emps.find(e => String(e.id) === String(doc.empreendedorId))
-        : undefined) ||
-      (doc.empreendedorCpfCnpj
+    // 1. Resolver Empreendedor pelo ID estável (ou CPF/CNPJ exato quando informado na origem)
+    const matchedEmpById = doc.empreendedorId
+      ? emps.find(e => String(e.id) === String(doc.empreendedorId))
+      : undefined;
+    const matchedEmpByDoc =
+      !matchedEmpById && doc.empreendedorCpfCnpj
         ? emps.find(
             e =>
               String(e.cpfCnpj || '').replace(/\D/g, '') ===
               String(doc.empreendedorCpfCnpj || '').replace(/\D/g, '')
           )
-        : undefined);
+        : undefined;
+    const matchedEmp = matchedEmpById || matchedEmpByDoc;
 
     if (matchedEmp) {
-      enriched.empreendedorId = String(matchedEmp.id);
+      if (matchedEmpById) {
+        enriched.empreendedorId = String(matchedEmp.id);
+      }
       enriched.empreendedorNome = matchedEmp.nome || enriched.empreendedorNome;
       enriched.empreendedorCpfCnpj = matchedEmp.cpfCnpj || enriched.empreendedorCpfCnpj;
     }
 
-    // 2. Resolver Barragem pelo ID, CAR/MT ou Processo
-    const matchedDam =
-      (doc.barragemId
-        ? barragens.find(b => String(b.id) === String(doc.barragemId))
-        : undefined) ||
-      (doc.carMt
-        ? barragens.find(
-            b =>
-              String(b.car || '').trim().toLowerCase() ===
-              String(doc.carMt || '').trim().toLowerCase()
-          )
-        : undefined) ||
-      (doc.processo
-        ? barragens.find(
-            b =>
-              String(b.processo || '').trim().toLowerCase() ===
-              String(doc.processo || '').trim().toLowerCase()
-          )
-        : undefined);
+    // 2. Resolver Barragem APENAS por ID estável para vínculo oficial;
+    // correspondências apenas por CAR ou processo NÃO geram barragemId oficial
+    const matchedDamById = doc.barragemId
+      ? barragens.find(b => String(b.id) === String(doc.barragemId))
+      : undefined;
 
-    if (matchedDam) {
-      enriched.barragemId = String(matchedDam.id);
-      enriched.barragemNome = matchedDam.nome || enriched.barragemNome;
-      enriched.carMt = matchedDam.car || enriched.carMt;
-      enriched.processo = matchedDam.processo || enriched.processo;
+    const candidateDamByCarOrProc = !matchedDamById
+      ? (doc.carMt
+          ? barragens.find(
+              b =>
+                b.car &&
+                String(b.car).trim().toLowerCase() === String(doc.carMt).trim().toLowerCase()
+            )
+          : undefined) ||
+        (doc.processo
+          ? barragens.find(
+              b =>
+                b.processo &&
+                String(b.processo).trim().toLowerCase() === String(doc.processo).trim().toLowerCase()
+            )
+          : undefined)
+      : undefined;
 
-      // Se o documento não trouxe empreendedor direto, herda da barragem vinculada
-      if (!enriched.empreendedorId && matchedDam.empreendedor) {
-        const damEmp = emps.find(e => String(e.id) === String(matchedDam.empreendedor));
+    if (matchedDamById) {
+      enriched.barragemId = String(matchedDamById.id);
+      enriched.barragemNome = matchedDamById.nome || enriched.barragemNome;
+      enriched.carMt = matchedDamById.car || enriched.carMt;
+      enriched.processo = matchedDamById.processo || enriched.processo;
+      enriched.municipio = matchedDamById.municipio || enriched.municipio;
+      enriched.empreendimentoNome = matchedDamById.empreendimento || enriched.empreendimentoNome;
+
+      const damEmpId = String(matchedDamById.empreendedorId || matchedDamById.empreendedor || '').trim();
+      if (!enriched.empreendedorId && damEmpId) {
+        const damEmp = emps.find(e => String(e.id) === damEmpId);
         if (damEmp) {
           enriched.empreendedorId = String(damEmp.id);
           enriched.empreendedorNome = damEmp.nome;
           enriched.empreendedorCpfCnpj = damEmp.cpfCnpj;
         }
       }
+    } else if (candidateDamByCarOrProc) {
+      // Mantém apenas rótulo sugestivo de exibição; nunca atribui barragemId oficial sem ID confirmado
+      enriched.barragemNome = enriched.barragemNome || candidateDamByCarOrProc.nome;
+      enriched.carMt = enriched.carMt || candidateDamByCarOrProc.car;
+      enriched.processo = enriched.processo || candidateDamByCarOrProc.processo;
+      enriched.municipio = enriched.municipio || candidateDamByCarOrProc.municipio;
+      enriched.empreendimentoNome = enriched.empreendimentoNome || candidateDamByCarOrProc.empreendimento;
+
+      const damEmpId = String(
+        candidateDamByCarOrProc.empreendedorId || candidateDamByCarOrProc.empreendedor || ''
+      ).trim();
+      if (!enriched.empreendedorNome && damEmpId) {
+        const damEmp = emps.find(e => String(e.id) === damEmpId);
+        if (damEmp) {
+          enriched.empreendedorNome = damEmp.nome;
+          enriched.empreendedorCpfCnpj = enriched.empreendedorCpfCnpj || damEmp.cpfCnpj;
+        }
+      }
     }
+
+    if (matchedDamById || matchedEmpById) {
+      enriched.vinculoStatus = enriched.vinculoStatus || 'oficial';
+    } else if (
+      candidateDamByCarOrProc ||
+      matchedEmpByDoc ||
+      doc.carMt ||
+      doc.barragemNome ||
+      doc.processo ||
+      doc.empreendedorNome
+    ) {
+      enriched.vinculoStatus = 'pendente_revisao';
+      enriched.vinculoObservacao =
+        enriched.vinculoObservacao ||
+        'Correspondência por CAR/processo/nome aguarda confirmação por identificador estável no Administra.';
+    } else {
+      enriched.vinculoStatus = enriched.vinculoStatus || 'nao_vinculado';
+    }
+
+    enriched.sincronizacaoEstado =
+      enriched.sincronizacaoEstado ||
+      (enriched.situacao === 'Indisponível na origem'
+        ? 'Indisponível'
+        : enriched.referenciaSeguraOrigem
+        ? 'Sincronizado'
+        : 'Pendente');
 
     // 3. Resolver Responsável Técnico pelo ID
     if (doc.responsavelTecnicoId) {
@@ -240,23 +292,29 @@ export function fromDbDocumentoCatalogo(row: any): DocumentoCatalogoItem {
     titulo: String(row.titulo || 'Sem título'),
     numero: row.numero ?? undefined,
     dataEmissao: String(row.data_emissao || row.criado_em || '').slice(0, 10),
+    prazo: row.prazo ? String(row.prazo).slice(0, 10) : undefined,
     analistasElaboradores: Array.isArray(row.analistas_elaboradores)
       ? row.analistas_elaboradores
       : row.analistas_elaboradores
       ? [String(row.analistas_elaboradores)]
       : [],
+    autorId: row.autor_id ? String(row.autor_id) : undefined,
     responsavelTecnicoId: row.responsavel_tecnico_id ?? undefined,
     responsavelTecnicoNome: row.responsavel_tecnico_nome ?? undefined,
     empreendedorId: row.empreendedor_id ?? undefined,
     empreendedorNome: row.empreendedor_nome ?? undefined,
     empreendedorCpfCnpj: row.empreendedor_cpf_cnpj ?? undefined,
+    empreendimentoId: row.empreendimento_id ?? undefined,
+    empreendimentoNome: row.empreendimento_nome ?? undefined,
     processo: row.processo ?? undefined,
+    municipio: row.municipio ?? undefined,
     barragemId: row.barragem_id ?? undefined,
     barragemNome: row.barragem_nome ?? undefined,
     carMt: row.car_mt ?? undefined,
     referenciaSeguraOrigem: row.referencia_segura_origem ?? undefined,
     suportaDownload: row.suporta_download !== false,
     situacao: (row.situacao as any) || 'Emitido',
+    sincronizacaoEstado: row.situacao === 'Indisponível na origem' ? 'Indisponível' : 'Sincronizado',
     criadoEm: row.criado_em || new Date().toISOString(),
     sincronizadoEm: row.sincronizado_em || row.criado_em || new Date().toISOString()
   };
@@ -585,6 +643,7 @@ export interface BarragemDocumentoEmitidoItem {
   processo?: string;
   analistas?: string[];
   resumo?: string;
+  vinculoStatus?: 'oficial' | 'pendente_revisao';
 }
 
 function normDocMatchStr(val: unknown): string {
@@ -778,20 +837,23 @@ export async function carregarDocumentosEmitidosPorBarragens(
         const rowVinc = vincsByDocId.get(String(row.id)) || [];
 
         for (const entry of damEntries) {
-          const matchedViaVinc = rowVinc.some(
-            v =>
-              (v.barragem_id && String(v.barragem_id).trim() === entry.idStr) ||
-              (v.car_norm && entry.carNorm && normCarKeySimple(v.car_norm) === entry.carNorm) ||
-              (v.processo && entry.procNorm && normDocMatchStr(v.processo) === entry.procNorm)
+          const matchedOfficialViaVinc = rowVinc.some(
+            v => v.barragem_id && String(v.barragem_id).trim() === entry.idStr
           );
-          const matched =
-            matchedViaVinc ||
-            (rBarrId && entry.idStr && rBarrId === entry.idStr) ||
-            (rCar && entry.carNorm && rCar === entry.carNorm) ||
-            (rProc && entry.procNorm && rProc === entry.procNorm) ||
-            (rNome && entry.nomeNorm && rNome === entry.nomeNorm);
+          const matchedOfficialById = Boolean(rBarrId && entry.idStr && rBarrId === entry.idStr);
+          const matchedOfficialByProc = Boolean(rProc && entry.procNorm && rProc === entry.procNorm);
+          const matchedCandidateByCar =
+            !matchedOfficialViaVinc &&
+            !matchedOfficialById &&
+            !matchedOfficialByProc &&
+            Boolean(
+              (rCar && entry.carNorm && rCar === entry.carNorm) ||
+                rowVinc.some(
+                  v => v.car_norm && entry.carNorm && normCarKeySimple(v.car_norm) === entry.carNorm
+                )
+            );
 
-          if (matched) {
+          if (matchedOfficialViaVinc || matchedOfficialById || matchedOfficialByProc || matchedCandidateByCar) {
             addDocToDam(entry.key, {
               id: `cat_${row.id}`,
               tipo: String(row.tipo_nome || row.tipo_codigo || 'Documento'),
@@ -805,7 +867,11 @@ export async function carregarDocumentosEmitidosPorBarragens(
                 ? row.analistas_elaboradores
                 : row.analistas_elaboradores
                 ? [String(row.analistas_elaboradores)]
-                : undefined
+                : undefined,
+              vinculoStatus:
+                matchedOfficialViaVinc || matchedOfficialById || matchedOfficialByProc
+                  ? 'oficial'
+                  : 'pendente_revisao'
             });
           }
         }
@@ -821,26 +887,24 @@ export async function carregarDocumentosEmitidosPorBarragens(
           ...(Array.isArray(row.barragens) ? row.barragens : []),
           ...(Array.isArray(payload.barragens) ? payload.barragens : [])
         ];
-        const rBarrRefs = rBarragensArr.flatMap((item: any) => {
-          if (typeof item === 'string') return [normDocMatchStr(item)];
+        const rBarrIdRefs = rBarragensArr.flatMap((item: any) => {
+          if (typeof item === 'string') return [];
           const rawId = String(item?.id || item?.barragemId || '').trim();
-          const rawNome = String(item?.nome || '').trim();
           return [
             rawId ? normDocMatchStr(rawId) : '',
-            rawId ? normDocMatchStr(`FISCALIZA:BARRAGEM:${rawId}`) : '',
-            rawNome ? normDocMatchStr(rawNome) : ''
+            rawId ? normDocMatchStr(`FISCALIZA:BARRAGEM:${rawId}`) : ''
           ].filter(Boolean);
         });
 
         for (const entry of damEntries) {
-          const matched =
+          const matchedOfficial =
             entry.idStr === `FISCALIZA:REFERENCIA:${row.id}` ||
-            (rProc && entry.procNorm && rProc === entry.procNorm) ||
-            (rCar && entry.carNorm && rCar === entry.carNorm) ||
-            (entry.idStr && rBarrRefs.includes(normDocMatchStr(entry.idStr))) ||
-            (entry.nomeNorm && rBarrRefs.includes(entry.nomeNorm));
+            (entry.idStr && rBarrIdRefs.includes(normDocMatchStr(entry.idStr))) ||
+            (rProc && entry.procNorm && rProc === entry.procNorm);
+          const matchedCandidateByCar =
+            !matchedOfficial && Boolean(rCar && entry.carNorm && rCar === entry.carNorm);
 
-          if (!matched) continue;
+          if (!matchedOfficial && !matchedCandidateByCar) continue;
 
           const dataDoc = String(payload.dataNotificacao || row.data || row.created_at || '').slice(0, 10) || undefined;
           const notifNum = payload.notificacaoGerada ? String(payload.notificacaoGerada) : undefined;
@@ -955,4 +1019,78 @@ export async function carregarDocumentosEmitidosPorBarragens(
 
   return result;
 }
+
+export interface ConferenciaDocumentoCriteria {
+  barragemId?: string;
+  empreendedorId?: string;
+  empreendimentoId?: string;
+  processo?: string;
+  carMt?: string;
+}
+
+export interface ConferenciaDocumentosResult {
+  confirmadosPorId: DocumentoCatalogoItem[];
+  candidatosPendentes: DocumentoCatalogoItem[];
+  origensEncontradas: string[];
+  resumoTexto: string;
+}
+
+/**
+ * Conferência contextual leve e não bloqueante de documentos relacionados.
+ * Cruza por identificadores estáveis (barragemId, empreendedorId, empreendimentoId, processo)
+ * e separa eventuais sugestões por CAR compartilhado como `candidatosPendentes`.
+ */
+export function verificarDocumentosRelacionadosEntidade(
+  docs: DocumentoCatalogoItem[],
+  criteria: ConferenciaDocumentoCriteria
+): ConferenciaDocumentosResult {
+  const bId = String(criteria.barragemId || '').trim();
+  const eId = String(criteria.empreendedorId || '').trim();
+  const empdId = String(criteria.empreendimentoId || '').trim();
+  const procNorm = normDocMatchStr(criteria.processo);
+  const carNorm = normCarKeySimple(criteria.carMt);
+
+  const confirmadosPorId: DocumentoCatalogoItem[] = [];
+  const candidatosPendentes: DocumentoCatalogoItem[] = [];
+
+  for (const doc of docs || []) {
+    const matchDamId = Boolean(bId && doc.barragemId && String(doc.barragemId).trim() === bId);
+    const matchEmpId = Boolean(eId && doc.empreendedorId && String(doc.empreendedorId).trim() === eId);
+    const matchEmpdId = Boolean(
+      empdId && doc.empreendimentoId && String(doc.empreendimentoId).trim() === empdId
+    );
+    const matchProc = Boolean(procNorm && doc.processo && normDocMatchStr(doc.processo) === procNorm);
+
+    if (matchDamId || matchEmpId || matchEmpdId || matchProc) {
+      confirmadosPorId.push(doc);
+      continue;
+    }
+
+    const matchCarHint = Boolean(carNorm && doc.carMt && normCarKeySimple(doc.carMt) === carNorm);
+    if (matchCarHint) {
+      candidatosPendentes.push({
+        ...doc,
+        vinculoStatus: 'pendente_revisao',
+        vinculoObservacao: 'Relacionado por CAR compartilhado — requer confirmação de vínculo oficial.'
+      });
+    }
+  }
+
+  const origensEncontradas = Array.from(
+    new Set([...confirmadosPorId, ...candidatosPendentes].map(d => d.origemSistema))
+  );
+
+  const resumoTexto =
+    confirmadosPorId.length === 0 && candidatosPendentes.length === 0
+      ? 'Nenhum documento prévio localizado para os identificadores informados.'
+      : `${confirmadosPorId.length} documento(s) confirmado(s) por ID/processo e ${candidatosPendentes.length} sugestão(ões) pendente(s) por CAR (${origensEncontradas.join(', ') || 'Administra'}).`;
+
+  return {
+    confirmadosPorId,
+    candidatosPendentes,
+    origensEncontradas,
+    resumoTexto
+  };
+}
+
 

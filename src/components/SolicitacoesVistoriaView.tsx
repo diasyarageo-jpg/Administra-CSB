@@ -3,6 +3,8 @@ import React, { useCallback, useEffect, useMemo, useState } from 'react';
 import type { BarragemRecord, EmpreendedorRecord } from '../services/notificaDataService';
 import type { UserRole } from '../types/auth';
 import { PaginationBar, PageSizeOption, paginateList } from './PaginationBar';
+import { BarragemSelectorField } from './BarragemSelectorField';
+import { ConferenciaDocumentosPanel } from './ConferenciaDocumentosModal';
 import {
   DadosPrePreenchidos,
   SOLICITACAO_CAMPO_LABELS,
@@ -1243,27 +1245,16 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
                   />
                 </div>
 
-                <div className="form-field">
-                  <label>Barragem cadastrada</label>
-                  <select
-                    className="select"
+                <div className="form-field full">
+                  <BarragemSelectorField
+                    label="Barragem cadastrada"
+                    barragens={safeBarragens}
+                    empreendedores={safeEmpreendedores}
+                    prioritizeEmpreendedorId={createEmpreendedorId}
                     value={createBarragemId}
-                    onChange={e => handleBarragemSelectChange(e.target.value)}
-                  >
-                    <option value="">Sem vínculo direto</option>
-                    {safeBarragens.map((b, bIdx) => {
-                      const bId = toSafeString(b?.id).trim();
-                      if (!bId) return null;
-                      const bNome = toSafeString(b?.nome).trim() || bId;
-                      const bMunicipio = toSafeString(b?.municipio).trim();
-                      return (
-                        <option key={`${bId}-${bIdx}`} value={bId}>
-                          {bNome}
-                          {bMunicipio ? ` · ${bMunicipio}` : ''}
-                        </option>
-                      );
-                    })}
-                  </select>
+                    onChange={id => handleBarragemSelectChange(id)}
+                    emptyOptionLabel="Sem vínculo direto"
+                  />
                 </div>
 
                 <div className="form-field">
@@ -1311,6 +1302,24 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
                     onChange={e => setCreateOrigemRefId(e.target.value)}
                   />
                 </div>
+
+                {(createBarragemId || createEmpreendedorId || createProcessoRef) && (
+                  <div className="form-field full">
+                    <ConferenciaDocumentosPanel
+                      compact
+                      criteria={{
+                        barragemId: createBarragemId || undefined,
+                        empreendedorId: createEmpreendedorId || undefined,
+                        processo: createProcessoRef || undefined
+                      }}
+                      commonData={{
+                        empreendedores: safeEmpreendedores,
+                        barragens: safeBarragens,
+                        rts: []
+                      }}
+                    />
+                  </div>
+                )}
 
                 <div className="form-field full">
                   <label>Dados técnicos pré-preenchidos (opcionais, sem documento pessoal)</label>
@@ -1714,24 +1723,16 @@ const SolicitacoesVistoriaContent: React.FC<SolicitacoesVistoriaViewProps> = ({
                         onChange={e => setEditProcessoRef(e.target.value)}
                       />
                     </div>
-                    <div className="form-field">
-                      <label>Barragem cadastrada</label>
-                      <select
-                        className="select"
+                    <div className="form-field full">
+                      <BarragemSelectorField
+                        label="Barragem cadastrada"
+                        barragens={safeBarragens}
+                        empreendedores={safeEmpreendedores}
+                        prioritizeEmpreendedorId={editEmpreendedorId}
                         value={editBarragemId}
-                        onChange={e => setEditBarragemId(e.target.value)}
-                      >
-                        <option value="">Sem vínculo direto</option>
-                        {safeBarragens.map((b, bIdx) => {
-                          const bId = toSafeString(b?.id).trim();
-                          if (!bId) return null;
-                          return (
-                            <option key={`${bId}-${bIdx}`} value={bId}>
-                              {toSafeString(b?.nome).trim() || bId}
-                            </option>
-                          );
-                        })}
-                      </select>
+                        onChange={id => setEditBarragemId(id)}
+                        emptyOptionLabel="Sem vínculo direto"
+                      />
                     </div>
                     <div className="form-field">
                       <label>Empreendedor cadastrado</label>
