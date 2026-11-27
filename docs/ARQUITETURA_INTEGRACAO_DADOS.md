@@ -2,7 +2,7 @@
 
 Este documento registra a arquitetura acordada de governança cadastral e integração entre o **Administra** e os sistemas **Classifica**, **Notifica** e **Fiscaliza** no âmbito da Coordenadoria de Segurança de Barragens (CSB / SURH / SEMA-MT).
 
-> **Escopo desta entrega:** documentação arquitetural de referência e especificação da fundação S2S v2 versionada neste repositório. A migration corretiva incremental `supabase/migrations/20261128_fix_s2s_cadastro_novo_entidade_origens.sql` (que alinha exclusivamente `public.s2s_executar_cadastro_novo` ao schema real de `public.entidade_origens`) está preparada no repositório para revisão e execução controlada — **não** deve ser presumida como aplicada em produção.
+> **Escopo desta entrega:** documentação arquitetural de referência e especificação da fundação S2S v2 versionada neste repositório. A migration corretiva incremental `supabase/migrations/20261127_s2s_v2_fix_cadastro_novo_entidade_origens.sql` (que alinha exclusivamente `public.s2s_executar_cadastro_novo` ao schema real de `public.entidade_origens`) está preparada no repositório para revisão e execução controlada — **não** deve ser presumida como aplicada em produção.
 
 ---
 
